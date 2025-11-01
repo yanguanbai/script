@@ -3,7 +3,7 @@
 // @namespace    Motoori Kashin
 // @version      3.1.0
 // @description  清理 B 站链接垃圾参数，点击分享按钮复制干净链接
-// @author       ChatGPT
+// @author       ChatGPT+Bart
 // @match        *://*.bilibili.com/*
 // @grant        none
 // @run-at       document-start
@@ -63,39 +63,7 @@
         return originalWriteText(text);
     };
 
-    // -------------------- 分享按钮提示 --------------------
-    const boundBtns = new WeakSet();
 
-    function bindShareButton(btn) {
-        if (boundBtns.has(btn)) return;
-        boundBtns.add(btn);
-
-        btn.addEventListener('click', e => {
-            e.stopPropagation();
-            e.preventDefault();
-
-            const cleanLink = cleanURL(location.href);
-
-            navigator.clipboard.writeText(cleanLink)
-                .then(() => showCopied())
-                .catch(() => alert('复制失败'));
-        }, true);
-    }
-
-    function showCopied() {
-        const div = document.createElement('div');
-        div.textContent = '✔ 干净链接已复制';
-        div.style.cssText =
-            'position: fixed; top: 20px; left: 50%; transform: translateX(-50%);' +
-            'background: rgba(0,0,0,0.8); color: #fff; padding: 6px 12px;' +
-            'border-radius: 6px; z-index: 999999; font-size: 13px; font-weight: bold;';
-        document.body.appendChild(div);
-        setTimeout(() => div.remove(), 1500);
-    }
-
-    function observeShareButtons() {
-        document.querySelectorAll('.video-share-icon.video-toolbar-item-icon').forEach(bindShareButton);
-    }
 
     // -------------------- MutationObserver --------------------
     const observer = new MutationObserver(() => {
