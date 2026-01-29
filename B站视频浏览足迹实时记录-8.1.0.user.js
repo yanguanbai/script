@@ -10,6 +10,7 @@
 // @grant         GM_addStyle
 // @run-at        document-end
 // @icon         https://www.bilibili.com/favicon.ico
+// @license MIT
 // ==/UserScript==
 
 (function() {
