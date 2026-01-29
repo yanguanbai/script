@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Bilibili 干净链接 + 分享净化
-// @namespace    Motoori Kashin
+// @namespace    https://greasyfork.org/
 // @version      3.1.0
 // @description  清理 B 站链接垃圾参数，点击分享按钮复制干净链接
 // @author       Bart
