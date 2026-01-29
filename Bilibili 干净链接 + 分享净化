@@ -87,3 +87,7 @@
 
     console.log('Bilibili 干净链接 + 分享净化脚本已加载');
 })();
+    function observeShareButtons() {
+  // noop
+}
+
