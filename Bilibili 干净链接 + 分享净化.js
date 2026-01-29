@@ -3,11 +3,12 @@
 // @namespace    Motoori Kashin
 // @version      3.1.0
 // @description  清理 B 站链接垃圾参数，点击分享按钮复制干净链接
-// @author       ChatGPT+Bart
+// @author       Bart
 // @match        *://*.bilibili.com/*
 // @grant        none
 // @run-at       document-start
 // @icon         https://www.bilibili.com/favicon.ico
+// @license MIT
 // ==/UserScript==
 
 (function () {
