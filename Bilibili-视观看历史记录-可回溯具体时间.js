@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.7.12
-// @description  播放页搜索窗口拖拽逻辑与历史页统一；保留既有功能。
+// @version      5.7.24
+// @description  优化历史搜索规则、界面字号应用和页面高频 DOM 处理。
 // @author       Bart
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/video/*
@@ -23,10 +23,16 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
+// 5.7.24：统一搜索帮助与实际匹配规则；界面字号应用到历史列表/说明卡；合并高频 DOM 观察处理。
+// 5.7.23：修正合成层拖动结束时的最终坐标提交，并完善播放页外部点击保护。
+ // 5.7.17：重做设置窗口滑块为 Astra 风格的粗条渐变液体滑轨，取消圆形按钮；设置窗口改为与脚本其他浮层一致的浅色磨砂玻璃风格。
+// 5.7.16：设置窗口改为液体质感滑块，支持滑块/数值双向精细调节；连续观看时间差限制为 1–180 分钟；播放页移除设置及导入/导出/清理入口，数据管理操作仅保留在历史记录页。
+// 5.7.14：统一播放页与官方历史的观看去重；新增时间/进度差值判定模式和脚本内设置窗口，普通参数不再分散在油猴菜单。
 // 5.7.8：基于5.7.3修复播放页悬浮窗初始化被分集历史读取异常阻断的问题；不改电视剧/番剧存储结构。
 // 5.7.9：系列元数据必须命中当前季；移除错误兜底系列，防止无关季被归入番剧系列；安全拆分未获当前系列确认的旧季归属。
 // 5.7.10：修复 ep 路由切换时沿用旧 active 集节点/前缀相似链接导致分集身份串写；播放页改为精确只读 ep 记录，禁止 UI 读取按 p 回填；timeupdate 只采样播放位置、不反复重读 DOM；番剧无明确季名时不补造季名。
 // 5.7.11：只对电视剧恢复季分组兜底；优先使用明确季名与系列 season 列表顺序，普通番剧仍不自动显示“第1季”。
+// 5.7.13：修复番剧 ep 季 ID 无法从当前 DOM/SSR 精确解析时播放页/官方历史同步写入被跳过的问题；按 ep_id 请求官方季信息作为精确兜底，并且只有真正写入存储后才计为成功。
 // 5.7.12：修复索引展开时把电视剧“第N季”兜底标题也过滤掉的问题；仅番剧隐藏自动生成的季名，电视剧保留 UI 分季标题。
 // 5.7.3：电视剧/番剧按明确的 series.series_id 跨季归组；季度名称保存在分集的小合集字段，旧 ss 容器兼容升级，不新增空字段。
 (function () {
@@ -40,7 +46,7 @@
     // 5. 兼容维护：LegacyMigration、RecordNormalizer、StorageApi 处理旧格式、导入导出、修复与清理。
     // 6. 查询展示：SearchQuery 解析筛选条件，HistoryListRenderer 统一渲染分组/分集/快照列表。
     // 7. 页面 UI：CardDom 识别卡片；PlaybackUI 显示播放页悬浮窗；HistoryPageUI 显示历史记录面板。
-    // 8. 交互与设置：拖动/停靠模块处理悬浮窗位置；菜单模块保存用户可调参数。
+    // 8. 交互与设置：拖动/停靠模块处理悬浮窗位置；脚本内设置窗口统一保存用户可调参数。
     //
     // ============================================================================
     // 本地观看记录统一为"容器"结构：
@@ -76,10 +82,13 @@
     const RECENT_SNAPSHOT_SETTINGS_KEY = 'bvh_recent_snapshot_settings_v1';
     const RECENT_SNAPSHOT_QUOTA_SETTINGS_KEY = 'bvh_recent_snapshot_quota_settings_v1';
     const CONTINUOUS_GAP_SETTINGS_KEY = 'bvh_continuous_gap_settings_v1';
+    const CONTINUOUS_PROGRESS_SETTINGS_KEY = 'bvh_continuous_progress_settings_v1';
+    const CONTINUOUS_MODE_SETTINGS_KEY = 'bvh_continuous_mode_settings_v1';
+    const UI_FONT_SIZE_SETTINGS_KEY = 'bvh_ui_font_size_settings_v1';
 
     // 【模块：统一运行参数】
     // 集中管理记录过期、最近快照数量与来源配额、存储容量、采集间隔、搜索防抖、
-    // 官方历史同步页数、短观看过滤和连续观看合并阈值。设置菜单会按对应配置项读写参数。
+    // 官方历史同步页数、短观看过滤和连续观看合并阈值。脚本内设置窗口按对应配置项读写参数。
     // 配额、缓存上限和时间阈值之间存在配套关系，调整时应同时检查相关注释及使用位置。
     const CONFIG = {
         EXPIRE_DAY: 90,
@@ -115,7 +124,26 @@
         // 连续观看判定：官方历史卡片在该间隔内持续更新、且进度向前推进时，
         // 视为"挂着持续播放的同一次观看"，不累加次数（详见 _isContinuousView）
         CONTINUOUS_GAP_MIN: 30,
+        CONTINUOUS_PROGRESS_DELTA: 5,
+        UI_FONT_SIZE: 16,
+        CONTINUOUS_DEDUP_MODE: 'both', // time：只看时间；progress：只看进度差；both：两项同时满足
     };
+
+    // 同一次观看判定统一入口：时间差、进度差可单独启用，也可要求两项同时满足。
+    // 进度使用绝对差值，避免进度回退/重看被误判为连续推进。
+    function isDuplicateWatchBySettings(lastSnap, newTs, newProgressNum) {
+        const lastTs = Number(lastSnap && lastSnap.ts || 0);
+        const incomingTs = Number(newTs);
+        const oldProgress = parseFloat(lastSnap && lastSnap.progress);
+        const currentProgress = Number(newProgressNum);
+        if (!lastTs || !Number.isFinite(incomingTs) || !Number.isFinite(currentProgress)) return false;
+        const timeMatch = Math.abs(incomingTs - lastTs) <= CONFIG.CONTINUOUS_GAP_MIN * 60000;
+        const progressMatch = Number.isFinite(oldProgress)
+            && Math.abs(currentProgress - oldProgress) <= CONFIG.CONTINUOUS_PROGRESS_DELTA;
+        if (CONFIG.CONTINUOUS_DEDUP_MODE === 'time') return timeMatch;
+        if (CONFIG.CONTINUOUS_DEDUP_MODE === 'progress') return progressMatch;
+        return timeMatch && progressMatch;
+    }
 
     // 【模块：CSV 导入/导出字段定义】
     // 将内部记录字段映射为稳定的 CSV 列名与中文表头，供导出文件和导入解析共用。
@@ -386,6 +414,46 @@
     // 结合页面 URL、页面数据和可用的 DOM 信息，尽可能确定番剧季 ID、媒体 ID 与内容类型。
     // 页面结构会随 B 站版本变化；无法取得某项信息时应允许后续逻辑使用已有记录或其他识别路径。
     const PageData = {
+        // DOM/SSR 无法精确确认当前 ep 所属季时，按 ep_id 查询官方剧集接口。
+        // 缓存以 ep ID 为键，避免 SPA 切集时把上一集的 seasonId 套到当前集。
+        _episodeSeasonIdCache: new Map(),
+        _episodeSeasonIdRequests: new Map(),
+        _episodeSeasonIdLastAttempt: new Map(),
+        _requestEpisodeSeasonId(episodeId) {
+            const id = String(episodeId || '').replace(/^ep/i, '').trim();
+            if (!/^\d+$/.test(id)) return null;
+            if (this._episodeSeasonIdCache.has(id)) return Promise.resolve(this._episodeSeasonIdCache.get(id));
+            if (this._episodeSeasonIdRequests.has(id)) return this._episodeSeasonIdRequests.get(id);
+            const lastAttempt = Number(this._episodeSeasonIdLastAttempt.get(id) || 0);
+            if (Date.now() - lastAttempt < 30000) return null;
+            this._episodeSeasonIdLastAttempt.set(id, Date.now());
+            const request = fetch(`https://api.bilibili.com/pgc/view/web/season?ep_id=${encodeURIComponent(id)}`, {
+                credentials: 'include',
+                cache: 'no-store'
+            }).then(response => {
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return response.json();
+            }).then(json => {
+                const result = json?.result || json?.data?.result || json?.data || null;
+                const seasonId = Number(result?.season_id ?? result?.seasonId) || 0;
+                if (Number(json?.code) !== 0 || !Number.isSafeInteger(seasonId) || seasonId < 1000) return 0;
+                this._episodeSeasonIdCache.set(id, seasonId);
+                // 如果此前暂停时因缺少季 ID 没写成功，通知播放记录模块重新尝试当前集。
+                try {
+                    window.dispatchEvent(new CustomEvent('bvh-bangumi-season-resolved', {
+                        detail: { episodeKey: `ep${id}`, seasonId }
+                    }));
+                } catch (_) {}
+                return seasonId;
+            }).catch(error => {
+                console.warn(`${TAG} [番剧季 ID 解析] 官方 ep_id 查询失败：ep${id}`, error);
+                return 0;
+            }).finally(() => {
+                this._episodeSeasonIdRequests.delete(id);
+            });
+            this._episodeSeasonIdRequests.set(id, request);
+            return request;
+        },
         // 从 B 站页面初始化数据中有限深度地查找 seasonId，避免循环引用导致递归失控。
         resolveBangumiSeasonId() {
             try {
@@ -399,6 +467,8 @@
 
                 const episodeKey = `ep${bangumiMatch[2]}`.toLowerCase();
                 const episodeId = String(bangumiMatch[2]);
+                const cachedSeasonId = Number(this._episodeSeasonIdCache.get(episodeId) || 0);
+                if (cachedSeasonId >= 1000) return cachedSeasonId;
                 // ep 页面优先读取包含当前 ep 链接的分区面板，不读取其他隐藏分区的季标签。
                 const panels = Array.from(document.querySelectorAll('.SectionPanel_panel__rImmk'));
                 // 路由刚切换时，active 标记可能还停留在上一集；只接受 href 中 ep ID 完全一致的面板。
@@ -472,8 +542,9 @@
                     }
                 }
 
-                // 不再用“SSR 里恰好只有一个 seasonId”作为兜底：SPA 切集时全局数据可能仍是上一集，
-                // 唯一 ID 也不等于当前 ep 的归属。没有当前 ep/当前面板的明确关联就返回 null，等待下一次实时读取。
+                // 不用 SSR 中“唯一一个 seasonId”盲猜，防止 SPA 切集时把当前集写入上一季。
+                // 改为按当前 URL 的 ep_id 查询官方接口；返回值按 ep 单独缓存，映射关系明确。
+                this._requestEpisodeSeasonId(episodeId);
                 return null;
             } catch (_) {
                 return null;
@@ -1896,7 +1967,7 @@
         // options 可带：partTitle/partNumber/partTotal/containerTitle/collectionKey/smallCollectionTitle/collectionOrder/isCollection
         // 容器判定：分P(BV?p=N)、明确合集(isCollection/partTotal>1)、或本地已存在同BV容器。
         upsertRecord(key, record, options = {}) {
-            if (!record || typeof record !== 'object') return;
+            if (!record || typeof record !== 'object') return false;
             const episodeKey = String(options.episodeKey || (RecordKey.isEpisodeKey(String(key || '')) ? key : '')).toLowerCase();
             let seasonKey = String(options.seasonKey || (episodeKey && (Number(options.seasonId) || Number(record.seasonId)) ? `ss${Number(options.seasonId) || Number(record.seasonId)}` : '')).toLowerCase();
             // ep 永远是分集身份，不允许落入通用合集分支而生成 ep-key 的 collection 容器。
@@ -1948,19 +2019,20 @@
                         && oldEpisode.parts.length > 1;
                     if (unsafeLegacyCollection) {
                         console.warn(`${TAG} [番剧分集写入] ${episodeKey} 存在无法安全识别的旧多分集容器，暂不覆盖或删除以避免丢数据。`);
-                        return;
+                        return false;
                     }
                     const container = this._mergeEpisodeIntoSeason(seasonKey, episodeKey, record, options);
+                    if (!container || container.type !== 'collection' || !Array.isArray(container.parts)) return false;
                     this.set(seasonKey, container);
                     // 只有能确定旧 ep 键的数据已并入当前分集时才删除重复键。
                     if (GM_getValue(episodeKey, null) !== null && (!oldEpisode || oldEpisode.type !== 'collection' || oldEpisode.parts.length === 1)) this.deleteRaw(episodeKey);
-                    return;
+                    return true;
                 }
                 // ep 只能作为 ss.parts[] 内的分集身份，绝不再写成独立顶层记录。
                 // 如果页面没有提供 seasonId，且本地也找不到该 ep 所属 ss，则停止本次写入；
                 // 旧 ep 键原样保留，等待后续有明确归属时迁移，避免丢失观看事实。
                 console.warn(`${TAG} [番剧分集写入] ${episodeKey} 未能确定所属 ss 整季，跳过写入以避免生成独立 ep 记录或错误归季。`);
-                return;
+                return false;
             }
             const s = String(key || '');
             let bv = s, p = 1;
@@ -1974,7 +2046,7 @@
             if (!shouldContainer) {
                 // 普通视频写入前统一归一化：自动省略空的合集/分集专用字段，不改变观看事实。
                 this.set(s, RecordNormalizer.normalize(record) || record);
-                return;
+                return true;
             }
             // 首次建容器前，把本地已存在的同BV扁平记录（BV 单视频、BV?p=*）一并并入，避免丢失。
             if (!hasContainer) {
@@ -1997,7 +2069,7 @@
                 partNumber: Number(options.partNumber) || p,
                 partTotal
             });
-            if (!container) return;
+            if (!container) return false;
             this.set(bv, container);
             // 旧扁平分P键若存在且与容器键不同 → 删除（已并入容器；用 deleteRaw 避免容器感知误删刚并入的 part）
             for (const k of GM_listValues()) {
@@ -2007,6 +2079,7 @@
                     if (m && m[1] === bv && GM_getValue(k, null) !== null) this.deleteRaw(k);
                 }
             }
+            return true;
         },
 
         // 番剧/电视剧统一使用整季 ss 容器，单集 ep 作为 parts[] 中的独立观看实体。
@@ -3564,7 +3637,7 @@
     //   次数>=3          观看次数比较：支持 次数>5  观看<=2  count:>=10
     //   进度>50          最后进度比较（百分比数值）：支持 进度=100  progress:<80
     //   2024-05-01       时间匹配：年 / 年月 / 年月日，命中任一快照时间
-    //   快照:45%         只在快照内容（时间+进度+位置）里检索
+    //   快照:45%         只在快照内容（时间+进度+位置+完播状态）里检索
     //
     // 示例：
     //   "次数>=3 进度>50"        → 看过至少 3 次、且进度超过 50% 的
@@ -3640,20 +3713,20 @@
                 return this.compare(c.op, m ? Number(m[0]) : 0, c.value);
             });
         },
-        // 判断记录快照时间是否命中输入的日期条件。
+        // 判断记录中任一观看时间是否命中日期条件；历史记录不能只看最后一次观看时间。
         matchTime(q, watchTimeStr, ts) {
             const timeConds = q.conditions.filter(c => c.type === 'time');
             if (!timeConds.length) return true;
-            const formatted = watchTimeStr || TimeTool.formatTimestamp(ts);
-            // 多个时间条件按"或"处理：命中任意一个日期即可
-            return timeConds.some(c => formatted.includes(c.needle));
+            const values = Array.isArray(watchTimeStr) ? watchTimeStr : [watchTimeStr || TimeTool.formatTimestamp(ts)];
+            // 多个时间条件及同一记录的多个快照都按"或"处理。
+            return timeConds.some(c => values.some(value => String(value || '').includes(c.needle)));
         },
         // 把快照时间、进度和播放位置合并检索，检查快照条件是否全部命中。
         matchSnapshot(q, snapshots) {
             const snapConds = q.conditions.filter(c => c.type === 'snapshot');
             if (!snapConds.length) return true;
             const snapText = (snapshots || [])
-            .map(s => `${s.watchTimeStr || ''} ${s.progress || ''} ${s.pos ?? ''}`)
+            .map(s => `${s.watchTimeStr || ''} ${s.progress || ''} ${s.pos ?? ''} ${s.completed ? '已看完 完播' : ''}`)
             .join(' ')
             .toLowerCase();
             return snapConds.every(c => snapText.includes(c.needle));
@@ -3923,8 +3996,11 @@
                     if (!parts.totalcount.every(c => SearchQuery.compare(c.op, groupTotals.get(group) || 0, c.value))) return false;
                 }
                 if (parts.progress.length && !SearchQuery.matchProgress(query, it.lastProgress)) return false;
-                if (parts.time.length
-                    && !SearchQuery.matchTime(query, TimeTool.formatTimestamp(it.lastTs), it.lastTs)) return false;
+                if (parts.time.length) {
+                    const times = (it.snapshots || []).map(s => s.watchTimeStr || TimeTool.formatTimestamp(s.ts));
+                    if (it.lastTs) times.push(TimeTool.formatTimestamp(it.lastTs));
+                    if (!SearchQuery.matchTime(query, times, it.lastTs)) return false;
+                }
                 if (parts.snapshot.length && !SearchQuery.matchSnapshot(query, it.snapshots)) return false;
                 return true;
             };
@@ -4706,7 +4782,14 @@
                     const key = ident.key;
                     bvid = key;
                     const existingSyncEntry = RecordStore.readSyncRecord(key);
-                    const seasonId = Number(detectedSeasonId) || (RecordKey.isSeasonKey(existingSyncEntry?.bv) ? Number(String(existingSyncEntry.bv).replace(/^ss/i, '')) : 0);
+                    // readSyncRecord 对 ep 返回的 bv 是 ep 本身；整季容器键实际在 seasonKey。
+                    let seasonId = Number(detectedSeasonId)
+                        || (RecordKey.isSeasonKey(existingSyncEntry?.seasonKey) ? Number(String(existingSyncEntry.seasonKey).replace(/^ss/i, '')) : 0)
+                        || (RecordKey.isSeasonKey(existingSyncEntry?.bv) ? Number(String(existingSyncEntry.bv).replace(/^ss/i, '')) : 0);
+                    // 官方历史页不在当前 ep 播放页，DOM 无法直接解析所属季时按该 ep 单独查官方接口。
+                    if (ident.type === 'bangumi' && RecordKey.isEpisodeKey(key) && seasonId < 1000) {
+                        seasonId = Number(await PageData._requestEpisodeSeasonId(key)) || 0;
+                    }
 
                     const parsedOfficialTime = TimeTool.parseWatchTime(dateText, nowTs);
                     if (!parsedOfficialTime.valid || !parsedOfficialTime.ts) {
@@ -4724,7 +4807,7 @@
 
                     if (!localRecord || typeof localRecord !== 'object') {
                         // 首次创建：直接用官方卡片信息，watchCount=1；分P键经 upsertRecord 归入合集容器。
-                        RecordStore.upsertRecord(key, {
+                        const writeSucceeded = RecordStore.upsertRecord(key, {
                             title,
                             collectionTitle: '',
                             titleSource: 'official',
@@ -4749,6 +4832,11 @@
                         }, ident.type === 'bangumi' && RecordKey.isEpisodeKey(ident.key) && seasonId
                             ? { episodeKey: ident.key, seasonKey: `ss${seasonId}`, seasonId, partTitle: title || '' }
                             : {});
+                        if (writeSucceeded !== true) {
+                            skipCount++;
+                            console.warn(`${TAG} [写入] 新增记录未实际写入，已计入跳过：${key}，seasonId=${seasonId || 0}`);
+                            continue;
+                        }
                         addCount++;
                         console.log(`${TAG} [写入] 新增 ${key} | ${watchTimeStr} | ${progress}`);
                         if (ident.type === 'bangumi') bangumiTouched = true;
@@ -4775,16 +4863,20 @@
                             (best, s) => (!best || Number(s.ts || 0) > Number(best.ts || 0)) ? s : best,
                             null
                         );
-                        const sameMinuteSnap = localRecord.snapshots.find(snap =>
-                                                                          Number(snap.ts) > 0 && minuteKeyOf(snap.ts) === officialMinute
-                                                                         );
-                        // 本地快照精确到秒，官方历史时间精度较低。
-                        // 同一视频的官方时间与本地快照相差不超过前后 60 秒时，
-                        // 视为同一条记录，保留本地快照，不用官方时间覆盖，也不新增观看次数。
-                        const nearbyLocalSnap = localRecord.snapshots.find(snap => {
-                            const localTs = Number(snap && snap.ts || 0);
-                            return localTs > 0 && Math.abs(localTs - officialTs) <= 60 * 1000;
-                        });
+                        const sameMinuteSnap = CONFIG.CONTINUOUS_DEDUP_MODE !== 'progress'
+                            ? localRecord.snapshots.find(snap =>
+                                Number(snap.ts) > 0 && minuteKeyOf(snap.ts) === officialMinute
+                                && this._isContinuousView(snap, officialTs, officialProgressNum))
+                            : null;
+                        // 本地快照精确到秒，官方历史时间精度较低；只有当前判定模式允许时间条件，
+                        // 且进度差也满足当前模式时，才使用 ±60 秒精度窗口避免跨来源重复。
+                        const nearbyLocalSnap = CONFIG.CONTINUOUS_DEDUP_MODE !== 'progress'
+                            ? localRecord.snapshots.find(snap => {
+                                const localTs = Number(snap && snap.ts || 0);
+                                return localTs > 0 && Math.abs(localTs - officialTs) <= 60 * 1000
+                                    && this._isContinuousView(snap, officialTs, officialProgressNum);
+                            })
+                            : null;
 
                         let snapshotChanged = false;
                         let isNewView = false;
@@ -4865,9 +4957,14 @@
                         // 写入前统一走一次去重，防止历史遗留的重复快照继续存在
                         localRecord.snapshots = RecordNormalizer.keepSnapshotsWithinLimit(localRecord.snapshots);
 
-                        RecordStore.upsertRecord(key, localRecord, ident.type === 'bangumi' && RecordKey.isEpisodeKey(ident.key) && seasonId
+                        const writeSucceeded = RecordStore.upsertRecord(key, localRecord, ident.type === 'bangumi' && RecordKey.isEpisodeKey(ident.key) && seasonId
                             ? { episodeKey: ident.key, seasonKey: `ss${seasonId}`, seasonId, partTitle: title || '' }
                             : {});
+                        if (writeSucceeded !== true) {
+                            skipCount++;
+                            console.warn(`${TAG} [写入] 更新记录未实际写入，已计入跳过：${key}，seasonId=${seasonId || 0}`);
+                            continue;
+                        }
                         updateCount++;
                         console.log(`${TAG} [写入] ${isNewView ? '计为新观看' : '更新已有官方记录'} ${key} | ${watchTimeStr} | ${progress}`);
                         if (ident.type === 'bangumi') bangumiTouched = true;
@@ -4922,21 +5019,9 @@
             return summary;
         },
 
-        // 判定"挂着持续播放"是否为同一次观看：
-        // 条件 1：与最新快照的时间间隔不超过 CONFIG.CONTINUOUS_GAP_MIN 分钟。
-        //         挂着刷剧时官方卡片每分钟都在更新，间隔必然很小；
-        //         隔天/隔几小时回看，间隔以小时计，自然被排除。
-        // 条件 2：进度必须向前推进（允许相等，容忍卡片 0%/刷新抖动）。
-        //         短时间内重看一个视频，进度会从后面回到前面（往回走），
-        //         进度一回退就说明是新的观看，不能算连续播放。
+        // 时间/进度差值的统一判定；播放页写入也调用同一规则，避免不同入口各算各的。
         _isContinuousView(lastSnap, newTs, newProgressNum) {
-            const lastTs = Number(lastSnap && lastSnap.ts || 0);
-            const lastProgressNum = parseFloat(lastSnap && lastSnap.progress) || 0;
-            if (!lastTs || !Number.isFinite(Number(newTs))) return false;
-            const gapMs = Number(newTs) - lastTs;
-            if (gapMs < 0) return true;   // 时间倒流视为同源重复读数，不算新观看
-            if (gapMs > CONFIG.CONTINUOUS_GAP_MIN * 60000) return false;
-            return newProgressNum >= lastProgressNum;
+            return isDuplicateWatchBySettings(lastSnap, newTs, newProgressNum);
         }
     };
 
@@ -4951,7 +5036,6 @@
     function startPlaybackRecorder() {
         let recordTimer = null;
         let activeRecordKey = null;
-        let hasCountedThisSession = false;
         let hasSavedSnapshotThisSession = false;
         let endingWasVisible = false;
         let lastEndingSavedKey = null;
@@ -4963,7 +5047,6 @@
         const resetForVideo = key => {
             activeRecordKey = key;
             playbackFloatRefreshedAfterSave = false;
-            hasCountedThisSession = false;
             hasSavedSnapshotThisSession = false;
             endingWasVisible = false;
             lastEndingSavedKey = null;
@@ -5947,28 +6030,34 @@
                 if (context.seasonId) record.seasonId = context.seasonId;
                 if (context.isBangumi) record.mediaType = (record.mediaType && record.mediaType !== '视频') ? record.mediaType : PageData.resolveBangumiMediaType();
 
-                if (!hasCountedThisSession) {
-                    record.watchCount = Math.max(0, Number(record.watchCount) || 0) + 1;
-                    hasCountedThisSession = true;
-                    StorageApi.checkStorageWarn();
-                }
-                if (pos >= CONFIG.SHORT_WATCH_MAX_POS_SEC || completed) record.hasReachedWatchThreshold = true;
-                applyPlayerTitle(record, titleInfo);
-                applyCollectionInfo(record, collectionInfo);
-                CardDom.mergeAuthorMetadata(record, CardDom.extractAuthorFromVideoPage());
-
-                RecordNormalizer.appendSnapshot(record, {
+                const snapshots = Array.isArray(record.snapshots) ? record.snapshots : (record.snapshots = []);
+                const latestSnapshot = snapshots.reduce((best, snap) =>
+                    (!best || Number(snap.ts || 0) > Number(best.ts || 0)) ? snap : best, null);
+                const duplicateWatch = !!latestSnapshot
+                    && isDuplicateWatchBySettings(latestSnapshot, nowTs, parseFloat(progress) || 0);
+                const snapshotData = {
                     ts: nowTs,
                     pos: completed ? duration : pos,
                     progress,
                     watchTimeStr: TimeTool.formatTimestamp(nowTs),
                     ...(completed ? { completed: true } : {}),
                     source: 'player'
-                });
+                };
+                if (duplicateWatch) {
+                    // 刷新/重新进入同一视频时，更新最近一次观看快照，不重复追加快照和次数。
+                    Object.assign(latestSnapshot, snapshotData);
+                } else {
+                    record.watchCount = Math.max(0, Number(record.watchCount) || 0) + 1;
+                    RecordNormalizer.appendSnapshot(record, snapshotData);
+                }
+                if (pos >= CONFIG.SHORT_WATCH_MAX_POS_SEC || completed) record.hasReachedWatchThreshold = true;
+                applyPlayerTitle(record, titleInfo);
+                applyCollectionInfo(record, collectionInfo);
+                CardDom.mergeAuthorMetadata(record, CardDom.extractAuthorFromVideoPage());
                 record.lastTs = nowTs;
                 record.lastProgress = progress;
 
-                RecordStore.upsertRecord(key, record, {
+                const writeSucceeded = RecordStore.upsertRecord(key, record, {
                     ...(context.episodeKey ? {
                         episodeKey: context.episodeKey,
                         seasonKey: context.seasonKey || (Number(collectionInfo?.seasonId) > 0 ? `ss${Number(collectionInfo.seasonId)}` : ''),
@@ -5985,6 +6074,15 @@
                     collectionOrder: collectionInfo?.collectionOrder || 0,
                     ...(context.isBangumi && collectionInfo?.episodeNumberVerified !== true ? { disallowLegacyPartFallback: true } : {})
                 });
+                if (writeSucceeded !== true) {
+                    console.warn(`${TAG} [播放记录] 本次检查点未写入，保留重试机会：${key}`, {
+                        episodeKey: context.episodeKey || '',
+                        seasonId: Number(context.seasonId) || Number(collectionInfo?.seasonId) || 0,
+                        reason
+                    });
+                    return false;
+                }
+                if (!duplicateWatch) StorageApi.checkStorageWarn();
 
                 lastSavedCheckpoint = { key, pos, progress };
                 const playbackFloat = document.getElementById('bvh-status-float');
@@ -6010,7 +6108,6 @@
                 if (lastActiveContext) savePlaybackCheckpoint(lastActiveContext, 'switch');
                 lastActiveContext = null;
                 activeRecordKey = null;
-                hasCountedThisSession = false;
                 hasSavedSnapshotThisSession = false;
                 lastSavedCheckpoint = null;
                 endingWasVisible = false;
@@ -6063,6 +6160,23 @@
             lastVideoElement = context.video;
         };
 
+        window.addEventListener('bvh-bangumi-season-resolved', event => {
+            const detail = event?.detail || {};
+            const episodeKey = String(detail.episodeKey || '').toLowerCase();
+            const seasonId = Number(detail.seasonId) || 0;
+            if (!RecordKey.isEpisodeKey(episodeKey) || seasonId < 1000) return;
+            const active = lastActiveContext;
+            if (!active || active.episodeKey !== episodeKey || !active.video?.paused) return;
+            const parsed = RecordKey.parse(window.location.href);
+            if (!parsed || parsed.key !== episodeKey) return;
+            const freshContext = getCurrentContext();
+            if (!freshContext || freshContext.episodeKey !== episodeKey) return;
+            // 事件到达时 URL 仍指向同一集，使用新鲜季 ID 和播放器状态重试此前失败的暂停保存。
+            freshContext.seasonId = seasonId;
+            freshContext.seasonKey = `ss${seasonId}`;
+            savePlaybackCheckpoint(freshContext, 'pause');
+        });
+
         const attachVideoEvents = () => {
             const video = getPlayableMediaElement();
             if (!video) return;
@@ -6084,13 +6198,12 @@
             loop();
         };
 
+        let mutationFrame = 0;
+        let collectionRepairQueued = false;
         const observer = new MutationObserver(mutations => {
-            // 播放器 class/style 高频变化与合集数据无关，不应触发整库扫描或播放记录循环。
+            // B 站播放器会连续改写 DOM；同一帧只处理一次，避免每个小节点变化都读播放器元数据。
             const childMutations = mutations.filter(mutation => mutation.type === 'childList');
             if (!childMutations.length) return;
-            attachVideoEvents();
-            loop();
-            // 仅在选集列表结构真正增删时重扫；忽略进度条、按钮样式等属性变化。
             const collectionChanged = childMutations.some(mutation => {
                 const target = mutation.target?.nodeType === 1 ? mutation.target : mutation.target?.parentElement;
                 if (target?.closest?.('.video-pod__list, .video-pod__body')) return true;
@@ -6098,7 +6211,17 @@
                     node.nodeType === 1 && (node.matches?.('.video-pod') || node.querySelector?.('.video-pod'))
                 );
             });
-            if (collectionChanged) scheduleCollectionRepair(500);
+            collectionRepairQueued = collectionRepairQueued || collectionChanged;
+            if (mutationFrame) return;
+            mutationFrame = requestAnimationFrame(() => {
+                mutationFrame = 0;
+                attachVideoEvents();
+                loop();
+                if (collectionRepairQueued) {
+                    collectionRepairQueued = false;
+                    scheduleCollectionRepair(500);
+                }
+            });
         });
         if (document.body) observer.observe(document.body, { childList: true, subtree: true });
 
@@ -6144,6 +6267,7 @@
             if (lastActiveContext) savePlaybackCheckpoint(lastActiveContext, 'exit');
             clearInterval(recordTimer);
             if (collectionRepairTimer !== null) clearTimeout(collectionRepairTimer);
+            if (mutationFrame) cancelAnimationFrame(mutationFrame);
             observer.disconnect();
             window.removeEventListener('popstate', onRouteChange);
             history.pushState = originalPushState;
@@ -6407,11 +6531,18 @@
         };
 
         observeCards();
+        let cardObserveFrame = 0;
+        const cardObserveRoots = new Set();
         const cardMutationObserver = new MutationObserver(mutations => {
-            mutations.forEach(mutation => {
-                mutation.addedNodes.forEach(node => {
-                    if (node.nodeType === Node.ELEMENT_NODE) observeCards(node);
-                });
+            mutations.forEach(mutation => mutation.addedNodes.forEach(node => {
+                if (node.nodeType === Node.ELEMENT_NODE) cardObserveRoots.add(node);
+            }));
+            if (cardObserveFrame || !cardObserveRoots.size) return;
+            cardObserveFrame = requestAnimationFrame(() => {
+                cardObserveFrame = 0;
+                const roots = [...cardObserveRoots];
+                cardObserveRoots.clear();
+                roots.forEach(observeCards);
             });
         });
         cardMutationObserver.observe(document.body, { childList: true, subtree: true });
@@ -6457,6 +6588,7 @@
 
         window.addEventListener('beforeunload', () => {
             cardMutationObserver.disconnect();
+            if (cardObserveFrame) cancelAnimationFrame(cardObserveFrame);
             cardObserver.disconnect();
             window.removeEventListener(RECORD_CHANGE_EVENT, onRecordChanged);
             window.removeEventListener(RECORD_CHANGE_EVENT, invalidateBadgeIndex);
@@ -6488,6 +6620,7 @@
             preventDefault = false,
             animateOnEnd = true,
             suppressClickAfterDrag = false,
+            transformDuringDrag = false,
             canStart = null,
             onStart = null,
             onEnd = null
@@ -6499,23 +6632,30 @@
         let current = null;
         let target = null;
 
-        const clampLeft = v => Math.max(allowFlushLeft ? 0 : margin, Math.min(window.innerWidth - el.offsetWidth - margin, v));
-        const clampTop = v => Math.max(margin, Math.min(window.innerHeight - el.offsetHeight - margin, v));
+        const clampLeft = (v, width = el.offsetWidth) => Math.max(allowFlushLeft ? 0 : margin, Math.min(window.innerWidth - width - margin, v));
+        const clampTop = (v, height = el.offsetHeight) => Math.max(margin, Math.min(window.innerHeight - height - margin, v));
 
         const animate = () => {
             raf = 0;
             if (!current || !target) return;
             current.left += (target.left - current.left) * easing;
             current.top += (target.top - current.top) * easing;
-            el.style.left = `${current.left}px`;
-            el.style.top = `${current.top}px`;
+            if (transformDuringDrag && drag) {
+                const original = drag.originalTransform && drag.originalTransform !== 'none' ? `${drag.originalTransform} ` : '';
+                el.style.transform = `${original}translate3d(${current.left - drag.left}px, ${current.top - drag.top}px, 0)`;
+            } else {
+                el.style.left = `${current.left}px`;
+                el.style.top = `${current.top}px`;
+            }
             const remaining = Math.abs(target.left - current.left) + Math.abs(target.top - current.top);
             if (remaining > threshold) {
                 raf = requestAnimationFrame(animate);
             } else {
                 current = { ...target };
-                el.style.left = `${target.left}px`;
-                el.style.top = `${target.top}px`;
+                if (!(transformDuringDrag && drag)) {
+                    el.style.left = `${target.left}px`;
+                    el.style.top = `${target.top}px`;
+                }
                 if (!drag) {
                     current = null;
                     target = null;
@@ -6533,7 +6673,9 @@
             drag = {
                 pointerId: e.pointerId,
                 x: e.clientX, y: e.clientY,
-                left: rect.left, top: rect.top
+                left: rect.left, top: rect.top,
+                width: rect.width, height: rect.height,
+                originalTransform: el.style.transform
             };
             current = { left: rect.left, top: rect.top };
             target = { left: rect.left, top: rect.top };
@@ -6544,31 +6686,41 @@
             el.style.left = `${rect.left}px`;
             el.style.top = `${rect.top}px`;
             el.style.bottom = 'auto';
-            // 不在按下时捕获指针：整个浮窗捕获会改变链接点击的目标，导致链接被当成拖拽容器点击。
-            // 真正越过拖拽阈值后才捕获，普通点击仍由原始链接接收。
+            // Window-level move/up listeners track the pointer without changing its event target.
             if (preventDefault) e.preventDefault();
             if (onStart) onStart(el);
         });
 
-        handle.addEventListener('pointermove', e => {
+        const move = e => {
             if (!drag || e.pointerId !== drag.pointerId) return;
             const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
             if (!didMove && Math.abs(dx) + Math.abs(dy) > 4) {
                 didMove = true;
-                el.classList.add('bvh-dragging');
-                try { handle.setPointerCapture?.(e.pointerId); } catch (_) { /* 捕获失败不影响拖拽 */ }
+                el.classList.add(transformDuringDrag ? 'bvh-compositor-dragging' : 'bvh-dragging');
             }
             if (!didMove) return;
-            target.left = clampLeft(drag.left + dx);
-            target.top = clampTop(drag.top + dy);
+            target.left = clampLeft(drag.left + dx, drag.width);
+            target.top = clampTop(drag.top + dy, drag.height);
             if (!raf) raf = requestAnimationFrame(animate);
-        });
+        };
 
         const end = e => {
             if (!drag || (e?.pointerId != null && e.pointerId !== drag.pointerId)) return;
+            const finishedDrag = drag;
+            const completedTarget = target ? { ...target } : null;
             drag = null;
-            el.classList.remove('bvh-dragging');
-            if (animateOnEnd && target) {
+            el.classList.remove('bvh-dragging', 'bvh-compositor-dragging');
+            if (transformDuringDrag && target) {
+                if (raf) { cancelAnimationFrame(raf); raf = 0; }
+                target.left = clampLeft(target.left, finishedDrag.width);
+                target.top = clampTop(target.top, finishedDrag.height);
+                el.style.left = `${target.left}px`;
+                el.style.top = `${target.top}px`;
+                el.style.transform = finishedDrag.originalTransform;
+                current = null;
+                target = null;
+                el.style.transition = '';
+            } else if (animateOnEnd && target) {
                 target.left = clampLeft(target.left);
                 target.top = clampTop(target.top);
                 if (!raf) raf = requestAnimationFrame(animate);
@@ -6579,10 +6731,14 @@
                     target.top = clampTop(target.top);
                 }
             }
-            if (onEnd) onEnd(didMove, target, el);
+            if (onEnd) onEnd(didMove, completedTarget, el);
         };
-        handle.addEventListener('pointerup', end);
-        handle.addEventListener('pointercancel', end);
+        // Window-level listeners keep the interaction alive if pointer capture is rejected or lost.
+        window.addEventListener('pointermove', move, { passive: !preventDefault });
+        window.addEventListener('pointerup', end);
+        window.addEventListener('pointercancel', end);
+        handle.addEventListener('lostpointercapture', end);
+        window.addEventListener('blur', () => end());
 
         if (suppressClickAfterDrag) {
             el.addEventListener('click', e => {
@@ -6598,6 +6754,17 @@
             isDragging: () => !!drag,
             getDidMove: () => didMove
         };
+    }
+
+    function positionSearchHelp(help, button) {
+        const rect = button.getBoundingClientRect();
+        const margin = 16;
+        const left = Math.max(margin, Math.min(window.innerWidth - help.offsetWidth - margin, rect.right - help.offsetWidth));
+        const below = rect.bottom + 8;
+        const top = below + help.offsetHeight <= window.innerHeight - margin
+            ? below : Math.max(margin, rect.top - help.offsetHeight - 8);
+        help.style.left = `${left}px`;
+        help.style.top = `${top}px`;
     }
 
     // 为指定卡片提供原生尺寸调整，并把用户最后一次调整的宽高保存到脚本本地设置。
@@ -6903,21 +7070,135 @@
             #bvh-status-float.bvh-docked:focus-within > * { opacity: 1; pointer-events: auto; transition-delay: .08s; }
 
             #bvh-menu-panel {
-                position: fixed; bottom: 80px; left: 20px;
-                background: rgba(255,255,255,.78); color: #30323a;
-                border: 1px solid rgba(255,255,255,.75); border-radius: 16px;
-                box-shadow: 0 12px 36px rgba(35,25,40,.16);
-                backdrop-filter: blur(18px) saturate(1.3);
-                -webkit-backdrop-filter: blur(18px) saturate(1.3);
-                padding: 12px; z-index: 10001; display: none; max-width: 320px;
+                position:fixed; bottom:80px; left:20px; width:246px; box-sizing:border-box;
+                padding:13px; z-index:10001; display:none; overflow:hidden;
+                color:#39343d; border:1px solid rgba(255,255,255,.82); border-radius:17px;
+                background:rgba(255,255,255,.82); box-shadow:0 14px 38px rgba(35,25,40,.18),inset 0 1px 0 rgba(255,255,255,.9);
+                backdrop-filter:blur(22px) saturate(1.4); -webkit-backdrop-filter:blur(22px) saturate(1.4);
+                animation:bvh-panel-in .24s cubic-bezier(.2,1,.3,1) both;
             }
+            .bvh-playback-menu-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:0 1px 11px; }
+            .bvh-playback-menu-head strong { color:#45404a; font-size:13px; letter-spacing:.2px; }
+            .bvh-playback-menu-head span { padding:3px 7px; border-radius:20px; color:#d7658b; background:rgba(251,114,153,.10); font-size:9px; letter-spacing:.5px; }
+            .bvh-playback-storage { padding:9px 10px 10px; margin-bottom:9px; border:1px solid rgba(120,105,130,.10); border-radius:11px; background:rgba(255,255,255,.46); }
+            #bvh-menu-panel .bvh-storage-info { margin:0 0 8px; padding:0; border:0; color:#77717c; font-size:10px; line-height:1.5; }
+            .bvh-storage-meter { height:5px; overflow:hidden; border-radius:10px; background:rgba(150,140,155,.15); box-shadow:inset 0 1px 2px rgba(65,55,75,.08); }
+            .bvh-storage-meter i { display:block; height:100%; width:0; border-radius:inherit; background:linear-gradient(90deg,#fb7299,#f6a0b9); box-shadow:0 0 8px rgba(251,114,153,.28); transition:width .25s ease; }
+            #bvh-menu-panel .bvh-warn-text { margin-top:7px; color:#d7655b; font-size:10px; }
+            #bvh-menu-panel .bvh-playback-actions { display:grid; grid-template-columns:1fr; gap:7px; }
             #bvh-menu-panel button {
-                display: block; width: 100%; margin: 5px 0; padding: 7px 10px;
-                border: 1px solid rgba(220,220,228,.8); border-radius: 10px;
-                background: rgba(255,255,255,.62); color: #3a3940; cursor: pointer;
-                transition: background .2s ease, border-color .2s ease, transform .2s ease;
+                display:block; width:100%; margin:0; padding:9px 11px; border:1px solid rgba(220,210,220,.75);
+                border-radius:10px; background:rgba(255,255,255,.62); color:#514852; font-size:12px;
+                cursor:pointer; transition:background .2s ease,border-color .2s ease,transform .2s ease,box-shadow .2s ease;
             }
-            #bvh-menu-panel button:hover { background: #fff0f5; border-color: #ffc2d2; transform: translateY(-1px); }
+            #bvh-menu-panel button:hover { background:#fff0f5; border-color:#ffc2d2; color:#d85e87; transform:translateY(-1px); box-shadow:0 4px 12px rgba(251,114,153,.10); }
+            #bvh-menu-panel #bvh-show-history { border-color:rgba(251,114,153,.32); background:linear-gradient(110deg,rgba(251,114,153,.14),rgba(255,255,255,.78)); color:#c85d83; font-weight:650; }
+
+
+            /* 设置窗口：浅色磨砂玻璃面板，B站粉色液体滑轨与数值输入共用同一数值。 */
+            #bvh-settings-overlay { position:fixed; inset:0; z-index:10050; display:none; align-items:center; justify-content:center; padding:16px; background:rgba(35,25,40,.25); backdrop-filter:blur(8px) saturate(1.2); -webkit-backdrop-filter:blur(8px) saturate(1.2); }
+            .bvh-settings-dialog { width:min(680px,calc(100vw - 24px)); max-height:min(86vh,820px); display:flex; flex-direction:column; overflow:hidden; border:1px solid rgba(255,255,255,.82); border-radius:20px; background:rgba(255,255,255,.82); color:#30323a; box-shadow:0 18px 55px rgba(35,25,40,.22),inset 0 1px 0 rgba(255,255,255,.92); backdrop-filter:blur(24px) saturate(1.4); -webkit-backdrop-filter:blur(24px) saturate(1.4); }
+            .bvh-settings-header,.bvh-settings-footer { display:flex; align-items:center; justify-content:space-between; padding:17px 21px; border-bottom:1px solid rgba(80,75,95,.10); }
+            .bvh-settings-header { background:linear-gradient(105deg,rgba(251,114,153,.12),rgba(255,255,255,.12) 65%,rgba(130,155,255,.10)); }
+            .bvh-settings-heading { display:flex; flex-direction:column; gap:0; }
+            .bvh-settings-header strong { color:#30323a; font-size:16px; letter-spacing:.4px; }
+            .bvh-settings-header small { color:#8a8490; font-size:10px; letter-spacing:1.5px; text-transform:uppercase; }
+            .bvh-settings-header button { border:1px solid rgba(110,100,120,.15); border-radius:10px; width:32px; height:32px; cursor:pointer; background:rgba(255,255,255,.58); color:#6d6671; font-size:20px; transition:.2s ease; box-shadow:inset 0 1px 0 rgba(255,255,255,.8); }
+            .bvh-settings-header button:hover { color:#fb7299; background:rgba(255,255,255,.9); border-color:rgba(251,114,153,.35); transform:rotate(90deg); }
+            .bvh-settings-body { overflow:auto; padding:12px 21px 18px; scrollbar-width:thin; scrollbar-color:rgba(150,130,155,.4) transparent; }
+            .bvh-setting-group { padding:13px 0 16px; border-bottom:1px solid rgba(80,75,95,.10); }
+            .bvh-setting-group h4 { display:flex; align-items:center; gap:9px; margin:2px 0 15px; color:#665d6b; font-size:12px; letter-spacing:1px; }
+            .bvh-setting-group h4:before { content:""; width:3px; height:13px; border-radius:3px; background:linear-gradient(#fb7299,#9c8bff); box-shadow:0 0 9px rgba(251,114,153,.28); }
+            .bvh-setting-row { display:grid; grid-template-columns:minmax(155px, .9fr) minmax(230px,1.1fr); align-items:center; gap:20px; margin:17px 0; font-size:12px; }
+            .bvh-setting-row > span { display:flex; align-items:center; gap:7px; color:#45404a; }
+            .bvh-setting-row small { color:#d7658b; cursor:help; font-size:12px; transition:color .2s; }
+            .bvh-setting-row small:hover { color:#a94c70; }
+            .bvh-setting-row b { margin-left:auto; color:#c75e83; white-space:nowrap; font-variant-numeric:tabular-nums; }
+            .bvh-setting-control { display:grid; grid-template-columns:minmax(0,1fr) 78px; align-items:center; gap:13px; min-width:0; }
+            .bvh-liquid-slider { position:relative; height:46px; display:flex; align-items:center; min-width:0; isolation:isolate; padding:0 2px; touch-action:none; }
+            .bvh-liquid-track { position:absolute; left:2px; right:2px; top:15px; height:12px; transform:translateY(-50%); overflow:hidden; border-radius:99px; background:linear-gradient(180deg,rgba(120,112,130,.19),rgba(150,140,155,.12)); border:1px solid rgba(120,112,135,.13); box-shadow:inset 0 2px 4px rgba(65,55,75,.12),0 1px 0 rgba(255,255,255,.85); }
+            .bvh-liquid-fill { position:absolute; inset:0 auto 0 0; width:50%; border-radius:99px; background:linear-gradient(90deg,#fb7299 0%,#ff8eaa 58%,#f7a4bd 100%); box-shadow:0 0 10px rgba(251,114,153,.30); transition:width .12s cubic-bezier(.22,.8,.24,1),filter .2s ease; }
+            .bvh-liquid-fill:before { content:""; position:absolute; inset:1px 2px auto 2px; height:42%; border-radius:99px; background:linear-gradient(90deg,rgba(255,255,255,.72),rgba(255,255,255,.22),rgba(255,255,255,.55)); opacity:.82; }
+            .bvh-liquid-fill:after { content:""; position:absolute; top:-5px; right:-10px; width:26px; height:24px; border-radius:50%; background:rgba(255,255,255,.32); filter:blur(5px); }
+            .bvh-liquid-slider:after { content:""; position:absolute; left:var(--bvh-thumb-position,50%); top:15px; width:19px; height:19px; transform:translate(-50%,-50%); border:2px solid rgba(255,255,255,.98); border-radius:50%; background:linear-gradient(145deg,#fff 0%,#ffe4ec 38%,#fb7299 100%); box-shadow:0 2px 7px rgba(190,75,115,.25),0 0 0 3px rgba(251,114,153,.13),inset 0 1px 2px rgba(255,255,255,.95); pointer-events:none; transition:transform .18s cubic-bezier(.2,.8,.2,1),box-shadow .18s ease; z-index:3; }
+            .bvh-liquid-slider:active:after { transform:translate(-50%,-50%) scale(1.12); box-shadow:0 3px 10px rgba(190,75,115,.3),0 0 0 5px rgba(251,114,153,.13),inset 0 1px 2px rgba(255,255,255,.95); }
+            .bvh-liquid-slider input[type=range] { position:absolute; inset:0; z-index:2; width:100%; height:100%; margin:0; opacity:0; cursor:grab; pointer-events:none; appearance:none; -webkit-appearance:none; }
+            .bvh-liquid-slider input[type=range]:active { cursor:grabbing; }
+            .bvh-liquid-slider input[type=range]::-webkit-slider-thumb { appearance:none; -webkit-appearance:none; width:28px; height:28px; }
+            .bvh-liquid-slider input[type=range]::-moz-range-thumb { width:28px; height:28px; border:0; background:transparent; }
+            .bvh-slider-markers { position:absolute; inset:0; z-index:4; pointer-events:none; }
+            .bvh-slider-node { position:absolute; top:15px; width:16px; height:16px; padding:0; border:0; border-radius:50%; transform:translate(-50%,-50%); background:transparent; cursor:pointer; pointer-events:auto; }
+            .bvh-slider-node:after { content:""; position:absolute; left:50%; top:50%; width:5px; height:5px; transform:translate(-50%,-50%); border:1px solid rgba(255,255,255,.95); border-radius:50%; background:#d8cbd1; box-shadow:0 1px 2px rgba(80,50,65,.18); transition:all .16s ease; }
+            .bvh-slider-node span { position:absolute; left:50%; top:13px; transform:translateX(-50%); color:#92838b; font-size:9px; line-height:12px; white-space:nowrap; font-variant-numeric:tabular-nums; pointer-events:none; }
+            .bvh-slider-node:hover:after,.bvh-slider-node.is-active:after { width:8px; height:8px; border-color:#fff; background:#fb7299; box-shadow:0 0 0 2px rgba(251,114,153,.16),0 0 7px rgba(251,114,153,.42); }
+            .bvh-slider-node.is-active span { color:#d95f87; font-weight:700; }
+            .bvh-setting-number { width:78px; box-sizing:border-box; padding:8px 7px; border:1px solid rgba(120,105,130,.18); border-radius:11px; outline:none; background:rgba(255,255,255,.58); color:#39333d; text-align:center; font-size:12px; font-variant-numeric:tabular-nums; box-shadow:inset 0 1px 3px rgba(75,60,85,.06),0 1px 0 rgba(255,255,255,.8); transition:border-color .2s,box-shadow .2s,background .2s; }
+            .bvh-setting-number:focus { border-color:rgba(251,114,153,.65); background:rgba(255,255,255,.92); box-shadow:0 0 0 3px rgba(251,114,153,.12),0 3px 12px rgba(80,60,90,.08); }
+            .bvh-setting-row select { width:100%; padding:9px 11px; border:1px solid rgba(120,105,130,.18); border-radius:10px; outline:none; background:rgba(255,255,255,.65); color:#39333d; transition:border-color .2s,box-shadow .2s; }
+            .bvh-setting-row select:focus { border-color:rgba(251,114,153,.65); box-shadow:0 0 0 3px rgba(251,114,153,.12); }
+            .bvh-setting-note { margin:8px 0 0; padding:10px 12px; border:1px solid rgba(120,105,130,.12); border-radius:10px; background:rgba(255,255,255,.38); color:#77717c; font-size:11px; line-height:1.7; }
+            .bvh-settings-footer { justify-content:flex-end; gap:9px; border-top:1px solid rgba(80,75,95,.10); border-bottom:0; background:rgba(255,255,255,.22); }
+            .bvh-settings-footer button { padding:9px 17px; border:1px solid rgba(120,105,130,.16); border-radius:10px; background:rgba(255,255,255,.58); cursor:pointer; color:#655d68; transition:.2s ease; }
+            .bvh-settings-footer button:hover { background:rgba(255,255,255,.92); color:#38313b; }
+            .bvh-settings-footer [data-save] { border-color:rgba(251,114,153,.55); background:linear-gradient(110deg,#fb7299,#e98db0); color:#fff; box-shadow:0 5px 18px rgba(251,114,153,.22); }
+            .bvh-settings-footer [data-save]:hover { filter:brightness(1.04); transform:translateY(-1px); box-shadow:0 8px 22px rgba(251,114,153,.28); }
+            @media (max-width:560px) { .bvh-settings-dialog { border-radius:17px; } .bvh-settings-header,.bvh-settings-footer { padding-left:15px; padding-right:15px; } .bvh-settings-body { padding:9px 15px 14px; } .bvh-setting-row { grid-template-columns:1fr; gap:8px; margin:14px 0; } .bvh-setting-control { grid-template-columns:minmax(0,1fr) 72px; } .bvh-setting-number { width:72px; } }
+
+            /* 5.7.19：整体放大设置排版；粗滑轨作为主体，节点刻度浮在轨道上方，点击后由弹性过渡缓慢归位。 */
+            .bvh-settings-dialog { width:min(820px,calc(100vw - 28px)); max-height:min(90vh,920px); border-radius:24px; }
+            .bvh-settings-header,.bvh-settings-footer { padding:21px 27px; }
+            .bvh-settings-header strong { font-size:20px; letter-spacing:.2px; }
+            .bvh-settings-header button { width:38px; height:38px; font-size:23px; }
+            .bvh-settings-body { padding:18px 28px 24px; }
+            .bvh-settings-intro { display:flex; align-items:flex-start; gap:15px; margin:2px 0 20px; padding:17px 19px; border:1px solid rgba(251,114,153,.20); border-radius:16px; background:linear-gradient(115deg,rgba(255,235,242,.82),rgba(255,255,255,.62) 62%,rgba(244,240,255,.60)); box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 5px 18px rgba(180,125,150,.07); }
+            .bvh-settings-intro-mark { display:flex; flex:0 0 34px; width:34px; height:34px; align-items:center; justify-content:center; border-radius:11px; color:#fff; font-size:19px; background:linear-gradient(145deg,#fb7299,#e88bb0); box-shadow:0 5px 14px rgba(251,114,153,.25); }
+            .bvh-settings-intro strong { display:block; margin:0 0 5px; color:#51404a; font-size:15px; font-weight:750; }
+            .bvh-settings-intro p { margin:0; color:#756a74; font-size:13px; line-height:1.8; }
+            .bvh-setting-group { padding:17px 0 20px; }
+            .bvh-setting-group h4 { margin:3px 0 19px; font-size:15px; letter-spacing:.5px; }
+            .bvh-setting-group h4:before { width:4px; height:17px; }
+            .bvh-setting-row { grid-template-columns:minmax(190px,.85fr) minmax(310px,1.15fr); gap:25px; margin:23px 0; font-size:14px; }
+            .bvh-setting-row > span { gap:9px; color:#403943; font-size:14px; font-weight:600; }
+            .bvh-setting-row small { font-size:14px; }
+            .bvh-setting-row b { font-size:14px; }
+            .bvh-setting-control { grid-template-columns:minmax(0,1fr) 88px; gap:16px; }
+            .bvh-liquid-slider { height:64px; padding:0 3px; }
+            .bvh-liquid-track { left:0; right:0; top:22px; height:20px; border-width:1px; box-shadow:inset 0 3px 6px rgba(65,55,75,.13),0 1px 0 rgba(255,255,255,.9); }
+            .bvh-liquid-fill { transition:width .58s cubic-bezier(.16,1.22,.3,1),filter .35s ease; }
+            .bvh-liquid-slider:after { top:22px; width:24px; height:24px; left:var(--bvh-thumb-position,50%); transition:left .58s cubic-bezier(.16,1.22,.3,1),transform .25s cubic-bezier(.2,1.5,.35,1),box-shadow .25s ease; z-index:7; }
+            .bvh-liquid-slider:active:after { transform:translate(-50%,-50%) scale(1.16,.94); }
+            .bvh-liquid-slider input[type=range] { cursor:grab; }
+            .bvh-liquid-slider.bvh-pointer-dragging .bvh-liquid-fill,
+            .bvh-liquid-slider.bvh-pointer-dragging:after { transition:none; }
+            .bvh-slider-markers { z-index:8; }
+            .bvh-slider-node { top:22px; width:22px; height:22px; z-index:9; }
+            .bvh-slider-node:after { width:7px; height:7px; border:1.5px solid rgba(255,255,255,.98); background:#d66c91; box-shadow:0 0 0 1px rgba(255,255,255,.7),0 1px 3px rgba(80,50,65,.22); }
+            .bvh-slider-node span { top:20px; color:#82747d; font-size:11px; line-height:15px; }
+            .bvh-slider-node:hover:after,.bvh-slider-node.is-active:after { width:10px; height:10px; background:#fff; border-color:#fb7299; box-shadow:0 0 0 3px rgba(251,114,153,.25),0 0 10px rgba(251,114,153,.48); }
+            .bvh-slider-node.is-active span { color:#d65380; font-size:11px; }
+            .bvh-setting-number { width:88px; padding:10px 8px; border-radius:12px; font-size:14px; }
+            .bvh-setting-row select { padding:11px 13px; font-size:14px; }
+            .bvh-setting-note { margin:13px 0 3px; padding:15px 17px; border-radius:14px; background:linear-gradient(110deg,rgba(255,240,245,.78),rgba(255,255,255,.62)); color:#655b66; font-size:13px; line-height:1.85; box-shadow:inset 0 1px 0 rgba(255,255,255,.85); }
+            .bvh-settings-footer button { padding:11px 20px; font-size:14px; border-radius:12px; }
+            .bvh-settings-dialog { --bvh-setting-font-size: 16px; }
+            .bvh-setting-row, .bvh-setting-row > span, .bvh-setting-row select, .bvh-setting-group h4, .bvh-settings-intro strong, .bvh-settings-intro p, .bvh-setting-note { font-size: var(--bvh-setting-font-size) !important; }
+            .bvh-setting-row b, .bvh-setting-row small { font-size: calc(var(--bvh-setting-font-size) * .9) !important; }
+            .bvh-settings-intro p, .bvh-setting-note { line-height: 1.75; }
+            .bvh-setting-tooltip { position:fixed; z-index:2147483001; box-sizing:border-box; width:min(440px,calc(100vw - 32px)); margin:0; padding:15px 18px; pointer-events:auto; }
+            .bvh-setting-tooltip[hidden] { display:none !important; }
+            .bvh-setting-tooltip .bvh-settings-intro-mark { flex-basis:30px; width:30px; height:30px; font-size:16px; }
+            .bvh-setting-tooltip p { font-size:calc(var(--bvh-ui-font-size, 16px) * .9375); line-height:1.75; }
+            .bvh-playback-menu-head { min-height:25px; cursor:grab; user-select:none; touch-action:none; }
+            #bvh-menu-panel.bvh-dragging .bvh-playback-menu-head { cursor:grabbing; }
+            .bvh-menu-drag-hint { padding:4px 8px !important; border:1px solid rgba(251,114,153,.16); border-radius:8px !important; color:#d7658b !important; background:rgba(251,114,153,.09) !important; font-size:10px !important; letter-spacing:0 !important; }
+            @media (max-width:560px) {
+                .bvh-settings-dialog { width:calc(100vw - 20px); max-height:92vh; }
+                .bvh-settings-header,.bvh-settings-footer { padding:15px 17px; }
+                .bvh-settings-body { padding:13px 17px 18px; }
+                .bvh-setting-row { grid-template-columns:1fr; gap:8px; margin:18px 0; }
+                .bvh-setting-control { grid-template-columns:minmax(0,1fr) 78px; }
+                .bvh-setting-number { width:78px; }
+            }
 
             .bvh-storage-info {
                 font-size: 12px; color: #555; margin-bottom: 6px;
@@ -6935,12 +7216,15 @@
                 padding: 42px 12px 12px; z-index: 10002; display: none; overflow: hidden;
                 box-sizing: border-box; flex-direction: column;
                 max-height: calc(100vh - 16px);
-                animation: bvh-panel-in .32s cubic-bezier(.2,1.2,.35,1) both;
+                animation: bvh-panel-in .32s cubic-bezier(.2,1.2,.35,1);
             }
             #bvh-history-panel:before {
-                content: "本地观看历史"; position: absolute; left: 15px; top: 13px;
-                color: #e95f89; font-size: 13px; font-weight: 700; letter-spacing: .2px;
+                content: ""; position: absolute; left: 15px; top: 13px;
             }
+            .bvh-playback-history-dragbar { position:absolute; top:7px; left:12px; right:42px; height:30px; display:flex; align-items:center; gap:9px; cursor:grab; user-select:none; touch-action:none; }
+            .bvh-playback-history-dragbar strong { color:#e95f89; font-size:13px; font-weight:700; }
+            .bvh-playback-history-dragbar:active { cursor:grabbing; }
+            .bvh-playback-history-dragbar:after { content:"⠿ 拖动"; color:#c75e83; font-size:11px; font-weight:600; padding:3px 7px; border:1px solid rgba(251,114,153,.18); border-radius:7px; background:rgba(251,114,153,.08); }
             #bvh-history-close {
                 position: absolute; top: 9px; right: 10px; width: 25px; height: 25px;
                 border: 0; border-radius: 50%; background: rgba(251,114,153,.14);
@@ -6950,7 +7234,7 @@
             #bvh-history-close:hover { background: rgba(251,114,153,.28); transform: rotate(90deg) scale(1.08); }
             @keyframes bvh-panel-in {
                 from { opacity: 0; transform: translateY(9px) scale(.985); }
-                to { opacity: 1; transform: translateY(0) scale(1); }
+                to { opacity: 1; transform: none; }
             }
 
             .bvh-search-row { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; margin-bottom: 8px; flex: 0 0 auto; }
@@ -6964,7 +7248,14 @@
                 border-color: #fb7299; box-shadow: 0 0 0 3px rgba(251,114,153,.12);
             }
             .bvh-search-help-btn { flex: 0 0 28px; width: 28px; height: 28px; padding: 0; border: 1px solid #fb7299; border-radius: 50%; background: rgba(251,114,153,.12); color: #d94f7b; font-weight: 700; cursor: pointer; }
-            .bvh-search-help { position: absolute; z-index: 10020; top: calc(100% + 4px); right: 0; width: min(360px, calc(100vw - 48px)); padding: 10px 12px; border: 1px solid rgba(225,220,228,.95); border-radius: 10px; background: #fff; color: #30323a; box-shadow: 0 8px 24px rgba(35,25,40,.18); font-size: 12px; line-height: 1.65; white-space: normal; user-select: text; }
+            .bvh-search-help { position: fixed; z-index: 2147483000; top: 0; left: 0; box-sizing:border-box; width: min(600px, calc(100vw - 32px)); max-height: min(64vh, 520px); overflow:auto; padding: 18px 20px; border: 1px solid rgba(225,220,228,.95); border-radius: 13px; background: rgba(255,255,255,.99); color: #30323a; box-shadow: 0 12px 32px rgba(35,25,40,.22); font-size:calc(var(--bvh-ui-font-size, 16px) * .9375); line-height: 1.8; white-space: normal; user-select: text; }
+            .bvh-search-help[hidden] { display:none !important; }
+            .bvh-search-help-head { position:sticky; top:-18px; z-index:1; display:flex; justify-content:space-between; align-items:center; margin:-18px -20px 12px; padding:13px 18px; border-bottom:1px solid rgba(225,220,228,.8); background:rgba(255,255,255,.98); color:#b44f75; font-size:calc(var(--bvh-ui-font-size, 16px) * 1.0625); font-weight:700; }
+            .bvh-search-help-head button { width:30px; height:30px; border:0; border-radius:8px; background:rgba(251,114,153,.10); color:#b44f75; font-size:20px; cursor:pointer; }
+            .bvh-search-help-head button:hover { background:rgba(251,114,153,.2); }
+            .bvh-search-help-section + .bvh-search-help-section { margin-top:12px; padding-top:11px; border-top:1px solid rgba(225,220,228,.72); }
+            .bvh-search-help-section strong { display:block; margin-bottom:4px; color:#51404a; font-size:calc(var(--bvh-ui-font-size, 16px) * .9375); }
+            .bvh-search-help-section p { margin:0; color:#625b65; }
 
             #bvh-history-list, #bvh-hp-list {
                 overflow-y: auto; border: 1px solid rgba(235,228,235,.8);
@@ -7053,7 +7344,7 @@
             @keyframes bvh-record-dialog-in { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 
             .bvh-history-item {
-                font-size: 12px; padding: 7px 5px; border-radius: 10px;
+                font-size: calc(var(--bvh-ui-font-size, 16px) * .75); padding: 7px 5px; border-radius: 10px;
                 line-height: 1.5; cursor: pointer; list-style: none;
                 transition: background-color .24s ease, box-shadow .28s ease, transform .28s cubic-bezier(.2,.75,.25,1), border-color .24s ease;
             }
@@ -7074,9 +7365,9 @@
             .bvh-group-head:hover { background: rgba(251,239,249,.72); }
             .bvh-group-main { min-width: 0; flex: 1 1 auto; }
             .bvh-group-title-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-            .bvh-group-title { font-size: 12px; font-weight: 650; color: #393640; line-height: 1.55; overflow-wrap: anywhere; transition: color .2s ease; }
+            .bvh-group-title { font-size: calc(var(--bvh-ui-font-size, 16px) * .75); font-weight: 650; color: #393640; line-height: 1.55; overflow-wrap: anywhere; transition: color .2s ease; }
             .bvh-group-head:hover .bvh-group-title { color: #b44f83; }
-            .bvh-group-latest { margin-top: 6px; color: #88818d; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+            .bvh-group-latest { margin-top: 6px; color: #88818d; font-size: calc(var(--bvh-ui-font-size, 16px) * .6875); line-height: 1.65; overflow-wrap: anywhere; }
             .bvh-group-toggle { flex: 0 0 auto; border: 1px solid rgba(220,211,223,.9); border-radius: 8px; padding: 5px 8px; background: rgba(247,244,249,.9); color: #766a7c; font-size: 11px; cursor: pointer; transition: background .22s ease, border-color .22s ease, transform .22s ease; }
             .bvh-group-toggle:hover { background: #f0eaf3; border-color: #d6c8dc; transform: translateY(-1px); }
             .bvh-group-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
@@ -7108,7 +7399,7 @@
             .bvh-part-row:hover { background: #fff; border-color: rgba(220,185,231,.92); border-left-color: #bd79ce; box-shadow: 0 3px 9px rgba(91,56,104,.085); transform: translateX(2px) scale(1.003); }
             .bvh-part-row.is-detail-open { background: rgba(255,255,255,.96); border-color: rgba(220,185,231,.8); }
             .bvh-part-main-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
-            .bvh-part-title { min-width: 0; flex: 1 1 auto; color: #393640; font-size: 11px; font-weight: 550; line-height: 1.55; overflow-wrap: anywhere; }
+            .bvh-part-title { min-width: 0; flex: 1 1 auto; color: #393640; font-size: calc(var(--bvh-ui-font-size, 16px) * .6875); font-weight: 550; line-height: 1.55; overflow-wrap: anywhere; }
             .bvh-part-row:hover .bvh-part-title { color: #a54ebd; }
             .bvh-part-detail-toggle { flex: 0 0 auto; padding: 2px 5px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #9b8ba2; font-size: 10px; cursor: pointer; transition: background .18s ease, color .18s ease, border-color .18s ease; }
             .bvh-part-detail-toggle:hover { color: #a54ebd; border-color: #e7c9ef; background: #fbf1ff; }
@@ -7157,7 +7448,7 @@
                 transition: opacity .32s ease, transform .52s cubic-bezier(.22,1,.36,1);
             }
             #bvh-history-page-panel.bvh-hp-show {
-                display: block; animation: bvh-panel-in .38s cubic-bezier(.22,1,.36,1) both;
+                display: block; animation: bvh-panel-in .38s cubic-bezier(.22,1,.36,1);
             }
             /* 调整尺寸时暂停昂贵的毛玻璃与子树绘制；半透明遮罩只负责遮住内容，不再执行 backdrop-filter。 */
             #bvh-history-panel.bvh-resizing,
@@ -7184,13 +7475,35 @@
                 isolation: isolate !important;
                 will-change: left, top;
             }
+            #bvh-history-panel.bvh-compositor-dragging,
+            #bvh-history-page-panel.bvh-compositor-dragging {
+                transition: none !important;
+                animation: none !important;
+                backdrop-filter: none !important;
+                -webkit-backdrop-filter: none !important;
+                box-shadow: 0 8px 24px rgba(35,25,40,.14) !important;
+                background: rgba(245,240,245,.96) !important;
+                contain: strict !important;
+                isolation: isolate !important;
+                will-change: transform;
+            }
             #bvh-history-panel.bvh-dragging > *,
-            #bvh-history-page-panel.bvh-dragging > * { visibility: hidden !important; }
+            #bvh-history-page-panel.bvh-dragging > *,
+            #bvh-history-panel.bvh-compositor-dragging > *,
+            #bvh-history-page-panel.bvh-compositor-dragging > * { visibility: hidden !important; }
             #bvh-history-panel.bvh-dragging::before,
-            #bvh-history-page-panel.bvh-dragging::before {
+            #bvh-history-page-panel.bvh-dragging::before,
+            #bvh-history-panel.bvh-compositor-dragging::before,
+            #bvh-history-page-panel.bvh-compositor-dragging::before {
                 content: "移动搜索卡片";
                 position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
                 color: #d94f7b; font-size: 13px; font-weight: 600; pointer-events: none;
+            }
+            #bvh-history-panel.bvh-compositor-dragging,
+            #bvh-history-page-panel.bvh-compositor-dragging {
+                transition:none !important; animation:none !important; backdrop-filter:none !important;
+                -webkit-backdrop-filter:none !important; background:rgba(245,240,245,.96) !important;
+                box-shadow:0 8px 24px rgba(35,25,40,.14) !important; will-change:transform;
             }
             /* 调整期间直接移除列表与控件子树，避免超长列表继续参与每一帧布局；结束后自动恢复。 */
             #bvh-history-panel.bvh-resizing > *,
@@ -7217,7 +7530,7 @@
                 padding: 10px 14px;
                 background: linear-gradient(135deg, rgba(251,114,153,.94) 0%, rgba(255,158,187,.88) 100%);
                 color: #fff; border-radius: 18px 18px 0 0; font-size: 13px; font-weight: 600;
-                cursor: grab; user-select: none;
+                cursor: grab; user-select: none; touch-action:none;
             }
             #bvh-hp-drag-bar:active { cursor: grabbing; }
             #bvh-hp-close-btn {
@@ -7399,6 +7712,14 @@
         const desiredHeight = Math.max(160, Math.min(460, viewportH - margin * 2));
         const anchorRect = anchor?.getBoundingClientRect();
         const candidates = [];
+        const blockers = [...document.querySelectorAll('[role="dialog"], .bpx-player-dialog, .bpx-player-popup, .bpx-player-toast-wrap')]
+            .filter(el => el !== panel && !panel.contains(el) && !el.contains(panel))
+            .map(el => {
+                const style = getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0
+                    && rect.width > 0 && rect.height > 0 ? rect : null;
+            }).filter(Boolean);
 
         // 左右位置可使用完整视口高度；上下位置受锚点与视口边缘之间的实际空间限制。
         if (anchorRect) {
@@ -7430,6 +7751,9 @@
                 ? Math.max(0, Math.min(left + width, anchorRect.right) - Math.max(left, anchorRect.left))
                     * Math.max(0, Math.min(top + height, anchorRect.bottom) - Math.max(top, anchorRect.top))
                 : 0;
+            const blockerOverlap = blockers.reduce((area, rect) => area
+                + Math.max(0, Math.min(left + width, rect.right) - Math.max(left, rect.left))
+                * Math.max(0, Math.min(top + height, rect.bottom) - Math.max(top, rect.top)), 0);
             const fitsDesiredHeight = availableHeight >= desiredHeight;
             const fitsDesiredWidth = width >= maxWidth - 1;
             const clipped = Math.max(0, desiredHeight - height);
@@ -7437,8 +7761,9 @@
                 + (fitsDesiredWidth ? 100000 : width * 100)
                 + height * width
                 - overlap * 20
+                - blockerOverlap * 40
                 - clipped * 1000;
-            return { ...candidate, left, top, width, height, maxHeight: availableHeight, overlap, score };
+            return { ...candidate, left, top, width, height, maxHeight: availableHeight, overlap, blockerOverlap, score };
         };
         const best = candidates.map(scoreCandidate).sort((a, b) => b.score - a.score)[0];
         if (!best) return;
@@ -7498,30 +7823,41 @@
             const recordCount = ByteTool._cache.recordCount;
             const warnHtml = usedByte > CONFIG.STORAGE_WARN_THRESHOLD ? `<div class="bvh-warn-text">⚠️ 存储快满</div>` : '';
             menuPanel.innerHTML = `
-                <div class="bvh-storage-info">存储：已用 ${usedStr} / 剩余 ${freeStr} / 总条数 ${recordCount}</div>
-                ${warnHtml}
-                <button id="bvh-show-history">打开历史列表</button>
-                <button id="bvh-export">导出全部JSON备份</button>
-                <button id="bvh-export-csv">导出CSV表格</button>
-                <button id="bvh-import">导入JSON备份</button>
-                <button id="bvh-clean-expire">清理已备份过期记录（${CONFIG.EXPIRE_DAY}天）</button>
-                <button id="bvh-del-current">删除本条(p)记录</button>
-                <button id="bvh-del-all">清空全部记录</button>
+                <div class="bvh-playback-menu-head" title="按住这里可拖动面板"><strong>当前视频</strong><span class="bvh-menu-drag-hint">⠿ 拖动</span></div>
+                <div class="bvh-playback-storage">
+                    <div class="bvh-storage-info">存储：已用 ${usedStr} / 剩余 ${freeStr} / 总条数 ${recordCount}</div>
+                    <div class="bvh-storage-meter"><i style="width:${Math.min(100, usedByte / Math.max(1, CONFIG.STORAGE_MAX_BYTE) * 100)}%"></i></div>
+                    ${warnHtml}
+                </div>
+                <div class="bvh-playback-actions">
+                    <button id="bvh-show-history">查看本地历史</button>
+                    <button id="bvh-del-current">删除本条记录</button>
+                </div>
             `;
             document.body.appendChild(menuPanel);
+            // 播放页精简菜单只允许从标题栏拖动，避免点击按钮时误触拖拽。
+            makeDraggable(menuPanel, menuPanel.querySelector('.bvh-playback-menu-head'), {
+                preventDefault: true,
+                easing: 0.24,
+                animateOnEnd: true,
+                suppressClickAfterDrag: true
+            });
 
             const historyPanel = document.createElement('div');
             historyPanel.id = 'bvh-history-panel';
             historyPanel.innerHTML = `
+                <div class="bvh-playback-history-dragbar"><strong>本地观看历史</strong></div>
                 <button id="bvh-history-close" type="button" title="关闭历史记录" aria-label="关闭历史记录">×</button>
                 <div class="bvh-search-row">
                     <input id="bvh-history-search" placeholder="搜索标题、作者、BV号或条件…" aria-label="搜索本地观看历史">
                     <button class="bvh-search-help-btn" type="button" aria-label="查看搜索规则" aria-expanded="false">!</button>
-                    <div class="bvh-search-help" hidden>普通搜索：标题、作者、BV号、标签、分集等任意字段包含关键词即可；多个词用空格分开，全部满足才显示。次数>=3、总观看>=10、总次数>5、观看<5、count:!=2；也支持 合集观看>=20；进度>50、progress:<=80；时间可写 2024、2024-05、2024-05-01、05-01；快照:45%、snap:2024-05。条件之间用空格分隔。比较符支持 >、<、>=、<=、=、!=；不认识的写法会按普通关键词搜索。</div>
+                        <div class="bvh-search-help" hidden><div class="bvh-search-help-head"><span>搜索规则</span><button type="button" aria-label="关闭搜索说明">×</button></div><section class="bvh-search-help-section"><strong>关键词</strong><p>标题、作者、BV号、标签、分集等字段都可搜索。空格分隔的普通关键词必须全部命中。</p></section><section class="bvh-search-help-section"><strong>次数与进度</strong><p>次数示例：次数&gt;=3、总观看&gt;=10、观看&lt;5、count:!=2。进度示例：进度&gt;50、progress:&lt;=80。比较符支持 &gt;、&lt;、&gt;=、&lt;=、=、!=。</p></section><section class="bvh-search-help-section"><strong>时间与快照</strong><p>时间可写 2024、2024-05、2024-05-01、05-01，也可写 时间:2024-05 或 time:2024-05。多个日期条件按“任一命中”处理。快照可写 快照:45%、snap:2024-05 或 快照:已看完；快照条件需全部命中。无法识别的写法会按普通关键词处理。</p></section></div>
                 </div>
                 <ul id="bvh-history-list"></ul>
             `;
             document.body.appendChild(historyPanel);
+            const playbackSearchHelp = historyPanel.querySelector('.bvh-search-help');
+            document.body.appendChild(playbackSearchHelp);
             setupPersistentResize(historyPanel, 'BVH_PANEL_SIZE_PLAYBACK_V1', { minWidth: 300, minHeight: 220, maxWidth: 760, maxHeight: 900 });
             historyPanel.addEventListener('bvh-resize-start', () => {
                 historyPanel.dataset.bvhUserPositioned = 'true';
@@ -7540,15 +7876,21 @@
 
             // 搜索规则放在输入框旁边，点“!”展开说明；点击面板其他位置时不额外干扰搜索。
             const playbackSearch = historyPanel.querySelector('#bvh-history-search');
-            playbackSearch.addEventListener('input', () => {
+            const renderPlaybackSearch = debounce(() => {
                 HistoryListRenderer.renderInto(document.getElementById('bvh-history-list'), playbackSearch.value, 'playback');
                 requestAnimationFrame(() => autoPositionPlaybackPanel(historyPanel, document.getElementById('bvh-status-float')));
-            });
+            }, 120);
+            playbackSearch.addEventListener('input', renderPlaybackSearch);
             historyPanel.querySelector('.bvh-search-help-btn').addEventListener('click', e => {
                 const button = e.currentTarget;
-                const help = historyPanel.querySelector('.bvh-search-help');
+                const help = playbackSearchHelp;
                 help.hidden = !help.hidden;
+                if (!help.hidden) positionSearchHelp(help, button);
                 button.setAttribute('aria-expanded', String(!help.hidden));
+            });
+            playbackSearchHelp.querySelector('button').addEventListener('click', () => {
+                playbackSearchHelp.hidden = true;
+                historyPanel.querySelector('.bvh-search-help-btn').setAttribute('aria-expanded', 'false');
             });
 
             historyPanel.querySelector('#bvh-history-close').addEventListener('click', e => {
@@ -7565,10 +7907,12 @@
                 }
             });
 
-            // 播放页搜索窗口复用历史页的 makeDraggable：同样使用 easing=1 直接跟手、松手不补间。
+            // 播放页搜索窗口复用历史页的 makeDraggable：标题栏直接跟手，松手不补间。
             // 仍只允许拖动窗口顶部 38px 的空白区域，搜索框、按钮和结果列表不触发拖拽。
             let playbackPanelDragging = false;
             let playbackPanelLayoutTimer = null;
+            let playbackPanelJustDragged = false;
+            let playbackPanelClickGuardTimer = null;
             const schedulePlaybackPanelLayout = () => {
                 if (playbackPanelDragging) return;
                 clearTimeout(playbackPanelLayoutTimer);
@@ -7576,20 +7920,21 @@
                     if (!playbackPanelDragging) autoPositionPlaybackPanel(historyPanel, document.getElementById('bvh-status-float'));
                 }, 80);
             };
-            makeDraggable(historyPanel, historyPanel, {
+            makeDraggable(historyPanel, historyPanel.querySelector('.bvh-playback-history-dragbar'), {
                 preventDefault: true,
                 easing: 1,
                 animateOnEnd: false,
-                canStart: (e, el) => {
-                    if (el.dataset.bvhResizeActive === 'true') return false;
-                    if (e.target.closest('input, button, ul, li, a, textarea, select')) return false;
-                    const rect = el.getBoundingClientRect();
-                    return e.clientY <= rect.top + 38;
-                },
+                transformDuringDrag: true,
+                canStart: (e, el) => el.dataset.bvhResizeActive !== 'true',
                 onStart: () => { playbackPanelDragging = true; },
                 onEnd: didMove => {
                     playbackPanelDragging = false;
-                    if (didMove) historyPanel.dataset.bvhUserPositioned = 'true';
+                    if (didMove) {
+                        historyPanel.dataset.bvhUserPositioned = 'true';
+                        playbackPanelJustDragged = true;
+                        clearTimeout(playbackPanelClickGuardTimer);
+                        playbackPanelClickGuardTimer = setTimeout(() => { playbackPanelJustDragged = false; }, 350);
+                    }
                     historyPanel.style.transition = '';
                     schedulePlaybackPanelLayout();
                 }
@@ -7597,14 +7942,26 @@
             window.addEventListener('resize', schedulePlaybackPanelLayout);
             const playbackListObserver = new MutationObserver(schedulePlaybackPanelLayout);
             playbackListObserver.observe(historyPanel.querySelector('#bvh-history-list'), { childList: true, subtree: true });
+            document.addEventListener('click', e => {
+                if (historyPanel.contains(e.target) || playbackSearchHelp.contains(e.target) || document.getElementById('bvh-menu-panel')?.contains(e.target)) return;
+                schedulePlaybackPanelLayout();
+            }, true);
+            document.addEventListener('keydown', schedulePlaybackPanelLayout, true);
 
             document.addEventListener('click', function globalClosePanels(e) {
+                if (playbackPanelJustDragged) {
+                    playbackPanelJustDragged = false;
+                    clearTimeout(playbackPanelClickGuardTimer);
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    return;
+                }
                 if (e.button === 2) return;
                 const menu = document.getElementById('bvh-menu-panel');
                 const hist = document.getElementById('bvh-history-panel');
                 const floatBox = document.getElementById('bvh-status-float');
                 if (!floatBox || !menu || !hist) return;
-                if (floatBox.contains(e.target) || menu.contains(e.target) || hist.contains(e.target)) return;
+                if (floatBox.contains(e.target) || menu.contains(e.target) || hist.contains(e.target) || playbackSearchHelp.contains(e.target)) return;
                 menu.style.display = 'none';
                 hist.style.display = 'none';
                 floatBox.dataset.bvhPanelOpen = 'false';
@@ -7662,8 +8019,10 @@
                     const recordCount = ByteTool._cache.recordCount;
                     const warn = ub > CONFIG.STORAGE_WARN_THRESHOLD ? `<div class="bvh-warn-text">⚠️ 存储快满</div>` : '';
                     panel.querySelector('.bvh-storage-info').innerText = `存储：已用 ${us} / 剩余 ${fs} / 总条数 ${recordCount}`;
+                    const meterFill = panel.querySelector('.bvh-storage-meter > i');
+                    if (meterFill) meterFill.style.width = `${Math.min(100, ub / Math.max(1, CONFIG.STORAGE_MAX_BYTE) * 100)}%`;
                     panel.querySelector('.bvh-warn-text')?.remove();
-                    if (warn) panel.insertAdjacentHTML('afterbegin', warn);
+                    if (warn) panel.querySelector('.bvh-playback-storage')?.insertAdjacentHTML('beforeend', warn);
                     hp.style.display = 'none';
                     panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
                     syncPlaybackDockLock();
@@ -7705,12 +8064,7 @@
                     HistoryListRenderer.renderInto(document.getElementById('bvh-history-list'), document.getElementById('bvh-history-search')?.value || '', 'playback');
                     if (hp.style.display !== 'none') requestAnimationFrame(() => autoPositionPlaybackPanel(hp, document.getElementById('bvh-status-float')));
                 };
-                document.getElementById('bvh-export').onclick = StorageApi.exportAllRecords;
-                document.getElementById('bvh-export-csv').onclick = StorageApi.exportCSVRecords;
-                document.getElementById('bvh-import').onclick = StorageApi.importRecords;
-                document.getElementById('bvh-clean-expire').onclick = StorageApi.cleanExpireRecords;
                 document.getElementById('bvh-del-current').onclick = StorageApi.deleteCurrentRecord;
-                document.getElementById('bvh-del-all').onclick = StorageApi.deleteAllRecords;
             }
         }
     };
@@ -7746,10 +8100,11 @@
                     <div class="bvh-search-row">
                         <input id="bvh-hp-search" placeholder="搜索标题、作者、BV号或条件…" aria-label="搜索本地观看历史">
                         <button class="bvh-search-help-btn" type="button" aria-label="查看搜索规则" aria-expanded="false">!</button>
-                        <div class="bvh-search-help" hidden>普通搜索：标题、作者、BV号、标签、分集等任意字段包含关键词即可；多个词用空格分开，全部满足才显示。次数>=3、总观看>=10、总次数>5、观看<5、count:!=2；也支持 合集观看>=20；进度>50、progress:<=80；时间可写 2024、2024-05、2024-05-01、05-01；快照:45%、snap:2024-05。条件之间用空格分隔。比较符支持 >、<、>=、<=、=、!=；不认识的写法会按普通关键词搜索。</div>
+                        <div class="bvh-search-help" hidden><div class="bvh-search-help-head"><span>搜索规则</span><button type="button" aria-label="关闭搜索说明">×</button></div><section class="bvh-search-help-section"><strong>关键词</strong><p>标题、作者、BV号、标签、分集等字段都可搜索。空格分隔的普通关键词必须全部命中。</p></section><section class="bvh-search-help-section"><strong>次数与进度</strong><p>次数示例：次数&gt;=3、总观看&gt;=10、观看&lt;5、count:!=2。进度示例：进度&gt;50、progress:&lt;=80。比较符支持 &gt;、&lt;、&gt;=、&lt;=、=、!=。</p></section><section class="bvh-search-help-section"><strong>时间与快照</strong><p>时间可写 2024、2024-05、2024-05-01、05-01，也可写 时间:2024-05 或 time:2024-05。多个日期条件按“任一命中”处理。快照可写 快照:45%、snap:2024-05 或 快照:已看完；快照条件需全部命中。无法识别的写法会按普通关键词处理。</p></section></div>
                     </div>
                     <div class="bvh-hp-actions">
                         <button id="hp-sync">同步官方历史</button>
+                        <button id="hp-settings" title="调整观看去重和记录管理参数">设置</button>
                         <button id="hp-export">导出JSON</button>
                         <button id="hp-export-csv">导出CSV</button>
                         <button id="hp-import">导入JSON</button>
@@ -7760,6 +8115,8 @@
                 </div>
             `;
             document.body.appendChild(panel);
+            const historyPageSearchHelp = panel.querySelector('.bvh-search-help');
+            document.body.appendChild(historyPageSearchHelp);
             setupPersistentResize(panel, 'BVH_PANEL_SIZE_HISTORY_PAGE_V1', { minWidth: 320, minHeight: 240, maxWidth: 900, maxHeight: 1000 });
             panel.addEventListener('bvh-resize-end', () => {
                 requestAnimationFrame(() => {
@@ -7775,9 +8132,14 @@
             // 官方历史页和播放页共用同一套搜索语法；帮助内容仅在用户主动点击时展开。
             panel.querySelector('.bvh-search-help-btn').addEventListener('click', e => {
                 const button = e.currentTarget;
-                const help = panel.querySelector('.bvh-search-help');
+                const help = historyPageSearchHelp;
                 help.hidden = !help.hidden;
+                if (!help.hidden) positionSearchHelp(help, button);
                 button.setAttribute('aria-expanded', String(!help.hidden));
+            });
+            historyPageSearchHelp.querySelector('button').addEventListener('click', () => {
+                historyPageSearchHelp.hidden = true;
+                panel.querySelector('.bvh-search-help-btn').setAttribute('aria-expanded', 'false');
             });
 
             const pageFloat = entry.querySelector('#bvh-status-float');
@@ -7807,6 +8169,7 @@
                 setHistoryPanelOpen(false);
             };
 
+            document.getElementById('hp-settings').onclick = openSettingsWindow;
             document.getElementById('hp-export').onclick = StorageApi.exportAllRecords;
             document.getElementById('hp-export-csv').onclick = StorageApi.exportCSVRecords;
             document.getElementById('hp-import').onclick = StorageApi.importRecords;
@@ -7814,9 +8177,10 @@
             document.getElementById('hp-clearall').onclick = StorageApi.deleteAllRecords;
             document.getElementById('hp-sync').onclick = () => OfficialHistorySync.sync(false);
 
-            document.getElementById('bvh-hp-search').oninput = e => {
-                HistoryListRenderer.renderInto(document.getElementById('bvh-hp-list'), e.target.value, 'history-page');
-            };
+            const renderHistoryPageSearch = debounce(value => {
+                HistoryListRenderer.renderInto(document.getElementById('bvh-hp-list'), value, 'history-page');
+            }, 120);
+            document.getElementById('bvh-hp-search').oninput = e => renderHistoryPageSearch(e.target.value);
 
             document.addEventListener('keydown', e => {
                 if (e.key !== 'Escape' || !panel.classList.contains('bvh-hp-show')) return;
@@ -7824,7 +8188,7 @@
                 setHistoryPanelOpen(false);
             });
 
-            makeDraggable(panel, document.getElementById('bvh-hp-drag-bar'), { preventDefault: true, easing: 1, animateOnEnd: false });
+            makeDraggable(panel, document.getElementById('bvh-hp-drag-bar'), { preventDefault: true, easing: 1, animateOnEnd: false, transformDuringDrag: true });
         }
     };
 
@@ -7835,6 +8199,7 @@
     function startHistoryAutoSync() {
         if (!location.href.startsWith('https://www.bilibili.com/history')) return;
         let timer = null;
+        let countFrame = 0;
         let lastCount = document.querySelectorAll('.history-card__main .bili-video-card').length;
         let lastSyncAt = 0;
         const MIN_SYNC_INTERVAL = 8000;
@@ -7852,18 +8217,23 @@
         };
 
         const observer = new MutationObserver(() => {
-            const count = document.querySelectorAll('.history-card__main .bili-video-card').length;
-            if (count > lastCount) {
-                lastCount = count;
-                scheduleSync();
-            } else if (count < lastCount) {
-                // 页面切换分组或清理历史时更新基准，但不因此启动全量同步。
-                lastCount = count;
-            }
+            if (countFrame) return;
+            countFrame = requestAnimationFrame(() => {
+                countFrame = 0;
+                const count = document.querySelectorAll('.history-card__main .bili-video-card').length;
+                if (count > lastCount) {
+                    lastCount = count;
+                    scheduleSync();
+                } else if (count < lastCount) {
+                    // 页面切换分组或清理历史时更新基准，但不因此启动全量同步。
+                    lastCount = count;
+                }
+            });
         });
         observer.observe(document.body, { childList: true, subtree: true });
         window.addEventListener('beforeunload', () => {
             clearTimeout(timer);
+            if (countFrame) cancelAnimationFrame(countFrame);
             observer.disconnect();
         });
 
@@ -7905,8 +8275,22 @@
         const gap = GM_getValue(CONTINUOUS_GAP_SETTINGS_KEY, null);
         const gapMin = Number(gap?.minutes);
         if (Number.isFinite(gapMin) && gapMin >= 1) {
-            CONFIG.CONTINUOUS_GAP_MIN = Math.min(24 * 60, Math.floor(gapMin));
+            CONFIG.CONTINUOUS_GAP_MIN = Math.min(180, Math.floor(gapMin));
         }
+
+        const progressSetting = GM_getValue(CONTINUOUS_PROGRESS_SETTINGS_KEY, null);
+        const progressDelta = Number(progressSetting?.delta);
+        if (Number.isFinite(progressDelta) && progressDelta >= 0) {
+            CONFIG.CONTINUOUS_PROGRESS_DELTA = Math.min(100, progressDelta);
+        }
+        const modeSetting = GM_getValue(CONTINUOUS_MODE_SETTINGS_KEY, null);
+        if (['time', 'progress', 'both'].includes(modeSetting?.mode)) {
+            CONFIG.CONTINUOUS_DEDUP_MODE = modeSetting.mode;
+        }
+
+        const uiFontSetting = Number(GM_getValue(UI_FONT_SIZE_SETTINGS_KEY, 16));
+        if (Number.isFinite(uiFontSetting)) CONFIG.UI_FONT_SIZE = Math.max(14, Math.min(20, Math.round(uiFontSetting)));
+        document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
 
         const short = GM_getValue(SHORT_WATCH_SETTINGS_KEY, null);
         if (short && typeof short === 'object') {
@@ -7919,148 +8303,313 @@
         }
     }
 
-    // ── 油猴菜单：过期天数/翻页次数/快照条数/短观看阈值/连续间隔/归并/次数重置 ──
+    // ── 油猴菜单：仅保留数据维护操作；普通参数统一由脚本内设置窗口管理 ──
     // 【模块：注册油猴菜单命令】
-    // 将可调整的记录管理参数暴露到用户脚本菜单中。各菜单负责读取当前值、接收输入、校验范围并保存设置，
-    // 保存后由对应功能在后续运行中读取；菜单只调整设置，不直接改写观看记录。
+    // 油猴菜单只保留重置次数、归并分集和数据结构迁移等维护操作；可调参数由 openSettingsWindow 统一保存。
     function registerMenus() {
         if (typeof GM_registerMenuCommand !== 'function') return;
-
-        GM_registerMenuCommand('设置长期记录过期天数', function configureExpireDays() {
-            const input = prompt(
-                `设置"长期未更新记录"的过期天数。可选：30、60、90、180、365；也可输入其他正整数。\n只有已导出备份且超过该天数的记录才会被标记为可清理。`,
-                String(CONFIG.EXPIRE_DAY)
-            );
-            if (input === null) return;
-            const days = Number(input.trim());
-            if (!Number.isFinite(days) || days < 1 || !Number.isInteger(days)) {
-                alert('过期天数必须是大于或等于 1 的整数，设置未更改。');
-                return;
-            }
-            CONFIG.EXPIRE_DAY = days;
-            CONFIG.EXPIRE_MS = days * 24 * 3600 * 1000;
-            RecordStore.set(EXPIRE_SETTINGS_KEY, { days, updatedAt: Date.now() });
-            updateCleanupButtonLabels();
-            refreshOpenHistoryLists();
-            alert(`已设置为 ${days} 天。清理按钮文字和历史列表标记已更新。`);
-        });
-
-        GM_registerMenuCommand('设置官方历史翻页次数', function configureSyncPages() {
-            const input = prompt(
-                '设置同步官方历史时的自动翻页/加载次数（1–100）。次数越大，读取的历史越多，耗时也越长。',
-                String(CONFIG.HISTORY_SYNC_PAGES)
-            );
-            if (input === null) return;
-            const pages = Number(input);
-            if (!Number.isInteger(pages) || pages < 1 || pages > 100) {
-                alert('请输入 1 到 100 之间的整数，设置未更改。');
-                return;
-            }
-            CONFIG.HISTORY_SYNC_PAGES = pages;
-            RecordStore.set(HISTORY_SYNC_SETTINGS_KEY, { pages, updatedAt: Date.now() });
-            alert(`官方历史同步加载次数已设为 ${pages} 次。`);
-        });
-
-        GM_registerMenuCommand('设置最近快照条数', function configureRecentSnapshotCount() {
-            const input = prompt(
-                `历史面板"最近N次快照"显示的条数 N（1–${CONFIG.RECENT_SNAPSHOT_MAX}）。\n只影响面板顶部这个跨视频快照列表，不改变每个视频自己的快照上限（仍是 5 条）。\n面板从常驻热池中取用：自动获取与官方历史同步各留最近 N 条，合计 2N 条候选，按观看时间优先取新的，只显示最新的 N 条。\n池容量 = 2N，与本地历史总量无关，所以 N 越大候选越多但仍是常数级，不会卡顿。`,
-                String(CONFIG.RECENT_SNAPSHOT_COUNT)
-            );
-            if (input === null) return;
-            const count = Number(input);
-            if (!Number.isInteger(count) || count < 1 || count > CONFIG.RECENT_SNAPSHOT_MAX) {
-                alert(`请输入 1 到 ${CONFIG.RECENT_SNAPSHOT_MAX} 之间的整数，设置未更改。`);
-                return;
-            }
-            CONFIG.RECENT_SNAPSHOT_COUNT = count;
-            RecordStore.set(RECENT_SNAPSHOT_SETTINGS_KEY, { count, updatedAt: Date.now() });
-            if (HistoryViewIndex._index) {
-                HistoryViewIndex._rebuild(HistoryViewIndex._index.itemsByKey, true);
-            }
-            refreshOpenHistoryLists();
-            alert(`已设置为最近 ${count} 次快照。`);
-        });
-
-        GM_registerMenuCommand('设置最近快照来源配额（player 占比）', function configureRecentSnapshotQuota() {
-            const current = Number.isFinite(Number(CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA))
-            ? Number(CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA) : 0.5;
-            const input = window.prompt(
-                `最近 N 条里『播放页自动获取』来源至少占的比例（0 到 1 之间的小数）。\n` +
-                `0.5 = 两来源平分；0 = 只显示官方同步；1 = 只显示自动获取。\n` +
-                `候选池仍是两桶各 N 条（合计 2N），配额只决定 N 个显示名额怎么分。\n` +
-                `当前值：${current}`,
-                String(current)
-            );
-            if (input === null) return;
-            const quota = Number(String(input).trim());
-            if (!Number.isFinite(quota) || quota < CONFIG.RECENT_SNAPSHOT_QUOTA_MIN
-                || quota > CONFIG.RECENT_SNAPSHOT_QUOTA_MAX) {
-                alert(`请输入 ${CONFIG.RECENT_SNAPSHOT_QUOTA_MIN} 到 ${CONFIG.RECENT_SNAPSHOT_QUOTA_MAX} 之间的小数，设置未更改。`);
-                return;
-            }
-            CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA = quota;
-            RecordStore.set(RECENT_SNAPSHOT_QUOTA_SETTINGS_KEY, { quota, updatedAt: Date.now() });
-        });
-
-        GM_registerMenuCommand('设置短观看阈值（秒）', function configureShortThreshold() {
-            const input = prompt('短观看阈值（秒）：观看位置严格小于该值的记录会按保留天数清理。', String(CONFIG.SHORT_WATCH_MAX_POS_SEC));
-            if (input === null) return;
-            const seconds = Number(input);
-            if (!Number.isFinite(seconds) || seconds < 0) {
-                alert('阈值必须是大于或等于 0 的数字。未修改设置。');
-                return;
-            }
-            CONFIG.SHORT_WATCH_MAX_POS_SEC = seconds;
-            RecordStore.set(SHORT_WATCH_SETTINGS_KEY, {
-                seconds: CONFIG.SHORT_WATCH_MAX_POS_SEC,
-                days: CONFIG.SHORT_WATCH_EXPIRE_DAY
-            });
-            StorageApi.cleanShortWatchRecords();
-            alert(`已保存：短观看阈值为 ${seconds} 秒；保留天数仍为 ${CONFIG.SHORT_WATCH_EXPIRE_DAY} 天。`);
-        });
-
-        GM_registerMenuCommand('设置短观看保留天数（天）', function configureShortRetention() {
-            const input = prompt('短观看记录保留天数：0 表示立即清理，1 表示满 1 天后清理。', String(CONFIG.SHORT_WATCH_EXPIRE_DAY));
-            if (input === null) return;
-            const days = Number(input);
-            if (!Number.isFinite(days) || days < 0) {
-                alert('保留天数必须是大于或等于 0 的数字。未修改设置。');
-                return;
-            }
-            CONFIG.SHORT_WATCH_EXPIRE_DAY = Math.floor(days);
-            RecordStore.set(SHORT_WATCH_SETTINGS_KEY, {
-                seconds: CONFIG.SHORT_WATCH_MAX_POS_SEC,
-                days: CONFIG.SHORT_WATCH_EXPIRE_DAY
-            });
-            StorageApi.cleanShortWatchRecords();
-            alert(`已保存：短观看记录保留 ${CONFIG.SHORT_WATCH_EXPIRE_DAY} 天后清理；阈值仍为 ${CONFIG.SHORT_WATCH_MAX_POS_SEC} 秒。`);
-        });
-
+        // 普通参数统一放在脚本自己的设置窗口；油猴菜单只保留数据维护类操作。
         GM_registerMenuCommand('重置所有观看次数为 1', () => StorageApi.resetAllWatchCounts());
-
-        GM_registerMenuCommand('设置连续观看判定间隔（分钟）', function configureContinuousGap() {
-            const input = prompt(
-                `判定"挂着持续播放仍算同一次观看"的最大时间间隔（分钟）。\n` +
-                `官方历史卡片在该间隔内持续更新、且进度向前推进时，视为同一次观看，不累加次数；\n` +
-                `间隔超过该值或进度回退，才算新的一次观看。`,
-                String(CONFIG.CONTINUOUS_GAP_MIN)
-            );
-            if (input === null) return;
-            const minutes = Number(input);
-            if (!Number.isInteger(minutes) || minutes < 1) {
-                alert('请输入大于或等于 1 的整数，设置未更改。');
-                return;
-            }
-            CONFIG.CONTINUOUS_GAP_MIN = minutes;
-            RecordStore.set(CONTINUOUS_GAP_SETTINGS_KEY, { minutes, updatedAt: Date.now() });
-            alert(`连续观看判定间隔已设为 ${minutes} 分钟。`);
-        });
-
         GM_registerMenuCommand('归并单集残留到整季', () => StorageApi.mergeEpIntoSeason());
         GM_registerMenuCommand('整合本地分集数据并修复完整键', () => StorageApi.repairBangumiIdentityFromLocalData());
-
         // 5.3.0：手动触发"更新本地历史数据结构"——把旧扁平记录迁移到合集容器。
         GM_registerMenuCommand('更新本地数据结构（迁移到合集容器）', () => StorageApi.migrateToContainerStructure());
+    }
+
+    // ── 脚本内设置窗口：普通参数集中调整，不再依赖油猴菜单逐项输入 ──
+    function openSettingsWindow() {
+        let overlay = document.getElementById('bvh-settings-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'bvh-settings-overlay';
+            overlay.innerHTML = `
+                <section class="bvh-settings-dialog" role="dialog" aria-modal="true" aria-label="观看历史设置">
+                    <header class="bvh-settings-header"><div class="bvh-settings-heading"><strong>观看历史设置</strong></div><button type="button" data-close title="关闭">×</button></header>
+                    <div class="bvh-settings-body">
+                        <section class="bvh-settings-intro">
+                            <div class="bvh-settings-intro-mark">✦</div>
+                            <div><strong>按你的观看习惯精细调整</strong><p>这里控制本地观看记录的合并、同步和保留规则。滑轨上的节点是常用值，点击即可平滑移动；也可以直接输入数值进行精确调整。</p></div>
+                        </section>
+                        <div class="bvh-setting-group"><h4>观看去重</h4>
+                            <label class="bvh-setting-row"><span>判定方式 <small title="时间：只比较两次快照的时间间隔；进度：只比较进度百分比差值；同时满足：时间和进度差都在阈值内才合并。">ⓘ</small></span><select id="bvh-setting-dedup-mode"><option value="both">时间和进度都满足</option><option value="time">只根据时间差</option><option value="progress">只根据进度差</option></select></label>
+                            <label class="bvh-setting-row"><span>时间差上限 <b id="bvh-setting-gap-value"></b><small title="两次快照相隔不超过该分钟数时，时间条件成立。范围 1–180 分钟；常用值建议 5–30 分钟。">ⓘ</small></span><input id="bvh-setting-gap" type="range" min="1" max="180" step="1"></label>
+                            <label class="bvh-setting-row"><span>进度差上限 <b id="bvh-setting-progress-value"></b><small title="比较两次快照进度的绝对差值。例如 35% 和 40% 相差 5 个百分点。">ⓘ</small></span><input id="bvh-setting-progress" type="range" min="0" max="100" step="1"></label>
+                            <p class="bvh-setting-note">差值按百分点计算。选择“只根据时间”时忽略进度；选择“只根据进度”时忽略时间；“时间和进度都满足”要求两项同时在阈值内。</p>
+                        </div>
+                        <div class="bvh-setting-group"><h4>记录管理</h4>
+                            <label class="bvh-setting-row"><span>长期记录过期天数 <b id="bvh-setting-expire-value"></b><small title="超过该天数且已备份的长期未更新记录会被标记为可清理，不会自动删除。">ⓘ</small></span><input id="bvh-setting-expire" type="range" min="1" max="365" step="1"></label>
+                            <label class="bvh-setting-row"><span>官方历史同步页数 <b id="bvh-setting-pages-value"></b><small title="每次同步最多加载的官方历史页数；越大读取越多，也越耗时。">ⓘ</small></span><input id="bvh-setting-pages" type="range" min="1" max="100" step="1"></label>
+                            <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="只影响历史面板顶部的最近快照列表，不改变每条记录保存的快照上限。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
+                            <label class="bvh-setting-row"><span>自动获取来源占比 <b id="bvh-setting-quota-value"></b><small title="最近快照列表中 player 来源至少占用的比例；剩余名额由官方同步来源补足。">ⓘ</small></span><input id="bvh-setting-quota" type="range" min="0" max="100" step="5"></label>
+                            <label class="bvh-setting-row"><span>短观看阈值 <b id="bvh-setting-short-value"></b><small title="播放位置严格小于该秒数的记录会被视为短观看，按下面的保留天数清理。">ⓘ</small></span><input id="bvh-setting-short" type="range" min="0" max="120" step="1"></label>
+                            <label class="bvh-setting-row"><span>短观看保留天数 <b id="bvh-setting-retention-value"></b><small title="短观看记录保留多久；0 表示立即符合清理条件。">ⓘ</small></span><input id="bvh-setting-retention" type="range" min="0" max="365" step="1"></label>
+                            <label class="bvh-setting-row"><span>界面字号 <small title="调整设置窗口、历史列表、搜索规则卡和设置说明卡的主要文字字号。">ⓘ</small></span><select id="bvh-setting-font-size"><option value="14">较小（14px）</option><option value="16">标准（16px）</option><option value="18">较大（18px）</option><option value="20">特大（20px）</option></select></label>
+                        </div>
+                    </div>
+                    <footer class="bvh-settings-footer"><button type="button" data-cancel>取消</button><button type="button" data-save>保存设置</button></footer>
+                </section>`;
+            document.body.appendChild(overlay);
+            overlay.addEventListener('click', e => {
+                if (e.target === overlay || e.target.closest('[data-close], [data-cancel]')) {
+                    overlay.style.display = 'none';
+                    if (settingTooltip) settingTooltip.hidden = true;
+                }
+            });
+            overlay.querySelector('[data-save]').addEventListener('click', () => {
+                const get = id => Number(overlay.querySelector(`#${id}`).value);
+                CONFIG.CONTINUOUS_DEDUP_MODE = overlay.querySelector('#bvh-setting-dedup-mode').value;
+                CONFIG.CONTINUOUS_GAP_MIN = Math.max(1, Math.min(180, Math.round(get('bvh-setting-gap'))));
+                CONFIG.CONTINUOUS_PROGRESS_DELTA = get('bvh-setting-progress');
+                CONFIG.EXPIRE_DAY = get('bvh-setting-expire');
+                CONFIG.EXPIRE_MS = CONFIG.EXPIRE_DAY * 86400000;
+                CONFIG.HISTORY_SYNC_PAGES = get('bvh-setting-pages');
+                CONFIG.RECENT_SNAPSHOT_COUNT = get('bvh-setting-recent');
+                CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA = get('bvh-setting-quota') / 100;
+                CONFIG.SHORT_WATCH_MAX_POS_SEC = get('bvh-setting-short');
+                CONFIG.SHORT_WATCH_EXPIRE_DAY = get('bvh-setting-retention');
+                CONFIG.UI_FONT_SIZE = Number(overlay.querySelector('#bvh-setting-font-size').value);
+                document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+                overlay.querySelector('.bvh-settings-dialog').style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+                const now = Date.now();
+                RecordStore.set(CONTINUOUS_GAP_SETTINGS_KEY, { minutes: CONFIG.CONTINUOUS_GAP_MIN, updatedAt: now });
+                RecordStore.set(CONTINUOUS_PROGRESS_SETTINGS_KEY, { delta: CONFIG.CONTINUOUS_PROGRESS_DELTA, updatedAt: now });
+                RecordStore.set(CONTINUOUS_MODE_SETTINGS_KEY, { mode: CONFIG.CONTINUOUS_DEDUP_MODE, updatedAt: now });
+                RecordStore.set(EXPIRE_SETTINGS_KEY, { days: CONFIG.EXPIRE_DAY, updatedAt: now });
+                RecordStore.set(HISTORY_SYNC_SETTINGS_KEY, { pages: CONFIG.HISTORY_SYNC_PAGES, updatedAt: now });
+                RecordStore.set(RECENT_SNAPSHOT_SETTINGS_KEY, { count: CONFIG.RECENT_SNAPSHOT_COUNT, updatedAt: now });
+                RecordStore.set(RECENT_SNAPSHOT_QUOTA_SETTINGS_KEY, { quota: CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA, updatedAt: now });
+                RecordStore.set(SHORT_WATCH_SETTINGS_KEY, { seconds: CONFIG.SHORT_WATCH_MAX_POS_SEC, days: CONFIG.SHORT_WATCH_EXPIRE_DAY, updatedAt: now });
+                GM_setValue(UI_FONT_SIZE_SETTINGS_KEY, CONFIG.UI_FONT_SIZE);
+                if (HistoryViewIndex._index) HistoryViewIndex._rebuild(HistoryViewIndex._index.itemsByKey, true);
+                updateCleanupButtonLabels();
+                refreshOpenHistoryLists();
+                StorageApi.cleanShortWatchRecords();
+                overlay.style.display = 'none';
+                if (settingTooltip) settingTooltip.hidden = true;
+            });
+        }
+        const values = {
+            'bvh-setting-dedup-mode': CONFIG.CONTINUOUS_DEDUP_MODE,
+            'bvh-setting-gap': CONFIG.CONTINUOUS_GAP_MIN,
+            'bvh-setting-progress': CONFIG.CONTINUOUS_PROGRESS_DELTA,
+            'bvh-setting-expire': CONFIG.EXPIRE_DAY,
+            'bvh-setting-pages': CONFIG.HISTORY_SYNC_PAGES,
+            'bvh-setting-recent': CONFIG.RECENT_SNAPSHOT_COUNT,
+            'bvh-setting-quota': Math.round(CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA * 100),
+            'bvh-setting-short': CONFIG.SHORT_WATCH_MAX_POS_SEC,
+            'bvh-setting-retention': CONFIG.SHORT_WATCH_EXPIRE_DAY,
+            'bvh-setting-font-size': CONFIG.UI_FONT_SIZE
+        };
+        const dialog = overlay.querySelector('.bvh-settings-dialog');
+        document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+        dialog.style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+        let settingTooltip = document.getElementById('bvh-setting-tooltip');
+        if (!settingTooltip) {
+            settingTooltip = document.createElement('div');
+            settingTooltip.id = 'bvh-setting-tooltip';
+            settingTooltip.className = 'bvh-settings-intro bvh-setting-tooltip';
+            settingTooltip.setAttribute('role', 'tooltip');
+            settingTooltip.hidden = true;
+            settingTooltip.innerHTML = '<div class="bvh-settings-intro-mark">i</div><div><strong>设置说明</strong><p></p></div>';
+            document.body.appendChild(settingTooltip);
+        }
+        const tooltipText = settingTooltip.querySelector('p');
+        overlay.querySelectorAll('.bvh-setting-row small[title]').forEach(help => {
+            if (help.dataset.bvhTooltipBound) return;
+            help.dataset.bvhTooltipBound = 'true';
+            help.tabIndex = 0;
+            help.setAttribute('role', 'button');
+            const description = help.title;
+            help.removeAttribute('title');
+            const showTooltip = () => {
+                tooltipText.textContent = description;
+                settingTooltip.hidden = false;
+                const rect = help.getBoundingClientRect();
+                const width = Math.min(440, window.innerWidth - 32);
+                const left = Math.max(16, Math.min(window.innerWidth - width - 16, rect.left));
+                const top = rect.bottom + settingTooltip.offsetHeight <= window.innerHeight - 12
+                    ? rect.bottom + 8 : Math.max(12, rect.top - settingTooltip.offsetHeight - 8);
+                settingTooltip.style.left = `${left}px`;
+                settingTooltip.style.top = `${top}px`;
+            };
+            help.addEventListener('mouseenter', showTooltip);
+            help.addEventListener('focus', showTooltip);
+            help.setAttribute('aria-describedby', 'bvh-setting-tooltip');
+            help.addEventListener('mouseleave', e => {
+                if (!settingTooltip.contains(e.relatedTarget)) settingTooltip.hidden = true;
+            });
+            help.addEventListener('blur', () => { settingTooltip.hidden = true; });
+        });
+        settingTooltip.addEventListener('mouseleave', () => { settingTooltip.hidden = true; });
+        const fontSizeControl = overlay.querySelector('#bvh-setting-font-size');
+        if (!fontSizeControl.dataset.bvhPreviewBound) {
+            fontSizeControl.dataset.bvhPreviewBound = 'true';
+            fontSizeControl.addEventListener('change', () => dialog.style.setProperty('--bvh-setting-font-size', `${fontSizeControl.value}px`));
+        }
+        // 设置控件只在首次创建时包装；重复打开窗口只刷新数值，不能重复插入数字框或滑轨。
+        Object.entries(values).forEach(([id, value]) => {
+            const input = overlay.querySelector(`#${id}`);
+            const output = overlay.querySelector(`#${id}-value`);
+            const suffix = id.includes('gap') ? ' 分钟' : id.includes('progress') || id.includes('quota') ? '%'
+                : id.includes('expire') || id.includes('retention') ? ' 天' : id.includes('short') ? ' 秒' : '';
+            let control = input.closest('.bvh-setting-control');
+            let liquid = control?.querySelector('.bvh-liquid-slider');
+            let liquidFill = control?.querySelector('.bvh-liquid-fill');
+            let numberInput = control?.querySelector('.bvh-setting-number');
+            let markerLayer = control?.querySelector('.bvh-slider-markers');
+
+            const markerValues = {
+                'bvh-setting-gap': [1, 5, 10, 15, 30, 60, 120, 180],
+                'bvh-setting-progress': [0, 5, 10, 20, 30, 50, 75, 100],
+                'bvh-setting-expire': [1, 7, 30, 90, 180, 365],
+                'bvh-setting-pages': [1, 5, 10, 20, 50, 100],
+                'bvh-setting-recent': [1, 5, 10, 20, 30, 50],
+                'bvh-setting-quota': [0, 25, 50, 75, 100],
+                'bvh-setting-short': [0, 5, 10, 15, 30, 60, 120],
+                'bvh-setting-retention': [0, 1, 3, 7, 14, 30, 90, 180, 365]
+            };
+            const min = Number(input.min || 0);
+            const max = Number(input.max || 100);
+            const sliderMarkers = markerValues[id] || [];
+            const valueToPercent = numeric => {
+                if (!sliderMarkers.length) return max > min ? ((numeric - min) / (max - min)) * 100 : 0;
+                if (numeric <= sliderMarkers[0]) return 0;
+                if (numeric >= sliderMarkers[sliderMarkers.length - 1]) return 100;
+                const index = sliderMarkers.findIndex((marker, i) => i < sliderMarkers.length - 1 && numeric <= sliderMarkers[i + 1]);
+                const low = sliderMarkers[index], high = sliderMarkers[index + 1];
+                return (index + (numeric - low) / (high - low)) / (sliderMarkers.length - 1) * 100;
+            };
+            const percentToValue = percent => {
+                if (!sliderMarkers.length) return min + (max - min) * percent / 100;
+                const scaled = Math.max(0, Math.min(100, percent)) / 100 * (sliderMarkers.length - 1);
+                const index = Math.min(sliderMarkers.length - 2, Math.floor(scaled));
+                const fraction = scaled - index;
+                return sliderMarkers[index] + (sliderMarkers[index + 1] - sliderMarkers[index]) * fraction;
+            };
+
+            if (input.type === 'range' && !control) {
+                control = document.createElement('div');
+                control.className = 'bvh-setting-control';
+                input.parentNode.insertBefore(control, input);
+                liquid = document.createElement('div');
+                liquid.className = 'bvh-liquid-slider';
+                liquid.setAttribute('role', 'group');
+                liquid.setAttribute('aria-label', input.getAttribute('aria-label') || id);
+                const track = document.createElement('div');
+                track.className = 'bvh-liquid-track';
+                liquidFill = document.createElement('div');
+                liquidFill.className = 'bvh-liquid-fill';
+                track.appendChild(liquidFill);
+                liquid.appendChild(track);
+                markerLayer = document.createElement('div');
+                markerLayer.className = 'bvh-slider-markers';
+                liquid.appendChild(markerLayer);
+                liquid.appendChild(input);
+                control.appendChild(liquid);
+
+                numberInput = document.createElement('input');
+                numberInput.type = 'number';
+                numberInput.className = 'bvh-setting-number';
+                numberInput.min = input.min;
+                numberInput.max = input.max;
+                numberInput.step = input.step || '1';
+                numberInput.setAttribute('aria-label', `${id} 数值`);
+                numberInput.title = `可直接输入数值，范围 ${input.min}–${input.max}`;
+                control.appendChild(numberInput);
+
+                (markerValues[id] || []).forEach(markerValue => {
+                    const marker = document.createElement('button');
+                    marker.type = 'button';
+                    marker.className = 'bvh-slider-node';
+                    marker.dataset.value = String(markerValue);
+                    marker.style.left = `${valueToPercent(markerValue)}%`;
+                    marker.title = `${markerValue}${suffix}`;
+                    marker.setAttribute('aria-label', `设为 ${markerValue}${suffix}`);
+                    marker.innerHTML = `<span>${markerValue}</span>`;
+                    marker.addEventListener('click', e => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        input.value = String(markerValue);
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                    });
+                    markerLayer.appendChild(marker);
+                });
+            }
+
+            const step = Math.max(Number(input.step || 1), 0.000001);
+            const toPercent = valueToPercent;
+            const fromPercent = percentToValue;
+            const paint = (raw, syncNumber = true) => {
+                let numeric = Number(raw);
+                if (!Number.isFinite(numeric)) numeric = min;
+                numeric = Math.max(min, Math.min(max, numeric));
+                numeric = Math.round((numeric - min) / step) * step + min;
+                const precision = (String(step).split('.')[1] || '').length;
+                const normalized = Number(Math.max(min, Math.min(max, numeric)).toFixed(Math.min(precision, 6)));
+                input.value = String(normalized);
+                if (numberInput && syncNumber) numberInput.value = String(normalized);
+                const percent = Math.max(0, Math.min(100, toPercent(normalized)));
+                if (liquidFill) liquidFill.style.width = `${percent}%`;
+                if (liquid) liquid.style.setProperty('--bvh-thumb-position', `${percent}%`);
+                if (output) output.textContent = `${normalized}${suffix}`;
+                if (markerLayer) {
+                    markerLayer.querySelectorAll('.bvh-slider-node').forEach(node => {
+                        node.classList.toggle('is-active', Number(node.dataset.value) === normalized);
+                    });
+                }
+            };
+
+            if (input.type === 'range') {
+                input.value = value;
+                paint(value);
+                if (!input.dataset.bvhSliderBound) {
+                    input.dataset.bvhSliderBound = 'true';
+                    input.addEventListener('input', () => paint(input.value));
+                    // 常用节点等距排布，节点之间按实际数值线性插值，便于操作密集数值区。
+                    let pointerActive = false;
+                    const updateFromPointer = e => {
+                        const rect = liquid.getBoundingClientRect();
+                        const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                        input.value = String(fromPercent(percent * 100));
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                    };
+                    liquid.addEventListener('pointerdown', e => {
+                        if (e.target.closest('.bvh-slider-node')) return;
+                        pointerActive = true;
+                        liquid.classList.add('bvh-pointer-dragging');
+                        liquid.setPointerCapture?.(e.pointerId);
+                        updateFromPointer(e);
+                        e.preventDefault();
+                    });
+                    liquid.addEventListener('pointermove', e => {
+                        if (pointerActive) updateFromPointer(e);
+                    });
+                    const stopPointer = () => {
+                        pointerActive = false;
+                        liquid.classList.remove('bvh-pointer-dragging');
+                    };
+                    liquid.addEventListener('pointerup', stopPointer);
+                    liquid.addEventListener('pointercancel', stopPointer);
+                    liquid.addEventListener('lostpointercapture', stopPointer);
+                }
+                if (numberInput && !numberInput.dataset.bvhNumberBound) {
+                    numberInput.dataset.bvhNumberBound = 'true';
+                    numberInput.addEventListener('input', () => {
+                        if (numberInput.value === '') return;
+                        paint(numberInput.value, false);
+                    });
+                    const normalizeNumber = () => {
+                        const raw = numberInput.value === '' ? input.min : numberInput.value;
+                        paint(raw);
+                    };
+                    numberInput.addEventListener('change', normalizeNumber);
+                    numberInput.addEventListener('blur', normalizeNumber);
+                }
+            } else {
+                input.value = value;
+            }
+        });
+        overlay.style.display = 'flex';
     }
 
     // 启动时检查本地记录格式，只在归一化结果确有变化时写回。
