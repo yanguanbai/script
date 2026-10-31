@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.8.17
+// @version      5.8.26
 // @description  优化历史搜索规则、界面字号应用和页面高频 DOM 处理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -23,6 +23,15 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
+// 5.8.25：合并连续颜色事件以降低预览刷新负载；恢复默认按钮移入高级颜色选择并按当前主题单独显示。
+// 5.8.26：历史搜索卡片观看次数文字接入自定义颜色；设置窗口关闭按钮悬停样式跟随当前主题。
+// 5.8.24：颜色选择过程中不再重设原生颜色控件，只更新样例里实际变化的主题变量，避免选择器卡色。
+// 5.8.23：每个预设的恢复默认按钮放在各自主题卡下方，只显示当前选中主题的按钮。
+// 5.8.22：粉、蓝、黑金预设分别记忆配色；改色只更新样例，保存后才应用全局主题。
+// 5.8.21：调整大小预览框和设置图标/分组标记的光晕改为主题色；预览与恢复预设不写入存储。
+// 5.8.20：配色仅在点击保存后记忆；左下角提供粉、蓝、黑金三个整套默认恢复按钮。
+// 5.8.19：配色项改动即时记忆并提供单项默认恢复；搜索框边框独立调色；拖拽和调整大小提示跟随主题色。
+// 5.8.18：历史记录搜索框边框颜色加入独立自定义项；检查设置窗口强调色均使用主题色。
 // 5.8.17：恢复悬浮窗操作按钮横向布局；观看次数绿色加入自定义配色，三套预设默认保持绿色。
 // 5.8.16：历史页操作按钮改为自适应网格；视频页和历史页入口悬浮窗改用主题文字色，不再残留固定粉色。
 // 5.8.15：黑金操作按钮改为暖炭黑底和低饱和暗金边框，避免冷灰边框破坏黑金配色。
@@ -150,16 +159,18 @@
     };
 
     const COLOR_THEMES = {
-        pink: { label: 'B站粉', accent: '#fb7299', accent2: '#f6a0b9', watchCountText: '#27ae60', headerStart: '#f45f8b', headerEnd: '#ffb4ca', headerText: '#f5eff2', sliderDot: '#d65b80', panel: '#fffafd', card: '#ffffff', settingsText: '#624b54', recordText: '#39343a', muted: '#77717c', border: '#eadfe5', progressStart: '#fb7299', progressEnd: '#f7a4bd' },
-        blue: { label: 'B站蓝', accent: '#00a1d6', accent2: '#66c7e5', watchCountText: '#27ae60', headerStart: '#087fa9', headerEnd: '#56c4e4', headerText: '#cedfe4', sliderDot: '#007da5', panel: '#f5fbff', card: '#ffffff', settingsText: '#36535f', recordText: '#263642', muted: '#657984', border: '#d7e8ef', progressStart: '#00a1d6', progressEnd: '#8dd8ee' },
-        dark: { label: '黑金', accent: '#c6a04b', accent2: '#e6ce8c', watchCountText: '#27ae60', headerStart: '#a47a2d', headerEnd: '#e3c774', headerText: '#e6d8b3', sliderDot: '#e6ce8c', panel: '#151618', card: '#202124', settingsText: '#e6d8b3', recordText: '#f1efe9', muted: '#a6a49d', border: '#51452f', progressStart: '#9a7226', progressEnd: '#e6ce8c' }
+        pink: { label: 'B站粉', accent: '#fb7299', accent2: '#f6a0b9', watchCountText: '#27ae60', headerStart: '#f45f8b', headerEnd: '#ffb4ca', headerText: '#f5eff2', sliderDot: '#d65b80', panel: '#fffafd', card: '#ffffff', settingsText: '#624b54', recordText: '#39343a', muted: '#77717c', border: '#eadfe5', searchBorder: '#eadfe5', progressStart: '#fb7299', progressEnd: '#f7a4bd' },
+        blue: { label: 'B站蓝', accent: '#00a1d6', accent2: '#66c7e5', watchCountText: '#27ae60', headerStart: '#087fa9', headerEnd: '#56c4e4', headerText: '#cedfe4', sliderDot: '#007da5', panel: '#f5fbff', card: '#ffffff', settingsText: '#36535f', recordText: '#263642', muted: '#657984', border: '#d7e8ef', searchBorder: '#d7e8ef', progressStart: '#00a1d6', progressEnd: '#8dd8ee' },
+        dark: { label: '黑金', accent: '#c6a04b', accent2: '#e6ce8c', watchCountText: '#27ae60', headerStart: '#a47a2d', headerEnd: '#e3c774', headerText: '#e6d8b3', sliderDot: '#e6ce8c', panel: '#151618', card: '#202124', settingsText: '#e6d8b3', recordText: '#f1efe9', muted: '#a6a49d', border: '#51452f', searchBorder: '#51452f', progressStart: '#9a7226', progressEnd: '#e6ce8c' }
     };
-    const THEME_COLOR_KEYS = ['accent', 'accent2', 'watchCountText', 'headerStart', 'headerEnd', 'headerText', 'sliderDot', 'panel', 'card', 'settingsText', 'recordText', 'muted', 'border', 'progressStart', 'progressEnd'];
+    const THEME_COLOR_KEYS = ['accent', 'accent2', 'watchCountText', 'headerStart', 'headerEnd', 'headerText', 'sliderDot', 'panel', 'card', 'settingsText', 'recordText', 'muted', 'border', 'searchBorder', 'progressStart', 'progressEnd'];
+    const THEME_PRESETS = ['pink', 'blue', 'dark'];
     const isThemeHex = value => /^#[0-9a-f]{6}$/i.test(value || '');
     const cloneColorTheme = value => Object.fromEntries(THEME_COLOR_KEYS.map(key => {
         const fallback = key === 'headerStart' ? (isThemeHex(value?.accent) ? value.accent : COLOR_THEMES.pink.headerStart)
             : key === 'headerEnd' ? (isThemeHex(value?.accent2) ? value.accent2 : COLOR_THEMES.pink.headerEnd)
             : key === 'watchCountText' ? '#27ae60'
+                : key === 'searchBorder' ? (isThemeHex(value?.border) ? value.border : COLOR_THEMES.pink.border)
                 : key === 'headerText' ? (isThemeHex(value?.settingsText) ? value.settingsText : COLOR_THEMES.pink.headerText)
                 : key === 'sliderDot' ? (isThemeHex(value?.accent) ? value.accent : COLOR_THEMES.pink.sliderDot)
                 : key === 'settingsText' || key === 'recordText' ? (isThemeHex(value?.text) ? value.text : COLOR_THEMES.pink[key])
@@ -181,16 +192,47 @@
         root.dataset.bvhTheme = theme?.mode === 'dark' || theme?.preset === 'dark' ? 'dark' : 'light';
         return values;
     }
-    function readColorTheme() {
+    function applyColorThemePreview(theme, preview) {
+        if (!preview) return cloneColorTheme(theme);
+        const values = cloneColorTheme(theme);
+        Object.entries(values).forEach(([key, value]) => {
+            const cssKey = key === 'accent2' ? 'accent-2' : key.replace(/[A-Z]/g, m => `-${m.toLowerCase()}`);
+            const property = `--bvh-theme-${cssKey}`;
+            if (preview.style.getPropertyValue(property) !== value) preview.style.setProperty(property, value);
+        });
+        if (preview.style.getPropertyValue('--bvh-theme-text') !== values.settingsText) preview.style.setProperty('--bvh-theme-text', values.settingsText);
+        const darkText = theme?.mode === 'dark' || theme?.preset === 'dark' ? '#17191e' : values.settingsText;
+        const accentText = themeContrastRatio(values.accent, darkText) >= themeContrastRatio(values.accent, '#ffffff') ? darkText : '#ffffff';
+        if (preview.style.getPropertyValue('--bvh-theme-accent-text') !== accentText) preview.style.setProperty('--bvh-theme-accent-text', accentText);
+        return values;
+    }
+    function readColorThemeState() {
         const saved = GM_getValue(COLOR_THEME_SETTINGS_KEY, null);
-        const storedPreset = saved?.preset;
-        const preset = COLOR_THEMES[storedPreset] ? storedPreset : 'pink';
-        const mode = saved?.mode || (preset === 'dark' ? 'dark' : 'light');
-        if (storedPreset === 'custom') return { ...COLOR_THEMES.pink, ...saved, preset: 'custom', mode };
-        // 预设只保存名称，使用当前版本内置的完整调色板；不能让旧版本的缓存覆盖新版预设。
-        const theme = { ...COLOR_THEMES[preset], preset, mode };
-        if (saved && saved.version !== 2) GM_setValue(COLOR_THEME_SETTINGS_KEY, { ...theme, version: 2 });
-        return theme;
+        const themes = Object.fromEntries(THEME_PRESETS.map(preset => {
+            const stored = saved?.version === 3 ? saved.themes?.[preset] : null;
+            const colors = cloneColorTheme(stored ? { ...COLOR_THEMES[preset], ...stored } : COLOR_THEMES[preset]);
+            return [preset, { ...COLOR_THEMES[preset], ...colors, preset, basePreset: preset, mode: preset === 'dark' ? 'dark' : 'light' }];
+        }));
+        let activePreset = THEME_PRESETS.includes(saved?.activePreset) ? saved.activePreset : null;
+        if (!activePreset && saved?.preset === 'custom') {
+            const legacyPreset = THEME_PRESETS.includes(saved.basePreset)
+                ? saved.basePreset
+                : THEME_PRESETS.find(preset => saved.accent === COLOR_THEMES[preset].accent) || (saved.mode === 'dark' ? 'dark' : 'pink');
+            themes[legacyPreset] = {
+                ...themes[legacyPreset],
+                ...cloneColorTheme({ ...themes[legacyPreset], ...saved }),
+                preset: legacyPreset,
+                basePreset: legacyPreset,
+                mode: legacyPreset === 'dark' ? 'dark' : 'light'
+            };
+            activePreset = legacyPreset;
+        }
+        if (!activePreset) activePreset = THEME_PRESETS.includes(saved?.preset) ? saved.preset : 'pink';
+        return { version: 3, activePreset, themes };
+    }
+    function readColorTheme() {
+        const state = readColorThemeState();
+        return { ...state.themes[state.activePreset] };
     }
     function themeColorLuminance(hex) {
         const rgb = String(hex || '').match(/^#([0-9a-f]{6})$/i)?.[1];
@@ -7039,14 +7081,13 @@
                 position: 'fixed', left: `${startLeft}px`, top: `${startTop}px`,
                 width: `${startWidth}px`, height: `${startHeight}px`, boxSizing: 'border-box',
                 zIndex: '2147483647', pointerEvents: 'none', overflow: 'hidden',
-                border: '2px dashed rgba(225, 91, 139, .95)', borderRadius: '12px',
-                background: 'rgba(245, 240, 245, .96)', boxShadow: 'none',
+                borderRadius: '12px', boxShadow: 'none',
                 backdropFilter: 'none', webkitBackdropFilter: 'none'
             });
             const previewLabel = document.createElement('div');
             previewLabel.textContent = `${Math.round(startWidth)} × ${Math.round(startHeight)}`;
             Object.assign(previewLabel.style, {
-                position: 'absolute', left: '12px', top: '10px', color: '#d94f7b',
+                position: 'absolute', left: '12px', top: '10px',
                 font: '600 13px/1.4 sans-serif', whiteSpace: 'nowrap'
             });
             resizePreview.appendChild(previewLabel);
@@ -7619,7 +7660,7 @@
                 backdrop-filter: none !important;
                 -webkit-backdrop-filter: none !important;
                 box-shadow: none !important;
-                background: rgba(245,240,245,.96) !important;
+                background: color-mix(in srgb,var(--bvh-theme-panel,#fffafd) 96%,transparent) !important;
                 contain: strict !important;
                 isolation: isolate !important;
             }
@@ -7631,7 +7672,7 @@
                 backdrop-filter: none !important;
                 -webkit-backdrop-filter: none !important;
                 box-shadow: 0 8px 24px rgba(35,25,40,.14) !important;
-                background: rgba(245,240,245,.94) !important;
+                background: color-mix(in srgb,var(--bvh-theme-panel,#fffafd) 94%,transparent) !important;
                 contain: strict !important;
                 isolation: isolate !important;
                 will-change: left, top;
@@ -7643,7 +7684,7 @@
                 backdrop-filter: none !important;
                 -webkit-backdrop-filter: none !important;
                 box-shadow: 0 8px 24px rgba(35,25,40,.14) !important;
-                background: rgba(245,240,245,.96) !important;
+                background: color-mix(in srgb,var(--bvh-theme-panel,#fffafd) 96%,transparent) !important;
                 contain: strict !important;
                 isolation: isolate !important;
                 will-change: transform;
@@ -7658,12 +7699,12 @@
             #bvh-history-page-panel.bvh-compositor-dragging::before {
                 content: "移动搜索卡片";
                 position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-                color: #d94f7b; font-size: 13px; font-weight: 600; pointer-events: none;
+                color: var(--bvh-theme-accent,#fb7299); font-size: 13px; font-weight: 600; pointer-events: none;
             }
             #bvh-history-panel.bvh-compositor-dragging,
             #bvh-history-page-panel.bvh-compositor-dragging {
                 transition:none !important; animation:none !important; backdrop-filter:none !important;
-                -webkit-backdrop-filter:none !important; background:rgba(245,240,245,.96) !important;
+                -webkit-backdrop-filter:none !important; background:color-mix(in srgb,var(--bvh-theme-panel,#fffafd) 96%,transparent) !important;
                 box-shadow:0 8px 24px rgba(35,25,40,.14) !important; will-change:transform;
             }
             /* 调整期间直接移除列表与控件子树，避免超长列表继续参与每一帧布局；结束后自动恢复。 */
@@ -7673,17 +7714,19 @@
                 position: absolute; right: 2px; bottom: 2px; z-index: 2147483001;
                 width: 18px; height: 18px; cursor: nwse-resize; touch-action: none;
                 border-radius: 4px 0 12px 0;
-                background: linear-gradient(135deg, transparent 0 42%, rgba(190,130,155,.55) 43% 49%, transparent 50% 61%, rgba(190,130,155,.72) 62% 68%, transparent 69%);
+                background: linear-gradient(135deg, transparent 0 42%, color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 55%,transparent) 43% 49%, transparent 50% 61%, color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 72%,transparent) 62% 68%, transparent 69%);
             }
+            .bvh-resize-preview { border:2px dashed var(--bvh-theme-accent,#fb7299); background:color-mix(in srgb,var(--bvh-theme-panel,#fffafd) 96%,transparent); }
+            .bvh-resize-preview > div { color:var(--bvh-theme-accent,#fb7299); }
             .bvh-resizing > .bvh-resize-handle { display: block !important; }
             #bvh-history-panel.bvh-resizing > .bvh-resize-handle,
             #bvh-history-page-panel.bvh-resizing > .bvh-resize-handle { display: block !important; }
-            #bvh-history-panel.bvh-resizing::before { content: "正在调整大小…"; position:absolute; left:14px; top:13px; color:#e95f89; font-size:13px; font-weight:700; }
+            #bvh-history-panel.bvh-resizing::before, #bvh-history-page-panel.bvh-resizing::before { content: "正在调整大小…"; position:absolute; left:14px; top:13px; color:var(--bvh-theme-accent,#fb7299); font-size:13px; font-weight:700; }
             #bvh-history-panel.bvh-resizing::after,
             #bvh-history-page-panel.bvh-resizing::after {
                 content: ""; position: absolute; inset: 0; z-index: 2147483000;
                 border-radius: inherit; pointer-events: none;
-                background: rgba(245,240,245,.08);
+                background: color-mix(in srgb,var(--bvh-theme-panel,#fffafd) 8%,transparent);
                 backdrop-filter: none !important; -webkit-backdrop-filter: none !important;
             }
             #bvh-hp-drag-bar {
@@ -7740,7 +7783,7 @@
                 --bvh-theme-muted:#77717c; --bvh-theme-border:#eadfe5;
                 --bvh-theme-progress-start:#fb7299; --bvh-theme-progress-end:#f7a4bd;
                 --bvh-theme-header-start:#f45f8b; --bvh-theme-header-end:#ffb4ca;
-                --bvh-theme-header-text:#fff;
+                --bvh-theme-header-text:#fff; --bvh-theme-search-border:#eadfe5;
                 --bvh-theme-slider-dot:#d65b80;
                 --bvh-theme-accent-text:#fff; --bvh-theme-watch-count-text:#27ae60;
             }
@@ -7751,6 +7794,7 @@
             #bvh-status-float { background:color-mix(in srgb,var(--bvh-theme-card) 90%,transparent); color:var(--bvh-theme-record-text); border-left-color:var(--bvh-theme-accent); }
             .bvh-float-accent { color:var(--bvh-theme-accent) !important; }
             .bvh-float-accent-2 { color:var(--bvh-theme-watch-count-text,#27ae60) !important; }
+            .bvh-count-mark { color:var(--bvh-theme-watch-count-text,#27ae60) !important; }
             .bvh-float-record { color:var(--bvh-theme-record-text) !important; }
             .bvh-float-muted { color:var(--bvh-theme-muted) !important; }
             .bvh-settings-dialog, .bvh-settings-dialog .bvh-setting-row > span,
@@ -7776,6 +7820,7 @@
             #bvh-menu-panel #bvh-show-history { border-color:color-mix(in srgb,var(--bvh-theme-accent) 35%,transparent) !important; background:linear-gradient(110deg,color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent),var(--bvh-theme-card)) !important; color:var(--bvh-theme-accent) !important; }
             .bvh-settings-header button:hover, .bvh-setting-row small, .bvh-setting-row b,
             .bvh-setting-group h4:before { color:var(--bvh-theme-accent) !important; }
+            .bvh-settings-header button:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 12%,var(--bvh-theme-card)) !important; border-color:color-mix(in srgb,var(--bvh-theme-accent) 40%,var(--bvh-theme-border)) !important; }
             .bvh-slider-node.is-active span { color:var(--bvh-theme-slider-dot) !important; }
             .bvh-setting-group h4:before { background:linear-gradient(var(--bvh-theme-accent),var(--bvh-theme-accent-2)) !important; }
             .bvh-settings-footer [data-save] { border-color:var(--bvh-theme-accent) !important; background:linear-gradient(110deg,var(--bvh-theme-accent),var(--bvh-theme-accent-2)) !important; box-shadow:0 5px 18px color-mix(in srgb,var(--bvh-theme-accent) 24%,transparent) !important; }
@@ -7789,8 +7834,9 @@
             .bvh-group-toggle:hover, .bvh-part-detail-toggle:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 12%,var(--bvh-theme-card)) !important; border-color:color-mix(in srgb,var(--bvh-theme-accent) 40%,var(--bvh-theme-border)) !important; }
             .bvh-record-dialog-btn.is-primary, .bvh-record-dialog-btn.is-primary:hover { background:var(--bvh-theme-accent) !important; border-color:var(--bvh-theme-accent) !important; }
             .bvh-menu-drag-hint { color:var(--bvh-theme-accent) !important; background:color-mix(in srgb,var(--bvh-theme-accent) 10%,var(--bvh-theme-card)) !important; border-color:color-mix(in srgb,var(--bvh-theme-accent) 28%,var(--bvh-theme-border)) !important; }
-            #bvh-history-panel.bvh-resizing:before, #bvh-history-panel.bvh-dragging:before,
-            #bvh-history-page-panel.bvh-dragging:before, #bvh-history-page-panel.bvh-compositor-dragging:before { color:var(--bvh-theme-accent) !important; }
+            #bvh-history-panel.bvh-resizing:before, #bvh-history-page-panel.bvh-resizing:before,
+            #bvh-history-panel.bvh-dragging:before, #bvh-history-page-panel.bvh-dragging:before,
+            #bvh-history-panel.bvh-compositor-dragging:before, #bvh-history-page-panel.bvh-compositor-dragging:before { color:var(--bvh-theme-accent) !important; }
             #bvh-history-page-entry [style*="color:#fb7299"], #bvh-status-float [style*="color:#fb7299"] { color:var(--bvh-theme-accent) !important; }
             #bvh-history-page-entry #bvh-status-float { color:var(--bvh-theme-record-text); }
             .bvh-page-entry-content { display:flex; align-items:center; gap:11px; }
@@ -7800,7 +7846,9 @@
             .bvh-page-entry-subtitle { color:var(--bvh-theme-muted) !important; font-size:11px; line-height:1.3; }
             .bvh-settings-header { background:linear-gradient(105deg,color-mix(in srgb,var(--bvh-theme-accent) 14%,transparent),color-mix(in srgb,var(--bvh-theme-accent-2) 10%,transparent) 65%,transparent) !important; }
             .bvh-settings-intro { border-color:color-mix(in srgb,var(--bvh-theme-accent) 25%,transparent); background:linear-gradient(115deg,color-mix(in srgb,var(--bvh-theme-accent) 12%,var(--bvh-theme-panel)),var(--bvh-theme-card) 62%,color-mix(in srgb,var(--bvh-theme-accent-2) 10%,var(--bvh-theme-panel))) !important; }
-            .bvh-settings-intro-mark { background:linear-gradient(145deg,var(--bvh-theme-accent),var(--bvh-theme-accent-2)) !important; }
+            .bvh-setting-note { background:linear-gradient(110deg,color-mix(in srgb,var(--bvh-theme-accent) 8%,var(--bvh-theme-panel)),color-mix(in srgb,var(--bvh-theme-card) 78%,transparent)) !important; }
+            .bvh-settings-intro-mark { background:linear-gradient(145deg,var(--bvh-theme-accent),var(--bvh-theme-accent-2)) !important; box-shadow:0 5px 14px color-mix(in srgb,var(--bvh-theme-accent) 25%,transparent) !important; }
+            .bvh-setting-group h4:before { box-shadow:0 0 9px color-mix(in srgb,var(--bvh-theme-accent) 28%,transparent) !important; }
             #bvh-playback-history-dragbar strong, .bvh-playback-history-dragbar strong,
             .bvh-record-context-title, .bvh-record-dialog-title, .bvh-settings-header button:hover,
             .bvh-setting-row b { color:var(--bvh-theme-accent) !important; }
@@ -7818,6 +7866,8 @@
             .bvh-setting-row select, .bvh-setting-number { border-color:var(--bvh-theme-border); }
             #bvh-history-search:focus, #bvh-hp-search:focus, .bvh-setting-row select:focus,
             .bvh-setting-number:focus { border-color:var(--bvh-theme-accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--bvh-theme-accent) 16%,transparent); }
+            #bvh-history-search, #bvh-hp-search { border-color:var(--bvh-theme-search-border) !important; }
+            #bvh-history-search:focus, #bvh-hp-search:focus { border-color:var(--bvh-theme-accent) !important; }
             .bvh-search-help-btn { border-color:var(--bvh-theme-accent) !important; background:var(--bvh-theme-accent) !important; color:var(--bvh-theme-header-text) !important; }
             .bvh-hp-actions button:focus-visible { outline:2px solid var(--bvh-theme-accent) !important; outline-offset:2px; border-color:var(--bvh-theme-accent) !important; }
             .bvh-record-dialog-btn.is-primary, .bvh-settings-footer [data-save] {
@@ -7887,15 +7937,22 @@
             :root[data-bvh-theme="dark"] #bvh-hp-list::-webkit-scrollbar { width:10px; }
             :root[data-bvh-theme="dark"] #bvh-hp-list::-webkit-scrollbar-track { border-radius:8px; background:#222326; }
             :root[data-bvh-theme="dark"] #bvh-hp-list::-webkit-scrollbar-thumb { border:2px solid #222326; border-radius:8px; background:#716d63; }
-            :root[data-bvh-theme="dark"] #bvh-hp-search { border:1px solid #393a3c !important; background:#202124 !important; }
+            :root[data-bvh-theme="dark"] #bvh-hp-search { border:1px solid var(--bvh-theme-search-border) !important; background:#202124 !important; }
             :root[data-bvh-theme="dark"] #bvh-hp-search:focus { border-color:var(--bvh-theme-accent) !important; }
+            #bvh-history-search, #bvh-hp-search { border-color:var(--bvh-theme-search-border) !important; }
+            #bvh-history-search:focus, #bvh-hp-search:focus { border-color:var(--bvh-theme-accent) !important; }
             :root[data-bvh-theme="dark"] .bvh-history-group-item, :root[data-bvh-theme="dark"] .bvh-part-row { border-color:#38393a !important; }
             :root[data-bvh-theme="dark"] .bvh-history-header { background:#292722 !important; color:#e4c368 !important; }
             :root[data-bvh-theme="dark"] #bvh-hp-list::-webkit-scrollbar-thumb:hover { background:#a28c58; }
             :root[data-bvh-theme="dark"] .bvh-resize-handle { background:linear-gradient(135deg,transparent 0 42%,color-mix(in srgb,var(--bvh-theme-accent) 30%,transparent) 43% 49%,transparent 50% 61%,color-mix(in srgb,var(--bvh-theme-accent) 44%,transparent) 62% 68%,transparent 69%) !important; }
             .bvh-theme-presets { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:4px 0 12px; }
-            .bvh-theme-presets button { display:flex; align-items:center; gap:9px; min-width:0; padding:9px 11px; border:1px solid var(--bvh-theme-border); border-radius:11px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
-            .bvh-theme-presets button.is-active { border-color:var(--bvh-theme-accent); box-shadow:0 0 0 2px color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent); }
+            .bvh-theme-option { display:flex; min-width:0; flex-direction:column; gap:5px; }
+            .bvh-theme-presets button[data-theme-preset] { display:flex; align-items:center; gap:9px; min-width:0; padding:9px 11px; border:1px solid var(--bvh-theme-border); border-radius:11px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
+            .bvh-theme-presets button[data-theme-preset].is-active { border-color:var(--bvh-theme-accent); box-shadow:0 0 0 2px color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent); }
+            .bvh-theme-reset-row { display:flex; flex-wrap:wrap; gap:7px; margin:0 11px 11px; }
+            .bvh-theme-reset-row button { display:none; padding:6px 9px; border:1px solid var(--bvh-theme-border); border-radius:8px; background:var(--bvh-theme-panel); color:var(--bvh-theme-muted); font-size:11px; cursor:pointer; }
+            .bvh-theme-reset-row button.is-active { display:inline-flex; }
+            .bvh-theme-reset-row button:hover { border-color:var(--bvh-theme-accent); color:var(--bvh-theme-accent); }
             .bvh-theme-presets i { display:block; flex:0 0 25px; width:25px; height:25px; border-radius:8px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
             .bvh-theme-advanced { margin:8px 0 12px; border:1px solid var(--bvh-theme-border); border-radius:11px; background:color-mix(in srgb,var(--bvh-theme-card) 80%,transparent); color:var(--bvh-theme-text); }
             .bvh-theme-advanced summary { padding:10px 12px; color:var(--bvh-theme-accent); cursor:pointer; font-weight:650; }
@@ -7918,7 +7975,7 @@
             .bvh-theme-preview-track { position:relative; }
             .bvh-theme-preview-body button { padding:5px 10px; border:0; border-radius:8px; background:var(--bvh-theme-accent); color:var(--bvh-theme-accent-text); }
             .bvh-theme-contrast { margin:8px 0 0; color:#b35b28; font-size:11px; }
-            .bvh-theme-contrast button,.bvh-theme-reset { margin:5px 0 0; padding:6px 9px; border:1px solid var(--bvh-theme-border); border-radius:8px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
+            .bvh-theme-contrast button { margin:5px 0 0; padding:6px 9px; border:1px solid var(--bvh-theme-border); border-radius:8px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
         `);
     }
 
@@ -8700,9 +8757,15 @@
                         </div>
                         <div class="bvh-setting-group bvh-theme-settings"><h4>界面配色</h4>
                             <div class="bvh-theme-presets" role="group" aria-label="预设主题">
-                                <button type="button" data-theme-preset="pink"><i style="background:linear-gradient(135deg,#f45f8b,#ffb4ca)"></i><span>B站粉</span></button>
-                                <button type="button" data-theme-preset="blue"><i style="background:linear-gradient(135deg,#087fa9,#56c4e4)"></i><span>B站蓝</span></button>
-                                <button type="button" data-theme-preset="dark"><i style="background:linear-gradient(135deg,#a47a2d,#e3c774)"></i><span>黑金</span></button>
+                                <div class="bvh-theme-option" data-theme-option="pink">
+                                    <button type="button" data-theme-preset="pink"><i style="background:linear-gradient(135deg,#f45f8b,#ffb4ca)"></i><span>B站粉</span></button>
+                                </div>
+                                <div class="bvh-theme-option" data-theme-option="blue">
+                                    <button type="button" data-theme-preset="blue"><i style="background:linear-gradient(135deg,#087fa9,#56c4e4)"></i><span>B站蓝</span></button>
+                                </div>
+                                <div class="bvh-theme-option" data-theme-option="dark">
+                                    <button type="button" data-theme-preset="dark"><i style="background:linear-gradient(135deg,#a47a2d,#e3c774)"></i><span>黑金</span></button>
+                                </div>
                             </div>
                             <details class="bvh-theme-advanced"><summary>高级颜色选择</summary>
                                 <section class="bvh-theme-color-section"><h5>设置界面</h5><div class="bvh-theme-color-grid">
@@ -8716,6 +8779,7 @@
                                 <section class="bvh-theme-color-section"><h5>历史读取内容</h5><div class="bvh-theme-color-grid">
                                     <label>记录文字<input type="color" data-theme-color="recordText"></label>
                                     <label>观看次数文字<input type="color" data-theme-color="watchCountText"></label>
+                                    <label>历史搜索框边框<input type="color" data-theme-color="searchBorder"></label>
                                     <label>面板背景<input type="color" data-theme-color="panel"></label>
                                     <label>卡片背景<input type="color" data-theme-color="card"></label>
                                     <label>次级文字<input type="color" data-theme-color="muted"></label>
@@ -8726,14 +8790,18 @@
                                     <label>进度渐变起点<input type="color" data-theme-color="progressStart"></label>
                                     <label>进度渐变终点<input type="color" data-theme-color="progressEnd"></label>
                                 </div></section>
-                                <button type="button" class="bvh-theme-reset">恢复 B 站粉默认配色</button>
+                                <div class="bvh-theme-reset-row" aria-label="恢复当前主题默认配色">
+                                    <button type="button" data-theme-reset-preset="pink">恢复 B 站粉默认</button>
+                                    <button type="button" data-theme-reset-preset="blue">恢复 B 站蓝默认</button>
+                                    <button type="button" data-theme-reset-preset="dark">恢复黑金默认</button>
+                                </div>
                             </details>
                             <div class="bvh-theme-preview" id="bvh-theme-preview">
                                 <div class="bvh-theme-preview-head">本地观看记录 <span>预览</span><button class="bvh-theme-preview-help" type="button" tabindex="-1">!</button></div>
                                 <div class="bvh-theme-preview-body"><strong>视频标题示例</strong><small>UP主 · 最近观看</small><div class="bvh-theme-preview-track"><i></i><b></b></div><button type="button" tabindex="-1">打开记录</button></div>
                             </div>
                             <p class="bvh-theme-contrast" id="bvh-theme-contrast" hidden>文字与背景对比度偏低，可能不容易看清。<button type="button">自动修正设置/记录文字</button></p>
-                            <p class="bvh-setting-note">切换主题或调色会立即预览；保存后应用，取消会还原。设置界面文字与历史记录文字分开调色；标题、“!”和关闭符号共用标题栏文字色。标题栏与进度条渐变、滑轨刻度点均可单独调色。</p>
+                            <p class="bvh-setting-note">粉、蓝、黑金配色分别记忆。调整只预览此样例；点击“保存设置”后应用，取消不保存。高级颜色选择中只显示当前主题的恢复默认按钮。</p>
                         </div>
                     </div>
                     <footer class="bvh-settings-footer"><button type="button" data-cancel>取消</button><button type="button" data-save>保存设置</button></footer>
@@ -8759,8 +8827,12 @@
                 CONFIG.SHORT_WATCH_MAX_POS_SEC = get('bvh-setting-short');
                 CONFIG.SHORT_WATCH_EXPIRE_DAY = get('bvh-setting-retention');
                 CONFIG.UI_FONT_SIZE = Number(overlay.querySelector('#bvh-setting-font-size').value);
-                const chosenTheme = overlay._bvhThemeDraft || { preset: 'pink', ...COLOR_THEMES.pink };
-                GM_setValue(COLOR_THEME_SETTINGS_KEY, { ...cloneColorTheme(chosenTheme), preset: chosenTheme.preset || 'custom', mode: chosenTheme.mode || 'light', version: 2 });
+                const themeState = readColorThemeState();
+                const drafts = overlay._bvhThemeDrafts || themeState.themes;
+                const activePreset = THEME_PRESETS.includes(overlay._bvhThemeActivePreset) ? overlay._bvhThemeActivePreset : themeState.activePreset;
+                const savedThemes = Object.fromEntries(THEME_PRESETS.map(preset => [preset, cloneColorTheme(drafts[preset] || themeState.themes[preset])]));
+                GM_setValue(COLOR_THEME_SETTINGS_KEY, { version: 3, activePreset, themes: savedThemes });
+                const chosenTheme = { ...COLOR_THEMES[activePreset], ...savedThemes[activePreset], preset: activePreset, basePreset: activePreset, mode: activePreset === 'dark' ? 'dark' : 'light' };
                 applyColorTheme(chosenTheme);
                 document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
                 overlay.querySelector('.bvh-settings-dialog').style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
@@ -8797,13 +8869,26 @@
         const dialog = overlay.querySelector('.bvh-settings-dialog');
         document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
         dialog.style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
-        const initialTheme = readColorTheme();
+        const initialThemeState = readColorThemeState();
+        overlay._bvhThemeDrafts = Object.fromEntries(THEME_PRESETS.map(preset => [preset, { ...initialThemeState.themes[preset] }]));
+        const initialTheme = { ...overlay._bvhThemeDrafts[initialThemeState.activePreset] };
         const syncThemeControls = theme => {
-            overlay._bvhThemeDraft = { ...theme };
-            const colors = cloneColorTheme(theme);
-            applyColorTheme(theme);
+            const preset = THEME_PRESETS.includes(theme?.preset) ? theme.preset : (THEME_PRESETS.includes(theme?.basePreset) ? theme.basePreset : 'pink');
+            const normalizedTheme = {
+                ...COLOR_THEMES[preset],
+                ...cloneColorTheme(theme),
+                preset,
+                basePreset: preset,
+                mode: preset === 'dark' ? 'dark' : 'light'
+            };
+            overlay._bvhThemeDrafts[preset] = normalizedTheme;
+            overlay._bvhThemeDraft = normalizedTheme;
+            overlay._bvhThemeActivePreset = preset;
+            const colors = applyColorThemePreview(normalizedTheme, overlay.querySelector('#bvh-theme-preview'));
             overlay.querySelectorAll('[data-theme-color]').forEach(input => { input.value = colors[input.dataset.themeColor]; });
-            overlay.querySelectorAll('[data-theme-preset]').forEach(button => button.classList.toggle('is-active', button.dataset.themePreset === theme.preset));
+            overlay.querySelectorAll('[data-theme-preset]').forEach(button => button.classList.toggle('is-active', button.dataset.themePreset === preset));
+            overlay.querySelectorAll('[data-theme-option]').forEach(option => option.classList.toggle('is-active', option.dataset.themeOption === preset));
+            overlay.querySelectorAll('[data-theme-reset-preset]').forEach(button => button.classList.toggle('is-active', button.dataset.themeResetPreset === preset));
             updateThemeContrast(colors);
         };
         const updateThemeContrast = colors => {
@@ -8814,41 +8899,66 @@
                 || themeContrastRatio(colors.muted, colors.card) < 3;
             overlay.querySelector('#bvh-theme-contrast').hidden = !lowContrast;
         };
+        const scheduleThemeSampleUpdate = () => {
+            if (overlay._bvhThemePreviewRaf) return;
+            overlay._bvhThemePreviewRaf = window.requestAnimationFrame(() => {
+                overlay._bvhThemePreviewRaf = 0;
+                const current = overlay._bvhThemeDraft;
+                if (!current) return;
+                const colors = applyColorThemePreview(current, overlay.querySelector('#bvh-theme-preview'));
+                if (overlay._bvhThemeContrastPending) {
+                    overlay._bvhThemeContrastPending = false;
+                    updateThemeContrast(colors);
+                }
+            });
+        };
         syncThemeControls(initialTheme);
         overlay.querySelectorAll('[data-theme-preset]').forEach(button => {
             if (button.dataset.bvhThemeBound) return;
             button.dataset.bvhThemeBound = 'true';
             button.addEventListener('click', () => {
                 const selected = button.dataset.themePreset;
-                syncThemeControls({ ...COLOR_THEMES[selected], preset: selected, mode: selected === 'dark' ? 'dark' : 'light' });
+                const theme = overlay._bvhThemeDrafts[selected] || { ...COLOR_THEMES[selected], preset: selected, basePreset: selected, mode: selected === 'dark' ? 'dark' : 'light' };
+                syncThemeControls(theme);
             });
         });
         overlay.querySelectorAll('[data-theme-color]').forEach(input => {
             if (input.dataset.bvhThemeBound) return;
             input.dataset.bvhThemeBound = 'true';
             input.addEventListener('input', () => {
-                const theme = { ...(overlay._bvhThemeDraft || COLOR_THEMES.pink), preset: 'custom', [input.dataset.themeColor]: input.value };
+                const current = overlay._bvhThemeDraft || COLOR_THEMES.pink;
+                const preset = THEME_PRESETS.includes(current.preset) ? current.preset : 'pink';
+                const theme = { ...current, preset, basePreset: preset, [input.dataset.themeColor]: input.value };
+                overlay._bvhThemeDrafts[preset] = theme;
                 overlay._bvhThemeDraft = theme;
-                const colors = applyColorTheme(theme);
-                updateThemeContrast(colors);
-                overlay.querySelectorAll('[data-theme-preset]').forEach(button => button.classList.remove('is-active'));
+                overlay._bvhThemeActivePreset = preset;
+                scheduleThemeSampleUpdate();
+            });
+            input.addEventListener('change', () => {
+                overlay._bvhThemeContrastPending = true;
+                scheduleThemeSampleUpdate();
+            });
+        });
+        overlay.querySelectorAll('[data-theme-reset-preset]').forEach(button => {
+            if (button.dataset.bvhThemeBound) return;
+            button.dataset.bvhThemeBound = 'true';
+            button.addEventListener('click', () => {
+                const preset = button.dataset.themeResetPreset;
+                const theme = { ...COLOR_THEMES[preset], preset, basePreset: preset, mode: preset === 'dark' ? 'dark' : 'light' };
+                syncThemeControls(theme);
             });
         });
         const contrastFixButton = overlay.querySelector('#bvh-theme-contrast button');
         if (contrastFixButton && !contrastFixButton.dataset.bvhThemeBound) {
             contrastFixButton.dataset.bvhThemeBound = 'true';
             contrastFixButton.addEventListener('click', () => {
-                const current = { ...(overlay._bvhThemeDraft || COLOR_THEMES.pink), preset: 'custom' };
+                const current = overlay._bvhThemeDraft || COLOR_THEMES.pink;
                 const colors = cloneColorTheme(current);
                 const settingsReadable = bestThemeTextColor([colors.panel]);
                 const recordReadable = bestThemeTextColor([colors.panel, colors.card]);
-                syncThemeControls({ ...current, settingsText: settingsReadable, recordText: recordReadable, muted: recordReadable });
+                const theme = { ...current, settingsText: settingsReadable, recordText: recordReadable, muted: recordReadable };
+                syncThemeControls(theme);
             });
-        }
-        const resetThemeButton = overlay.querySelector('.bvh-theme-reset');
-        if (resetThemeButton && !resetThemeButton.dataset.bvhThemeBound) {
-            resetThemeButton.dataset.bvhThemeBound = 'true';
-            resetThemeButton.addEventListener('click', () => syncThemeControls({ ...COLOR_THEMES.pink, preset: 'pink', mode: 'light' }));
         }
         let settingTooltip = document.getElementById('bvh-setting-tooltip');
         if (!settingTooltip) {
