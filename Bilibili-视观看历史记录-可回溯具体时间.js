@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.8.0
+// @version      5.8.1
 // @description  优化历史搜索规则、界面字号应用和页面高频 DOM 处理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -23,7 +23,8 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
-// 5.8.0：历史悬浮窗继续从每来源 N 条、合计 2N 的候选池实时选取最近快照。
+// 5.8.1：官方历史页首次读取前 N 条后固定 official 候选；player 候选继续实时更新。
+// 5.8.0：历史悬浮窗从每来源 N 条、合计 2N 的候选池选取最近快照。
 // 5.7.27：从新版历史卡片外层读取标题、作者和时间，修复时间为空导致同步跳过。
 // 5.7.25：适配新版官方历史卡片；弹窗关闭后延迟 200ms 解锁背景滚轮。
 // 5.7.24：统一搜索帮助与实际匹配规则；界面字号应用到历史列表/说明卡；合并高频 DOM 观察处理。
@@ -88,6 +89,7 @@
     const CONTINUOUS_PROGRESS_SETTINGS_KEY = 'bvh_continuous_progress_settings_v1';
     const CONTINUOUS_MODE_SETTINGS_KEY = 'bvh_continuous_mode_settings_v1';
     const UI_FONT_SIZE_SETTINGS_KEY = 'bvh_ui_font_size_settings_v1';
+    const COLOR_THEME_SETTINGS_KEY = 'bvh_color_theme_settings_v1';
 
     // 【模块：统一运行参数】
     // 集中管理记录过期、最近快照数量与来源配额、存储容量、采集间隔、搜索防抖、
@@ -131,6 +133,21 @@
         UI_FONT_SIZE: 16,
         CONTINUOUS_DEDUP_MODE: 'both', // time：只看时间；progress：只看进度差；both：两项同时满足
     };
+
+    const COLOR_THEMES = {
+        pink: { label: 'B站粉', accent: '#fb7299', accent2: '#f6a0b9', panel: '#fffafd', card: '#ffffff', text: '#30323a', muted: '#77717c', border: '#eadfe5', progressStart: '#fb7299', progressEnd: '#f7a4bd' },
+        blue: { label: 'B站蓝', accent: '#00a1d6', accent2: '#66c7e5', panel: '#f5fbff', card: '#ffffff', text: '#263642', muted: '#657984', border: '#d7e8ef', progressStart: '#00a1d6', progressEnd: '#8dd8ee' },
+        dark: { label: '暗色', accent: '#fb7299', accent2: '#d65a82', panel: '#17191e', card: '#24272e', text: '#eceef2', muted: '#a8adb7', border: '#3b3f48', progressStart: '#fb7299', progressEnd: '#a94c70' }
+    };
+    const THEME_COLOR_KEYS = ['accent', 'accent2', 'panel', 'card', 'text', 'muted', 'border', 'progressStart', 'progressEnd'];
+    const cloneColorTheme = value => Object.fromEntries(THEME_COLOR_KEYS.map(key => [key, /^#[0-9a-f]{6}$/i.test(value?.[key] || '') ? value[key] : COLOR_THEMES.pink[key]]));
+    function applyColorTheme(theme) {
+        const values = cloneColorTheme(theme);
+        const root = document.documentElement;
+        Object.entries(values).forEach(([key, value]) => root.style.setProperty(`--bvh-theme-${key.replace(/[A-Z]/g, m => `-${m.toLowerCase()}`)}`, value));
+        root.dataset.bvhTheme = theme?.preset === 'dark' ? 'dark' : 'light';
+        return values;
+    }
 
     // 同一次观看判定统一入口：时间差、进度差可单独启用，也可要求两项同时满足。
     // 进度使用绝对差值，避免进度回退/重看被误判为连续推进。
@@ -1237,6 +1254,8 @@
         _recentCacheMemory: null,
         _recentCacheLoaded: false,
         _recentCacheSaveTimer: null,
+        // 官方历史页每次整页加载后，固定首次读取到的前 N 条 official 候选；player 桶仍实时维护。
+        _pageOfficialSnapshots: null,
         _ensureAfterPaintScheduled: false,
 
         // 快照来源分桶：只认显式的 official / player，其余一律 unknown。
@@ -1249,6 +1268,50 @@
             if (src === 'official') return 'official';
             if (src === 'player') return 'player';
             return 'unknown';
+        },
+
+        _isOfficialHistoryPage() {
+            return location.pathname === '/history' || location.pathname.startsWith('/history/');
+        },
+
+        // 首次官方同步读满 N 张卡片后，只固定这些卡片对应的 official 快照；本页后续同步照常写历史。
+        pinOfficialSnapshotsFromHistoryCards(cardDataList, nowTs = TimeTool.now()) {
+            if (!this._isOfficialHistoryPage() || Array.isArray(this._pageOfficialSnapshots)) return false;
+            const count = Math.max(1, Math.min(CONFIG.RECENT_SNAPSHOT_MAX,
+                Math.floor(Number(CONFIG.RECENT_SNAPSHOT_COUNT) || 1)));
+            if (!Array.isArray(cardDataList) || cardDataList.length < count) return false;
+
+            const firstCards = cardDataList.slice(0, count);
+            const parsedTimes = firstCards.map(data => TimeTool.parseWatchTime(data?.dateText, nowTs));
+            // 未成功读出前 N 张卡片的时间时不冻结；后续同步仍可重试。
+            if (parsedTimes.some(parsed => !parsed.valid || !parsed.ts)) return false;
+
+            const pinned = [];
+            for (let i = 0; i < firstCards.length; i++) {
+                const data = firstCards[i];
+                const ident = data?.ident;
+                if (!ident?.key) continue;
+                const record = RecordStore.readSyncRecord(ident.key)?.flat;
+                if (!record || !Array.isArray(record.snapshots)) continue;
+                const targetMinute = minuteKeyOf(parsedTimes[i].ts);
+                const snapshot = record.snapshots
+                    .filter(snap => snap?.source === 'official' && minuteKeyOf(snap.ts) === targetMinute)
+                    .sort((a, b) => Math.abs(Number(a.ts || 0) - parsedTimes[i].ts) - Math.abs(Number(b.ts || 0) - parsedTimes[i].ts))[0];
+                if (!snapshot) continue;
+                pinned.push({
+                    ...snapshot,
+                    bvKey: ident.key,
+                    title: record.title || data.title || '',
+                    authorName: record.authorName || data.authorName || '',
+                    watchCount: Number(record.watchCount) || 0,
+                    mediaType: record.mediaType || data.mediaType || '',
+                    mediaSubtitle: record.mediaSubtitle || data.subtitle || '',
+                    mediaTags: Array.isArray(record.mediaTags) ? record.mediaTags : (data.mediaTags || [])
+                });
+            }
+            pinned.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+            this._pageOfficialSnapshots = pinned;
+            return true;
         },
 
         // 把 keys 对应的记录快照插入有序数组 latest（按 ts 降序，最多 maxCount 条）。
@@ -1466,7 +1529,10 @@
 
             const hot = index.hotSnapshots;
             const playerList = hot && Array.isArray(hot.player) ? hot.player : [];
-            const officialList = hot && Array.isArray(hot.official) ? hot.official : [];
+            const pinnedOfficial = this._isOfficialHistoryPage() && Array.isArray(this._pageOfficialSnapshots);
+            const officialList = pinnedOfficial
+                ? this._pageOfficialSnapshots
+                : hot && Array.isArray(hot.official) ? hot.official : [];
 
             // 第一轮：各桶按自己的配额出，桶内本就按 ts 降序，从前往后取。
             // 去重命中也要前进指针，否则会在重复项上原地打转。
@@ -1495,7 +1561,7 @@
             sortByTs();
 
             // 兜底：热池没攒够（刚升级 / 记录很少）时，用常驻最近快照列表补位
-            if (picked.length < maxCount && Array.isArray(index.latestSnapshots)) {
+            if (!pinnedOfficial && picked.length < maxCount && Array.isArray(index.latestSnapshots)) {
                 for (const snap of index.latestSnapshots) {
                     if (picked.length >= maxCount) break;
                     push(snap);
@@ -5041,6 +5107,10 @@
                 }
             }
 
+            // 首次读到官方历史页前 N 张卡片后固定 official 候选；之后仍照常扫描并写本地历史，
+            // 但页面未整页刷新前不再用后续 DOM 扫描结果替换这批 official 候选。
+            HistoryViewIndex.pinOfficialSnapshotsFromHistoryCards(cardDataList, nowTs);
+
             const listDom = document.getElementById('bvh-hp-list');
             if (listDom) {
                 HistoryListRenderer.renderInto(listDom, document.getElementById('bvh-hp-search')?.value || '', 'history-page');
@@ -7602,6 +7672,76 @@
                 pointer-events: none; touch-action: pan-y;
             }
         `);
+        GM_addStyle(`
+            :root {
+                --bvh-theme-accent:#fb7299; --bvh-theme-accent-2:#f6a0b9;
+                --bvh-theme-panel:#fffafd; --bvh-theme-card:#fff; --bvh-theme-text:#30323a;
+                --bvh-theme-muted:#77717c; --bvh-theme-border:#eadfe5;
+                --bvh-theme-progress-start:#fb7299; --bvh-theme-progress-end:#f7a4bd;
+            }
+            #bvh-history-page-panel, #bvh-history-panel, #bvh-menu-panel, .bvh-settings-dialog {
+                background-color:var(--bvh-theme-panel) !important; color:var(--bvh-theme-text);
+                border-color:var(--bvh-theme-border) !important;
+            }
+            #bvh-hp-drag-bar { background:linear-gradient(135deg,var(--bvh-theme-accent),var(--bvh-theme-accent-2)) !important; }
+            #bvh-playback-history-dragbar strong, .bvh-playback-history-dragbar strong,
+            .bvh-record-context-title, .bvh-record-dialog-title, .bvh-settings-header button:hover,
+            .bvh-setting-row b { color:var(--bvh-theme-accent) !important; }
+            #bvh-history-close, #bvh-history-close:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent); color:var(--bvh-theme-accent); }
+            #bvh-history-list, #bvh-hp-list { background:color-mix(in srgb,var(--bvh-theme-card) 62%,transparent); border-color:var(--bvh-theme-border); }
+            .bvh-history-item:not(.bvh-history-group-item):hover, .bvh-part-row:hover,
+            .bvh-hp-actions button:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 10%,var(--bvh-theme-card)); }
+            .bvh-history-header { color:var(--bvh-theme-accent); background:color-mix(in srgb,var(--bvh-theme-accent) 10%,var(--bvh-theme-card)); }
+            .bvh-hp-actions button, #bvh-history-search, #bvh-hp-search,
+            .bvh-setting-row select, .bvh-setting-number { border-color:var(--bvh-theme-border); }
+            #bvh-history-search:focus, #bvh-hp-search:focus, .bvh-setting-row select:focus,
+            .bvh-setting-number:focus { border-color:var(--bvh-theme-accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--bvh-theme-accent) 16%,transparent); }
+            .bvh-search-help-btn, .bvh-record-dialog-btn.is-primary, .bvh-settings-footer [data-save] {
+                border-color:var(--bvh-theme-accent) !important; background:var(--bvh-theme-accent) !important; color:#fff !important;
+            }
+            .bvh-progress-bar, .bvh-storage-meter i, .bvh-liquid-fill {
+                background:linear-gradient(90deg,var(--bvh-theme-progress-start),var(--bvh-theme-progress-end)) !important;
+            }
+            .bvh-loading-spinner { border-top-color:var(--bvh-theme-accent) !important; border-right-color:var(--bvh-theme-accent) !important; }
+            #bvh-settings-overlay[data-bvh-theme="dark"] .bvh-settings-dialog,
+            #bvh-settings-overlay[data-bvh-theme="dark"] .bvh-setting-group,
+            #bvh-settings-overlay[data-bvh-theme="dark"] .bvh-setting-note { color:var(--bvh-theme-text); }
+            :root[data-bvh-theme="dark"] #bvh-history-page-panel,
+            :root[data-bvh-theme="dark"] #bvh-history-panel,
+            :root[data-bvh-theme="dark"] #bvh-menu-panel { background:color-mix(in srgb,var(--bvh-theme-panel) 94%,transparent) !important; }
+            :root[data-bvh-theme="dark"] #bvh-history-list, :root[data-bvh-theme="dark"] #bvh-hp-list,
+            :root[data-bvh-theme="dark"] .bvh-history-item, :root[data-bvh-theme="dark"] .bvh-part-row,
+            :root[data-bvh-theme="dark"] .bvh-settings-dialog { color:var(--bvh-theme-text); }
+            :root[data-bvh-theme="dark"] .bvh-history-item, :root[data-bvh-theme="dark"] .bvh-part-row,
+            :root[data-bvh-theme="dark"] .bvh-hp-actions button, :root[data-bvh-theme="dark"] #bvh-history-search,
+            :root[data-bvh-theme="dark"] #bvh-hp-search, :root[data-bvh-theme="dark"] .bvh-setting-row select,
+            :root[data-bvh-theme="dark"] .bvh-setting-number { background:var(--bvh-theme-card) !important; color:var(--bvh-theme-text) !important; border-color:var(--bvh-theme-border) !important; }
+            :root[data-bvh-theme="dark"] .bvh-history-item *, :root[data-bvh-theme="dark"] .bvh-part-row *,
+            :root[data-bvh-theme="dark"] .bvh-settings-dialog .bvh-setting-row > span,
+            :root[data-bvh-theme="dark"] .bvh-settings-dialog .bvh-setting-group h4 { color:var(--bvh-theme-text); }
+            :root[data-bvh-theme="dark"] .bvh-hp-storage, :root[data-bvh-theme="dark"] .bvh-storage-info,
+            :root[data-bvh-theme="dark"] .bvh-history-loading { color:var(--bvh-theme-muted) !important; }
+            :root[data-bvh-theme="dark"] .bvh-settings-intro, :root[data-bvh-theme="dark"] .bvh-setting-note,
+            :root[data-bvh-theme="dark"] .bvh-settings-header, :root[data-bvh-theme="dark"] .bvh-settings-footer { background:var(--bvh-theme-card); color:var(--bvh-theme-text); }
+            .bvh-theme-presets { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:4px 0 12px; }
+            .bvh-theme-presets button { display:flex; align-items:center; gap:9px; min-width:0; padding:9px 11px; border:1px solid var(--bvh-theme-border); border-radius:11px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
+            .bvh-theme-presets button.is-active { border-color:var(--bvh-theme-accent); box-shadow:0 0 0 2px color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent); }
+            .bvh-theme-presets i { display:block; flex:0 0 25px; width:25px; height:25px; border-radius:8px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }
+            .bvh-theme-advanced { margin:8px 0 12px; border:1px solid var(--bvh-theme-border); border-radius:11px; background:color-mix(in srgb,var(--bvh-theme-card) 80%,transparent); color:var(--bvh-theme-text); }
+            .bvh-theme-advanced summary { padding:10px 12px; color:var(--bvh-theme-accent); cursor:pointer; font-weight:650; }
+            .bvh-theme-color-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; padding:0 11px 11px; }
+            .bvh-theme-color-grid label { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 8px; border:1px solid var(--bvh-theme-border); border-radius:9px; color:var(--bvh-theme-text); font-size:12px; }
+            .bvh-theme-color-grid input { width:34px; height:28px; padding:2px; border:1px solid var(--bvh-theme-border); border-radius:6px; background:transparent; cursor:pointer; }
+            .bvh-theme-preview { overflow:hidden; border:1px solid var(--bvh-theme-border); border-radius:12px; background:var(--bvh-theme-panel); color:var(--bvh-theme-text); box-shadow:0 5px 16px rgba(30,25,35,.08); }
+            .bvh-theme-preview-head { display:flex; justify-content:space-between; padding:9px 12px; background:linear-gradient(110deg,var(--bvh-theme-accent),var(--bvh-theme-accent-2)); color:white; font-weight:700; font-size:12px; }
+            .bvh-theme-preview-head span { opacity:.82; font-weight:500; }
+            .bvh-theme-preview-body { padding:11px 12px; background:var(--bvh-theme-card); }
+            .bvh-theme-preview-body strong,.bvh-theme-preview-body small { display:block; color:var(--bvh-theme-text); }
+            .bvh-theme-preview-body small { margin-top:3px; color:var(--bvh-theme-muted); }
+            .bvh-theme-preview-track { height:9px; margin:10px 0; overflow:hidden; border-radius:99px; background:var(--bvh-theme-border); }
+            .bvh-theme-preview-track i { display:block; width:68%; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--bvh-theme-progress-start),var(--bvh-theme-progress-end)); }
+            .bvh-theme-preview-body button { padding:5px 10px; border:0; border-radius:8px; background:var(--bvh-theme-accent); color:#fff; }
+        `);
     }
 
     // 播放页浮窗内容：existingFloat 分支和新建分支共用同一份 HTML 生成
@@ -8323,6 +8463,9 @@
         const uiFontSetting = Number(GM_getValue(UI_FONT_SIZE_SETTINGS_KEY, 16));
         if (Number.isFinite(uiFontSetting)) CONFIG.UI_FONT_SIZE = Math.max(14, Math.min(20, Math.round(uiFontSetting)));
         document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+        const savedTheme = GM_getValue(COLOR_THEME_SETTINGS_KEY, null);
+        const themePreset = COLOR_THEMES[savedTheme?.preset] ? savedTheme.preset : 'pink';
+        applyColorTheme({ ...COLOR_THEMES[themePreset], ...savedTheme, preset: themePreset });
 
         const short = GM_getValue(SHORT_WATCH_SETTINGS_KEY, null);
         if (short && typeof short === 'object') {
@@ -8371,11 +8514,37 @@
                         <div class="bvh-setting-group"><h4>记录管理</h4>
                             <label class="bvh-setting-row"><span>长期记录过期天数 <b id="bvh-setting-expire-value"></b><small title="超过该天数且已备份的长期未更新记录会被标记为可清理，不会自动删除。">ⓘ</small></span><input id="bvh-setting-expire" type="range" min="1" max="365" step="1"></label>
                             <label class="bvh-setting-row"><span>官方历史同步页数 <b id="bvh-setting-pages-value"></b><small title="每次同步最多加载的官方历史页数；越大读取越多，也越耗时。">ⓘ</small></span><input id="bvh-setting-pages" type="range" min="1" max="100" step="1"></label>
-                            <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="player 和 official 来源各保留最多 N 条候选（合计最多 2N），悬浮窗按来源配额选出 N 条并随记录更新。不改变每条记录保存的快照上限。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
+                            <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="player 与 official 各最多保留 N 条候选（合计最多 2N）；历史页读满前 N 条后固定 official 候选，player 候选继续更新。修改 N 后刷新历史页生效。不改变每条记录保存的快照上限。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
                             <label class="bvh-setting-row"><span>自动获取来源占比 <b id="bvh-setting-quota-value"></b><small title="最近快照列表中 player 来源至少占用的比例；剩余名额由官方同步来源补足。">ⓘ</small></span><input id="bvh-setting-quota" type="range" min="0" max="100" step="5"></label>
                             <label class="bvh-setting-row"><span>短观看阈值 <b id="bvh-setting-short-value"></b><small title="播放位置严格小于该秒数的记录会被视为短观看，按下面的保留天数清理。">ⓘ</small></span><input id="bvh-setting-short" type="range" min="0" max="120" step="1"></label>
                             <label class="bvh-setting-row"><span>短观看保留天数 <b id="bvh-setting-retention-value"></b><small title="短观看记录保留多久；0 表示立即符合清理条件。">ⓘ</small></span><input id="bvh-setting-retention" type="range" min="0" max="365" step="1"></label>
                             <label class="bvh-setting-row"><span>界面字号 <small title="调整设置窗口、历史列表、搜索规则卡和设置说明卡的主要文字字号。">ⓘ</small></span><select id="bvh-setting-font-size"><option value="14">较小（14px）</option><option value="16">标准（16px）</option><option value="18">较大（18px）</option><option value="20">特大（20px）</option></select></label>
+                        </div>
+                        <div class="bvh-setting-group bvh-theme-settings"><h4>界面配色</h4>
+                            <div class="bvh-theme-presets" role="group" aria-label="预设主题">
+                                <button type="button" data-theme-preset="pink"><i style="background:linear-gradient(135deg,#fb7299,#f6a0b9)"></i><span>B站粉</span></button>
+                                <button type="button" data-theme-preset="blue"><i style="background:linear-gradient(135deg,#00a1d6,#8dd8ee)"></i><span>B站蓝</span></button>
+                                <button type="button" data-theme-preset="dark"><i style="background:linear-gradient(135deg,#17191e,#3b3f48)"></i><span>暗色</span></button>
+                            </div>
+                            <details class="bvh-theme-advanced"><summary>高级颜色选择</summary>
+                                <div class="bvh-theme-color-grid">
+                                    <label>主色<input type="color" data-theme-color="accent"></label>
+                                    <label>辅助色<input type="color" data-theme-color="accent2"></label>
+                                    <label>面板背景<input type="color" data-theme-color="panel"></label>
+                                    <label>卡片背景<input type="color" data-theme-color="card"></label>
+                                    <label>主文字<input type="color" data-theme-color="text"></label>
+                                    <label>次级文字<input type="color" data-theme-color="muted"></label>
+                                    <label>边框<input type="color" data-theme-color="border"></label>
+                                    <label>进度渐变起点<input type="color" data-theme-color="progressStart"></label>
+                                    <label>进度渐变终点<input type="color" data-theme-color="progressEnd"></label>
+                                </div>
+                                <button type="button" class="bvh-theme-reset">恢复 B 站粉默认配色</button>
+                            </details>
+                            <div class="bvh-theme-preview" id="bvh-theme-preview">
+                                <div class="bvh-theme-preview-head">本地观看记录 <span>预览</span></div>
+                                <div class="bvh-theme-preview-body"><strong>视频标题示例</strong><small>UP主 · 最近观看</small><div class="bvh-theme-preview-track"><i></i></div><button type="button" tabindex="-1">打开记录</button></div>
+                            </div>
+                            <p class="bvh-setting-note">切换主题或调色会立即预览；保存后应用，取消会还原。高级颜色支持浏览器调色板；进度条渐变由起点和终点颜色组成。</p>
                         </div>
                     </div>
                     <footer class="bvh-settings-footer"><button type="button" data-cancel>取消</button><button type="button" data-save>保存设置</button></footer>
@@ -8383,6 +8552,7 @@
             document.body.appendChild(overlay);
             overlay.addEventListener('click', e => {
                 if (e.target === overlay || e.target.closest('[data-close], [data-cancel]')) {
+                    applyColorTheme(GM_getValue(COLOR_THEME_SETTINGS_KEY, { preset: 'pink', ...COLOR_THEMES.pink }));
                     overlay.style.display = 'none';
                     if (settingTooltip) settingTooltip.hidden = true;
                 }
@@ -8400,6 +8570,9 @@
                 CONFIG.SHORT_WATCH_MAX_POS_SEC = get('bvh-setting-short');
                 CONFIG.SHORT_WATCH_EXPIRE_DAY = get('bvh-setting-retention');
                 CONFIG.UI_FONT_SIZE = Number(overlay.querySelector('#bvh-setting-font-size').value);
+                const chosenTheme = overlay._bvhThemeDraft || { preset: 'pink', ...COLOR_THEMES.pink };
+                GM_setValue(COLOR_THEME_SETTINGS_KEY, { ...cloneColorTheme(chosenTheme), preset: chosenTheme.preset || 'custom' });
+                applyColorTheme(chosenTheme);
                 document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
                 overlay.querySelector('.bvh-settings-dialog').style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
                 const now = Date.now();
@@ -8435,6 +8608,39 @@
         const dialog = overlay.querySelector('.bvh-settings-dialog');
         document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
         dialog.style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+        const savedTheme = GM_getValue(COLOR_THEME_SETTINGS_KEY, null);
+        const preset = COLOR_THEMES[savedTheme?.preset] ? savedTheme.preset : 'pink';
+        const initialTheme = { ...COLOR_THEMES[preset], ...savedTheme, preset };
+        const syncThemeControls = theme => {
+            overlay._bvhThemeDraft = { ...theme };
+            const colors = cloneColorTheme(theme);
+            applyColorTheme(theme);
+            overlay.querySelectorAll('[data-theme-color]').forEach(input => { input.value = colors[input.dataset.themeColor]; });
+            overlay.querySelectorAll('[data-theme-preset]').forEach(button => button.classList.toggle('is-active', button.dataset.themePreset === theme.preset));
+        };
+        syncThemeControls(initialTheme);
+        overlay.querySelectorAll('[data-theme-preset]').forEach(button => {
+            if (button.dataset.bvhThemeBound) return;
+            button.dataset.bvhThemeBound = 'true';
+            button.addEventListener('click', () => {
+                const selected = button.dataset.themePreset;
+                syncThemeControls({ ...COLOR_THEMES[selected], preset: selected });
+            });
+        });
+        overlay.querySelectorAll('[data-theme-color]').forEach(input => {
+            if (input.dataset.bvhThemeBound) return;
+            input.dataset.bvhThemeBound = 'true';
+            input.addEventListener('input', () => syncThemeControls({
+                ...(overlay._bvhThemeDraft || COLOR_THEMES.pink),
+                preset: 'custom',
+                [input.dataset.themeColor]: input.value
+            }));
+        });
+        const resetThemeButton = overlay.querySelector('.bvh-theme-reset');
+        if (resetThemeButton && !resetThemeButton.dataset.bvhThemeBound) {
+            resetThemeButton.dataset.bvhThemeBound = 'true';
+            resetThemeButton.addEventListener('click', () => syncThemeControls({ ...COLOR_THEMES.pink, preset: 'pink' }));
+        }
         let settingTooltip = document.getElementById('bvh-setting-tooltip');
         if (!settingTooltip) {
             settingTooltip = document.createElement('div');
