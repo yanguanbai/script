@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.8.1
+// @version      5.8.17
 // @description  优化历史搜索规则、界面字号应用和页面高频 DOM 处理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -23,6 +23,21 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
+// 5.8.17：恢复悬浮窗操作按钮横向布局；观看次数绿色加入自定义配色，三套预设默认保持绿色。
+// 5.8.16：历史页操作按钮改为自适应网格；视频页和历史页入口悬浮窗改用主题文字色，不再残留固定粉色。
+// 5.8.15：黑金操作按钮改为暖炭黑底和低饱和暗金边框，避免冷灰边框破坏黑金配色。
+// 5.8.14：三套预设标题栏文字改为用户选定色；黑金历史悬浮窗去掉深色外框。
+// 5.8.13：历史列表重绘遮罩跟随主题面板色；悬浮窗按钮焦点边框跟随主色，清除蓝色主题下的白色洗淡和粉色残边。
+// 5.8.12：黑金标题文字改为暖棕色，避免纯黑压在金色渐变上；标题、“!”和关闭符号仍共用可调文字色。
+// 5.8.11：标题栏文字、“!”和关闭符号共用可调文字色；黑金改用香槟金，滑轨刻度点使用柔和边框。
+// 5.8.10：设置文字与历史记录文字分开配色；“!”跟随设置文字；标题渐变与滑轨刻度点独立调色。
+// 5.8.8：新增独立的标题栏渐变起止色选择，预设、实时预览和面板标题栏共用同一组颜色。
+// 5.8.7：收敛黑金主题边框、替换白色滚动条，压低操作按钮高度并调整为自适应网格。
+// 5.8.6：预设主题改为始终读取当前内置配色，迁移旧缓存；滑轨活动态残粉改为主题色。
+// 5.8.5：修复 accent2 未映射到 CSS 变量名导致辅色回退成默认粉；滑轨活动态残留粉色光晕改为主题色。
+// 5.8.4：黑金主题改用香槟金与中性灰细边框，移除暗色面板和合集卡片的白色内描边。
+// 5.8.3：暗色主题改为黑金，并补齐悬浮窗、菜单及设置控件中的主题强调色覆盖。
+// 5.8.2：新增粉/蓝/暗主题和高级配色预览，可自定义面板、卡片、文字、边框及进度渐变。
 // 5.8.1：官方历史页首次读取前 N 条后固定 official 候选；player 候选继续实时更新。
 // 5.8.0：历史悬浮窗从每来源 N 条、合计 2N 的候选池选取最近快照。
 // 5.7.27：从新版历史卡片外层读取标题、作者和时间，修复时间为空导致同步跳过。
@@ -135,18 +150,62 @@
     };
 
     const COLOR_THEMES = {
-        pink: { label: 'B站粉', accent: '#fb7299', accent2: '#f6a0b9', panel: '#fffafd', card: '#ffffff', text: '#30323a', muted: '#77717c', border: '#eadfe5', progressStart: '#fb7299', progressEnd: '#f7a4bd' },
-        blue: { label: 'B站蓝', accent: '#00a1d6', accent2: '#66c7e5', panel: '#f5fbff', card: '#ffffff', text: '#263642', muted: '#657984', border: '#d7e8ef', progressStart: '#00a1d6', progressEnd: '#8dd8ee' },
-        dark: { label: '暗色', accent: '#fb7299', accent2: '#d65a82', panel: '#17191e', card: '#24272e', text: '#eceef2', muted: '#a8adb7', border: '#3b3f48', progressStart: '#fb7299', progressEnd: '#a94c70' }
+        pink: { label: 'B站粉', accent: '#fb7299', accent2: '#f6a0b9', watchCountText: '#27ae60', headerStart: '#f45f8b', headerEnd: '#ffb4ca', headerText: '#f5eff2', sliderDot: '#d65b80', panel: '#fffafd', card: '#ffffff', settingsText: '#624b54', recordText: '#39343a', muted: '#77717c', border: '#eadfe5', progressStart: '#fb7299', progressEnd: '#f7a4bd' },
+        blue: { label: 'B站蓝', accent: '#00a1d6', accent2: '#66c7e5', watchCountText: '#27ae60', headerStart: '#087fa9', headerEnd: '#56c4e4', headerText: '#cedfe4', sliderDot: '#007da5', panel: '#f5fbff', card: '#ffffff', settingsText: '#36535f', recordText: '#263642', muted: '#657984', border: '#d7e8ef', progressStart: '#00a1d6', progressEnd: '#8dd8ee' },
+        dark: { label: '黑金', accent: '#c6a04b', accent2: '#e6ce8c', watchCountText: '#27ae60', headerStart: '#a47a2d', headerEnd: '#e3c774', headerText: '#e6d8b3', sliderDot: '#e6ce8c', panel: '#151618', card: '#202124', settingsText: '#e6d8b3', recordText: '#f1efe9', muted: '#a6a49d', border: '#51452f', progressStart: '#9a7226', progressEnd: '#e6ce8c' }
     };
-    const THEME_COLOR_KEYS = ['accent', 'accent2', 'panel', 'card', 'text', 'muted', 'border', 'progressStart', 'progressEnd'];
-    const cloneColorTheme = value => Object.fromEntries(THEME_COLOR_KEYS.map(key => [key, /^#[0-9a-f]{6}$/i.test(value?.[key] || '') ? value[key] : COLOR_THEMES.pink[key]]));
+    const THEME_COLOR_KEYS = ['accent', 'accent2', 'watchCountText', 'headerStart', 'headerEnd', 'headerText', 'sliderDot', 'panel', 'card', 'settingsText', 'recordText', 'muted', 'border', 'progressStart', 'progressEnd'];
+    const isThemeHex = value => /^#[0-9a-f]{6}$/i.test(value || '');
+    const cloneColorTheme = value => Object.fromEntries(THEME_COLOR_KEYS.map(key => {
+        const fallback = key === 'headerStart' ? (isThemeHex(value?.accent) ? value.accent : COLOR_THEMES.pink.headerStart)
+            : key === 'headerEnd' ? (isThemeHex(value?.accent2) ? value.accent2 : COLOR_THEMES.pink.headerEnd)
+            : key === 'watchCountText' ? '#27ae60'
+                : key === 'headerText' ? (isThemeHex(value?.settingsText) ? value.settingsText : COLOR_THEMES.pink.headerText)
+                : key === 'sliderDot' ? (isThemeHex(value?.accent) ? value.accent : COLOR_THEMES.pink.sliderDot)
+                : key === 'settingsText' || key === 'recordText' ? (isThemeHex(value?.text) ? value.text : COLOR_THEMES.pink[key])
+                : COLOR_THEMES.pink[key];
+        return [key, isThemeHex(value?.[key]) ? value[key] : fallback];
+    }));
     function applyColorTheme(theme) {
         const values = cloneColorTheme(theme);
         const root = document.documentElement;
-        Object.entries(values).forEach(([key, value]) => root.style.setProperty(`--bvh-theme-${key.replace(/[A-Z]/g, m => `-${m.toLowerCase()}`)}`, value));
-        root.dataset.bvhTheme = theme?.preset === 'dark' ? 'dark' : 'light';
+        Object.entries(values).forEach(([key, value]) => {
+            const cssKey = key === 'accent2' ? 'accent-2' : key.replace(/[A-Z]/g, m => `-${m.toLowerCase()}`);
+            root.style.setProperty(`--bvh-theme-${cssKey}`, value);
+        });
+        root.style.setProperty('--bvh-theme-text', values.settingsText);
+        const darkText = theme?.mode === 'dark' ? '#17191e' : values.settingsText;
+        const accentText = themeContrastRatio(values.accent, darkText) >= themeContrastRatio(values.accent, '#ffffff') ? darkText : '#ffffff';
+        root.style.setProperty('--bvh-theme-accent-text', accentText);
+        root.style.setProperty('--bvh-theme-header-text', values.headerText);
+        root.dataset.bvhTheme = theme?.mode === 'dark' || theme?.preset === 'dark' ? 'dark' : 'light';
         return values;
+    }
+    function readColorTheme() {
+        const saved = GM_getValue(COLOR_THEME_SETTINGS_KEY, null);
+        const storedPreset = saved?.preset;
+        const preset = COLOR_THEMES[storedPreset] ? storedPreset : 'pink';
+        const mode = saved?.mode || (preset === 'dark' ? 'dark' : 'light');
+        if (storedPreset === 'custom') return { ...COLOR_THEMES.pink, ...saved, preset: 'custom', mode };
+        // 预设只保存名称，使用当前版本内置的完整调色板；不能让旧版本的缓存覆盖新版预设。
+        const theme = { ...COLOR_THEMES[preset], preset, mode };
+        if (saved && saved.version !== 2) GM_setValue(COLOR_THEME_SETTINGS_KEY, { ...theme, version: 2 });
+        return theme;
+    }
+    function themeColorLuminance(hex) {
+        const rgb = String(hex || '').match(/^#([0-9a-f]{6})$/i)?.[1];
+        if (!rgb) return 0;
+        const channels = [0, 2, 4].map(i => parseInt(rgb.slice(i, i + 2), 16) / 255).map(v => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+        return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+    }
+    function themeContrastRatio(a, b) {
+        const x = themeColorLuminance(a), y = themeColorLuminance(b);
+        return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+    }
+    function bestThemeTextColor(backgrounds) {
+        return ['#17191e', '#f5f6f8', '#626873', '#b5bbc5']
+            .map(color => ({ color, ratio: Math.min(...backgrounds.map(bg => themeContrastRatio(color, bg))) }))
+            .sort((a, b) => b.ratio - a.ratio)[0].color;
     }
 
     // 同一次观看判定统一入口：时间差、进度差可单独启用，也可要求两项同时满足。
@@ -7656,6 +7715,7 @@
             .bvh-hp-actions button:hover {
                 background: rgba(255,240,245,.9); border-color: #ffc2d2; transform: translateY(-1px);
             }
+            .bvh-hp-actions button:focus { outline: none; }
             #bvh-hp-list { flex: 1; }
             #bvh-history-list.bvh-list-rendering,
             #bvh-hp-list.bvh-list-rendering {
@@ -7668,61 +7728,171 @@
                 inset: 0;
                 z-index: 2;
                 border-radius: 12px;
-                background: rgba(255,255,255,.82);
+                background: color-mix(in srgb,var(--bvh-theme-panel,#fffafd) 82%,transparent);
                 pointer-events: none; touch-action: pan-y;
             }
         `);
         GM_addStyle(`
             :root {
                 --bvh-theme-accent:#fb7299; --bvh-theme-accent-2:#f6a0b9;
-                --bvh-theme-panel:#fffafd; --bvh-theme-card:#fff; --bvh-theme-text:#30323a;
+                --bvh-theme-panel:#fffafd; --bvh-theme-card:#fff; --bvh-theme-text:#624b54;
+                --bvh-theme-settings-text:#624b54; --bvh-theme-record-text:#39343a;
                 --bvh-theme-muted:#77717c; --bvh-theme-border:#eadfe5;
                 --bvh-theme-progress-start:#fb7299; --bvh-theme-progress-end:#f7a4bd;
+                --bvh-theme-header-start:#f45f8b; --bvh-theme-header-end:#ffb4ca;
+                --bvh-theme-header-text:#fff;
+                --bvh-theme-slider-dot:#d65b80;
+                --bvh-theme-accent-text:#fff; --bvh-theme-watch-count-text:#27ae60;
             }
             #bvh-history-page-panel, #bvh-history-panel, #bvh-menu-panel, .bvh-settings-dialog {
                 background-color:var(--bvh-theme-panel) !important; color:var(--bvh-theme-text);
                 border-color:var(--bvh-theme-border) !important;
             }
-            #bvh-hp-drag-bar { background:linear-gradient(135deg,var(--bvh-theme-accent),var(--bvh-theme-accent-2)) !important; }
+            #bvh-status-float { background:color-mix(in srgb,var(--bvh-theme-card) 90%,transparent); color:var(--bvh-theme-record-text); border-left-color:var(--bvh-theme-accent); }
+            .bvh-float-accent { color:var(--bvh-theme-accent) !important; }
+            .bvh-float-accent-2 { color:var(--bvh-theme-watch-count-text,#27ae60) !important; }
+            .bvh-float-record { color:var(--bvh-theme-record-text) !important; }
+            .bvh-float-muted { color:var(--bvh-theme-muted) !important; }
+            .bvh-settings-dialog, .bvh-settings-dialog .bvh-setting-row > span,
+            .bvh-settings-dialog .bvh-setting-group h4, .bvh-settings-dialog .bvh-setting-note,
+            .bvh-settings-header strong, .bvh-settings-footer button, .bvh-setting-number,
+            .bvh-setting-row select, .bvh-settings-intro strong, .bvh-settings-intro p,
+            .bvh-hp-actions button, #bvh-hp-search, .bvh-storage-info,
+            .bvh-search-help, .bvh-setting-tooltip { color:var(--bvh-theme-settings-text) !important; }
+            .bvh-history-item, .bvh-history-group-item, .bvh-part-row, .bvh-group-title,
+            .bvh-part-title, #bvh-status-float { color:var(--bvh-theme-record-text); }
+            .bvh-history-item small, .bvh-group-latest, .bvh-part-quick-meta,
+            .bvh-part-detail-line, .bvh-snapshot-item { color:var(--bvh-theme-muted); }
+            #bvh-status-float.bvh-docked { background:var(--bvh-theme-accent); }
+            #bvh-status-float.bvh-docked:hover, #bvh-status-float.bvh-docked:focus-within { background:var(--bvh-theme-card); border-left-color:var(--bvh-theme-accent); }
+            #bvh-status-float.bvh-docked { box-shadow:0 4px 18px color-mix(in srgb,var(--bvh-theme-accent) 35%,transparent); }
+            #bvh-status-float [style*="color:#666"], #bvh-status-float [style*="color: #666"],
+            #bvh-status-float [style*="color:#555"], #bvh-status-float [style*="color: #555"],
+            #bvh-status-float [style*="color:#888"] { color:var(--bvh-theme-muted) !important; }
+            #bvh-status-float [style*="color:#fb7299"] { color:var(--bvh-theme-accent) !important; }
+            #bvh-status-float [style*="color:#27ae60"] { color:var(--bvh-theme-accent-2) !important; }
+            #bvh-hp-drag-bar { color:var(--bvh-theme-header-text) !important; background:linear-gradient(135deg,var(--bvh-theme-header-start),var(--bvh-theme-header-end)) !important; }
+            #bvh-menu-panel button:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 12%,var(--bvh-theme-card)) !important; border-color:color-mix(in srgb,var(--bvh-theme-accent) 45%,var(--bvh-theme-border)) !important; color:var(--bvh-theme-accent) !important; box-shadow:0 4px 12px color-mix(in srgb,var(--bvh-theme-accent) 12%,transparent) !important; }
+            #bvh-menu-panel #bvh-show-history { border-color:color-mix(in srgb,var(--bvh-theme-accent) 35%,transparent) !important; background:linear-gradient(110deg,color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent),var(--bvh-theme-card)) !important; color:var(--bvh-theme-accent) !important; }
+            .bvh-settings-header button:hover, .bvh-setting-row small, .bvh-setting-row b,
+            .bvh-setting-group h4:before { color:var(--bvh-theme-accent) !important; }
+            .bvh-slider-node.is-active span { color:var(--bvh-theme-slider-dot) !important; }
+            .bvh-setting-group h4:before { background:linear-gradient(var(--bvh-theme-accent),var(--bvh-theme-accent-2)) !important; }
+            .bvh-settings-footer [data-save] { border-color:var(--bvh-theme-accent) !important; background:linear-gradient(110deg,var(--bvh-theme-accent),var(--bvh-theme-accent-2)) !important; box-shadow:0 5px 18px color-mix(in srgb,var(--bvh-theme-accent) 24%,transparent) !important; }
+            .bvh-setting-number:focus, .bvh-setting-row select:focus, .bvh-record-count-input:focus { border-color:var(--bvh-theme-accent) !important; box-shadow:0 0 0 3px color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent) !important; }
+            .bvh-playback-history-dragbar strong, .bvh-record-context-title, .bvh-record-dialog-title,
+            .bvh-group-head:hover .bvh-group-title, .bvh-part-row:hover .bvh-part-title,
+            .bvh-part-detail-toggle:hover, .bvh-search-help-head, .bvh-playback-menu-head span { color:var(--bvh-theme-accent) !important; }
+            .bvh-playback-history-dragbar:after, #bvh-history-close, #bvh-history-close:hover,
+            .bvh-search-help-head button { color:var(--bvh-theme-accent) !important; background:color-mix(in srgb,var(--bvh-theme-accent) 12%,var(--bvh-theme-card)) !important; border-color:color-mix(in srgb,var(--bvh-theme-accent) 28%,var(--bvh-theme-border)) !important; }
+            .bvh-search-help-head button:hover, .bvh-record-dialog-btn:hover,
+            .bvh-group-toggle:hover, .bvh-part-detail-toggle:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 12%,var(--bvh-theme-card)) !important; border-color:color-mix(in srgb,var(--bvh-theme-accent) 40%,var(--bvh-theme-border)) !important; }
+            .bvh-record-dialog-btn.is-primary, .bvh-record-dialog-btn.is-primary:hover { background:var(--bvh-theme-accent) !important; border-color:var(--bvh-theme-accent) !important; }
+            .bvh-menu-drag-hint { color:var(--bvh-theme-accent) !important; background:color-mix(in srgb,var(--bvh-theme-accent) 10%,var(--bvh-theme-card)) !important; border-color:color-mix(in srgb,var(--bvh-theme-accent) 28%,var(--bvh-theme-border)) !important; }
+            #bvh-history-panel.bvh-resizing:before, #bvh-history-panel.bvh-dragging:before,
+            #bvh-history-page-panel.bvh-dragging:before, #bvh-history-page-panel.bvh-compositor-dragging:before { color:var(--bvh-theme-accent) !important; }
+            #bvh-history-page-entry [style*="color:#fb7299"], #bvh-status-float [style*="color:#fb7299"] { color:var(--bvh-theme-accent) !important; }
+            #bvh-history-page-entry #bvh-status-float { color:var(--bvh-theme-record-text); }
+            .bvh-page-entry-content { display:flex; align-items:center; gap:11px; }
+            .bvh-page-entry-icon { flex:0 0 auto; font-size:23px; line-height:1; }
+            .bvh-page-entry-copy { display:flex; min-width:0; flex-direction:column; gap:3px; }
+            .bvh-page-entry-title { color:var(--bvh-theme-accent) !important; font-size:14px; font-weight:700; line-height:1.25; }
+            .bvh-page-entry-subtitle { color:var(--bvh-theme-muted) !important; font-size:11px; line-height:1.3; }
+            .bvh-settings-header { background:linear-gradient(105deg,color-mix(in srgb,var(--bvh-theme-accent) 14%,transparent),color-mix(in srgb,var(--bvh-theme-accent-2) 10%,transparent) 65%,transparent) !important; }
+            .bvh-settings-intro { border-color:color-mix(in srgb,var(--bvh-theme-accent) 25%,transparent); background:linear-gradient(115deg,color-mix(in srgb,var(--bvh-theme-accent) 12%,var(--bvh-theme-panel)),var(--bvh-theme-card) 62%,color-mix(in srgb,var(--bvh-theme-accent-2) 10%,var(--bvh-theme-panel))) !important; }
+            .bvh-settings-intro-mark { background:linear-gradient(145deg,var(--bvh-theme-accent),var(--bvh-theme-accent-2)) !important; }
             #bvh-playback-history-dragbar strong, .bvh-playback-history-dragbar strong,
             .bvh-record-context-title, .bvh-record-dialog-title, .bvh-settings-header button:hover,
             .bvh-setting-row b { color:var(--bvh-theme-accent) !important; }
             #bvh-history-close, #bvh-history-close:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent); color:var(--bvh-theme-accent); }
             #bvh-history-list, #bvh-hp-list { background:color-mix(in srgb,var(--bvh-theme-card) 62%,transparent); border-color:var(--bvh-theme-border); }
-            .bvh-history-item:not(.bvh-history-group-item):hover, .bvh-part-row:hover,
-            .bvh-hp-actions button:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 10%,var(--bvh-theme-card)); }
+            .bvh-history-item:not(.bvh-history-header):not(.bvh-history-group-item), .bvh-history-group-item,
+            .bvh-part-row { background:var(--bvh-theme-card); color:var(--bvh-theme-record-text); border-color:var(--bvh-theme-border); }
+            .bvh-group-title, .bvh-part-title { color:var(--bvh-theme-record-text); }
+            .bvh-group-latest, .bvh-part-quick-meta, .bvh-part-detail-line,
+            .bvh-snapshot-item, .bvh-snapshot-progress { color:var(--bvh-theme-muted); }
+            .bvh-history-item:not(.bvh-history-group-item):hover, .bvh-part-row:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 10%,var(--bvh-theme-card)); }
+            .bvh-hp-actions button:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 10%,var(--bvh-theme-card)); border-color:color-mix(in srgb,var(--bvh-theme-accent) 52%,var(--bvh-theme-border)); }
             .bvh-history-header { color:var(--bvh-theme-accent); background:color-mix(in srgb,var(--bvh-theme-accent) 10%,var(--bvh-theme-card)); }
             .bvh-hp-actions button, #bvh-history-search, #bvh-hp-search,
             .bvh-setting-row select, .bvh-setting-number { border-color:var(--bvh-theme-border); }
             #bvh-history-search:focus, #bvh-hp-search:focus, .bvh-setting-row select:focus,
             .bvh-setting-number:focus { border-color:var(--bvh-theme-accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--bvh-theme-accent) 16%,transparent); }
-            .bvh-search-help-btn, .bvh-record-dialog-btn.is-primary, .bvh-settings-footer [data-save] {
-                border-color:var(--bvh-theme-accent) !important; background:var(--bvh-theme-accent) !important; color:#fff !important;
+            .bvh-search-help-btn { border-color:var(--bvh-theme-accent) !important; background:var(--bvh-theme-accent) !important; color:var(--bvh-theme-header-text) !important; }
+            .bvh-hp-actions button:focus-visible { outline:2px solid var(--bvh-theme-accent) !important; outline-offset:2px; border-color:var(--bvh-theme-accent) !important; }
+            .bvh-record-dialog-btn.is-primary, .bvh-settings-footer [data-save] {
+                border-color:var(--bvh-theme-accent) !important; background:var(--bvh-theme-accent) !important; color:var(--bvh-theme-accent-text) !important;
             }
             .bvh-progress-bar, .bvh-storage-meter i, .bvh-liquid-fill {
                 background:linear-gradient(90deg,var(--bvh-theme-progress-start),var(--bvh-theme-progress-end)) !important;
             }
-            .bvh-loading-spinner { border-top-color:var(--bvh-theme-accent) !important; border-right-color:var(--bvh-theme-accent) !important; }
-            #bvh-settings-overlay[data-bvh-theme="dark"] .bvh-settings-dialog,
-            #bvh-settings-overlay[data-bvh-theme="dark"] .bvh-setting-group,
-            #bvh-settings-overlay[data-bvh-theme="dark"] .bvh-setting-note { color:var(--bvh-theme-text); }
+            .bvh-liquid-slider:after { background:linear-gradient(145deg,#fff 0%,color-mix(in srgb,var(--bvh-theme-accent) 18%,#fff) 38%,var(--bvh-theme-accent) 100%) !important; box-shadow:0 2px 7px color-mix(in srgb,var(--bvh-theme-accent) 38%,transparent),0 0 0 3px color-mix(in srgb,var(--bvh-theme-accent) 16%,transparent),inset 0 1px 2px rgba(255,255,255,.95) !important; }
+            .bvh-liquid-track { border-color:var(--bvh-theme-border) !important; box-shadow:inset 0 2px 5px rgba(0,0,0,.12) !important; }
+            .bvh-liquid-fill { box-shadow:0 0 9px color-mix(in srgb,var(--bvh-theme-accent) 32%,transparent) !important; }
+            .bvh-liquid-slider:active:after { box-shadow:0 3px 10px color-mix(in srgb,var(--bvh-theme-accent) 42%,transparent),0 0 0 5px color-mix(in srgb,var(--bvh-theme-accent) 20%,transparent),inset 0 1px 2px rgba(255,255,255,.95) !important; }
+            .bvh-slider-node:after { background:var(--bvh-theme-slider-dot) !important; }
+            .bvh-slider-node:hover:after, .bvh-slider-node.is-active:after { background:var(--bvh-theme-slider-dot) !important; border-color:var(--bvh-theme-border) !important; box-shadow:0 0 0 3px color-mix(in srgb,var(--bvh-theme-slider-dot) 22%,transparent),0 0 9px color-mix(in srgb,var(--bvh-theme-slider-dot) 40%,transparent) !important; }
+            .bvh-loading-spinner { border-color:color-mix(in srgb,var(--bvh-theme-accent) 22%,transparent); border-top-color:var(--bvh-theme-accent) !important; border-right-color:var(--bvh-theme-accent) !important; }
             :root[data-bvh-theme="dark"] #bvh-history-page-panel,
             :root[data-bvh-theme="dark"] #bvh-history-panel,
             :root[data-bvh-theme="dark"] #bvh-menu-panel { background:color-mix(in srgb,var(--bvh-theme-panel) 94%,transparent) !important; }
+            :root[data-bvh-theme="dark"] #bvh-history-page-panel, :root[data-bvh-theme="dark"] #bvh-history-panel,
+            :root[data-bvh-theme="dark"] #bvh-menu-panel, :root[data-bvh-theme="dark"] .bvh-settings-dialog { border:1px solid var(--bvh-theme-border) !important; box-shadow:0 14px 38px rgba(0,0,0,.42) !important; }
+            :root[data-bvh-theme="dark"] #bvh-status-float:not(.bvh-docked) { border-color:var(--bvh-theme-border) !important; border-left:4px solid var(--bvh-theme-accent) !important; box-shadow:0 10px 30px rgba(0,0,0,.38) !important; }
+            :root[data-bvh-theme="dark"] .bvh-history-group-item,
+            :root[data-bvh-theme="dark"] .bvh-history-group-item:hover { border-color:var(--bvh-theme-border) !important; box-shadow:0 2px 7px rgba(0,0,0,.3) !important; }
+            :root[data-bvh-theme="dark"] #bvh-status-float.bvh-docked { background:var(--bvh-theme-accent) !important; border-color:var(--bvh-theme-accent) !important; }
             :root[data-bvh-theme="dark"] #bvh-history-list, :root[data-bvh-theme="dark"] #bvh-hp-list,
-            :root[data-bvh-theme="dark"] .bvh-history-item, :root[data-bvh-theme="dark"] .bvh-part-row,
-            :root[data-bvh-theme="dark"] .bvh-settings-dialog { color:var(--bvh-theme-text); }
+            :root[data-bvh-theme="dark"] .bvh-settings-dialog { color:var(--bvh-theme-settings-text); }
+            :root[data-bvh-theme="dark"] .bvh-history-item, :root[data-bvh-theme="dark"] .bvh-history-group-item,
+            :root[data-bvh-theme="dark"] .bvh-part-row, :root[data-bvh-theme="dark"] #bvh-status-float { color:var(--bvh-theme-record-text); }
             :root[data-bvh-theme="dark"] .bvh-history-item, :root[data-bvh-theme="dark"] .bvh-part-row,
             :root[data-bvh-theme="dark"] .bvh-hp-actions button, :root[data-bvh-theme="dark"] #bvh-history-search,
             :root[data-bvh-theme="dark"] #bvh-hp-search, :root[data-bvh-theme="dark"] .bvh-setting-row select,
-            :root[data-bvh-theme="dark"] .bvh-setting-number { background:var(--bvh-theme-card) !important; color:var(--bvh-theme-text) !important; border-color:var(--bvh-theme-border) !important; }
-            :root[data-bvh-theme="dark"] .bvh-history-item *, :root[data-bvh-theme="dark"] .bvh-part-row *,
+            :root[data-bvh-theme="dark"] .bvh-setting-number,
+            :root[data-bvh-theme="dark"] #bvh-status-float.bvh-docked:hover,
+            :root[data-bvh-theme="dark"] #bvh-status-float.bvh-docked:focus-within { background:var(--bvh-theme-card) !important; color:var(--bvh-theme-record-text) !important; border-color:var(--bvh-theme-border) !important; }
+            :root[data-bvh-theme="dark"] .bvh-hp-actions button, :root[data-bvh-theme="dark"] #bvh-hp-search,
+            :root[data-bvh-theme="dark"] #bvh-history-search, :root[data-bvh-theme="dark"] .bvh-setting-row select,
+            :root[data-bvh-theme="dark"] .bvh-setting-number { color:var(--bvh-theme-settings-text) !important; }
+            :root[data-bvh-theme="dark"] .bvh-group-title, :root[data-bvh-theme="dark"] .bvh-part-title { color:var(--bvh-theme-record-text) !important; }
             :root[data-bvh-theme="dark"] .bvh-settings-dialog .bvh-setting-row > span,
-            :root[data-bvh-theme="dark"] .bvh-settings-dialog .bvh-setting-group h4 { color:var(--bvh-theme-text); }
+            :root[data-bvh-theme="dark"] .bvh-settings-dialog .bvh-setting-group h4 { color:var(--bvh-theme-settings-text); }
             :root[data-bvh-theme="dark"] .bvh-hp-storage, :root[data-bvh-theme="dark"] .bvh-storage-info,
             :root[data-bvh-theme="dark"] .bvh-history-loading { color:var(--bvh-theme-muted) !important; }
             :root[data-bvh-theme="dark"] .bvh-settings-intro, :root[data-bvh-theme="dark"] .bvh-setting-note,
-            :root[data-bvh-theme="dark"] .bvh-settings-header, :root[data-bvh-theme="dark"] .bvh-settings-footer { background:var(--bvh-theme-card); color:var(--bvh-theme-text); }
+            :root[data-bvh-theme="dark"] .bvh-settings-header, :root[data-bvh-theme="dark"] .bvh-settings-footer { background:var(--bvh-theme-card); color:var(--bvh-theme-settings-text); }
+            :root[data-bvh-theme="dark"] .bvh-settings-intro strong, :root[data-bvh-theme="dark"] .bvh-settings-intro p,
+            :root[data-bvh-theme="dark"] .bvh-settings-header strong, :root[data-bvh-theme="dark"] .bvh-setting-note { color:var(--bvh-theme-settings-text); }
+            :root[data-bvh-theme="dark"] .bvh-group-toggle, :root[data-bvh-theme="dark"] .bvh-part-label,
+            :root[data-bvh-theme="dark"] .bvh-small-collection-box, :root[data-bvh-theme="dark"] .bvh-part-details,
+            :root[data-bvh-theme="dark"] .bvh-record-context-menu, :root[data-bvh-theme="dark"] .bvh-record-dialog,
+            :root[data-bvh-theme="dark"] .bvh-search-help { background:var(--bvh-theme-card) !important; color:var(--bvh-theme-settings-text) !important; border-color:var(--bvh-theme-border) !important; }
+            :root[data-bvh-theme="dark"] .bvh-small-collection-name, :root[data-bvh-theme="dark"] .bvh-search-help-section strong,
+            :root[data-bvh-theme="dark"] .bvh-search-help-section p, :root[data-bvh-theme="dark"] .bvh-record-context-action,
+            :root[data-bvh-theme="dark"] .bvh-record-count-label, :root[data-bvh-theme="dark"] .bvh-record-dialog-desc { color:var(--bvh-theme-settings-text) !important; }
+            :root[data-bvh-theme="dark"] .bvh-search-help-head { background:var(--bvh-theme-card) !important; border-color:var(--bvh-theme-border) !important; }
+            :root[data-bvh-theme="dark"] #bvh-menu-panel button, :root[data-bvh-theme="dark"] .bvh-record-count-input,
+            :root[data-bvh-theme="dark"] .bvh-record-dialog-btn { background:var(--bvh-theme-card) !important; color:var(--bvh-theme-settings-text) !important; border-color:var(--bvh-theme-border) !important; }
+            :root[data-bvh-theme="dark"] #bvh-menu-panel #bvh-show-history,
+            :root[data-bvh-theme="dark"] .bvh-record-dialog-btn.is-primary { background:var(--bvh-theme-accent) !important; color:var(--bvh-theme-accent-text) !important; border-color:var(--bvh-theme-accent) !important; }
+            .bvh-resize-handle { background:linear-gradient(135deg,transparent 0 42%,color-mix(in srgb,var(--bvh-theme-accent) 55%,transparent) 43% 49%,transparent 50% 61%,color-mix(in srgb,var(--bvh-theme-accent) 72%,transparent) 62% 68%,transparent 69%) !important; }
+            :root[data-bvh-theme="dark"] #bvh-hp-drag-bar { color:var(--bvh-theme-header-text) !important; background:linear-gradient(120deg,var(--bvh-theme-header-start),var(--bvh-theme-header-end)) !important; }
+            #bvh-hp-close-btn { background:color-mix(in srgb,var(--bvh-theme-header-text) 12%,transparent) !important; color:var(--bvh-theme-header-text) !important; }
+            :root[data-bvh-theme="dark"] .bvh-hp-actions { display:flex !important; }
+            :root[data-bvh-theme="dark"] .bvh-hp-actions button { min-width:0; min-height:42px; padding:8px 6px; border:1px solid var(--bvh-theme-border) !important; border-radius:10px; background:#242321 !important; color:var(--bvh-theme-settings-text) !important; font-size:12px; line-height:1.3; white-space:normal; overflow-wrap:anywhere; }
+            :root[data-bvh-theme="dark"] .bvh-hp-actions button:hover { border-color:var(--bvh-theme-accent) !important; background:color-mix(in srgb,var(--bvh-theme-accent) 18%,#242321) !important; color:var(--bvh-theme-settings-text) !important; transform:translateY(-1px); }
+            :root[data-bvh-theme="dark"] #bvh-history-page-panel { border:0 !important; box-shadow:0 18px 48px rgba(0,0,0,.48) !important; }
+            :root[data-bvh-theme="dark"] #bvh-hp-list { border:1px solid #343537 !important; background:#1b1c1f !important; scrollbar-color:#77736a #222326; scrollbar-width:thin; }
+            :root[data-bvh-theme="dark"] #bvh-hp-list::-webkit-scrollbar { width:10px; }
+            :root[data-bvh-theme="dark"] #bvh-hp-list::-webkit-scrollbar-track { border-radius:8px; background:#222326; }
+            :root[data-bvh-theme="dark"] #bvh-hp-list::-webkit-scrollbar-thumb { border:2px solid #222326; border-radius:8px; background:#716d63; }
+            :root[data-bvh-theme="dark"] #bvh-hp-search { border:1px solid #393a3c !important; background:#202124 !important; }
+            :root[data-bvh-theme="dark"] #bvh-hp-search:focus { border-color:var(--bvh-theme-accent) !important; }
+            :root[data-bvh-theme="dark"] .bvh-history-group-item, :root[data-bvh-theme="dark"] .bvh-part-row { border-color:#38393a !important; }
+            :root[data-bvh-theme="dark"] .bvh-history-header { background:#292722 !important; color:#e4c368 !important; }
+            :root[data-bvh-theme="dark"] #bvh-hp-list::-webkit-scrollbar-thumb:hover { background:#a28c58; }
+            :root[data-bvh-theme="dark"] .bvh-resize-handle { background:linear-gradient(135deg,transparent 0 42%,color-mix(in srgb,var(--bvh-theme-accent) 30%,transparent) 43% 49%,transparent 50% 61%,color-mix(in srgb,var(--bvh-theme-accent) 44%,transparent) 62% 68%,transparent 69%) !important; }
             .bvh-theme-presets { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:4px 0 12px; }
             .bvh-theme-presets button { display:flex; align-items:center; gap:9px; min-width:0; padding:9px 11px; border:1px solid var(--bvh-theme-border); border-radius:11px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
             .bvh-theme-presets button.is-active { border-color:var(--bvh-theme-accent); box-shadow:0 0 0 2px color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent); }
@@ -7730,17 +7900,25 @@
             .bvh-theme-advanced { margin:8px 0 12px; border:1px solid var(--bvh-theme-border); border-radius:11px; background:color-mix(in srgb,var(--bvh-theme-card) 80%,transparent); color:var(--bvh-theme-text); }
             .bvh-theme-advanced summary { padding:10px 12px; color:var(--bvh-theme-accent); cursor:pointer; font-weight:650; }
             .bvh-theme-color-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; padding:0 11px 11px; }
+            .bvh-theme-color-section + .bvh-theme-color-section { margin-top:8px; padding-top:8px; border-top:1px solid var(--bvh-theme-border); }
+            .bvh-theme-color-section h5 { margin:4px 11px 8px; color:var(--bvh-theme-settings-text); font-size:12px; font-weight:700; }
             .bvh-theme-color-grid label { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 8px; border:1px solid var(--bvh-theme-border); border-radius:9px; color:var(--bvh-theme-text); font-size:12px; }
             .bvh-theme-color-grid input { width:34px; height:28px; padding:2px; border:1px solid var(--bvh-theme-border); border-radius:6px; background:transparent; cursor:pointer; }
             .bvh-theme-preview { overflow:hidden; border:1px solid var(--bvh-theme-border); border-radius:12px; background:var(--bvh-theme-panel); color:var(--bvh-theme-text); box-shadow:0 5px 16px rgba(30,25,35,.08); }
-            .bvh-theme-preview-head { display:flex; justify-content:space-between; padding:9px 12px; background:linear-gradient(110deg,var(--bvh-theme-accent),var(--bvh-theme-accent-2)); color:white; font-weight:700; font-size:12px; }
+            .bvh-theme-preview-head { display:flex; justify-content:flex-start; align-items:center; gap:10px; padding:9px 12px; background:linear-gradient(110deg,var(--bvh-theme-header-start),var(--bvh-theme-header-end)); color:var(--bvh-theme-header-text); font-weight:700; font-size:12px; }
             .bvh-theme-preview-head span { opacity:.82; font-weight:500; }
             .bvh-theme-preview-body { padding:11px 12px; background:var(--bvh-theme-card); }
-            .bvh-theme-preview-body strong,.bvh-theme-preview-body small { display:block; color:var(--bvh-theme-text); }
+            .bvh-theme-preview-body strong { display:block; color:var(--bvh-theme-record-text); }
+            .bvh-theme-preview-body small { display:block; color:var(--bvh-theme-muted); }
             .bvh-theme-preview-body small { margin-top:3px; color:var(--bvh-theme-muted); }
+            .bvh-theme-preview-help { margin-left:8px; width:22px; height:22px; border:0; border-radius:50%; background:var(--bvh-theme-accent); color:var(--bvh-theme-header-text); font-weight:700; }
             .bvh-theme-preview-track { height:9px; margin:10px 0; overflow:hidden; border-radius:99px; background:var(--bvh-theme-border); }
             .bvh-theme-preview-track i { display:block; width:68%; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--bvh-theme-progress-start),var(--bvh-theme-progress-end)); }
-            .bvh-theme-preview-body button { padding:5px 10px; border:0; border-radius:8px; background:var(--bvh-theme-accent); color:#fff; }
+            .bvh-theme-preview-track b { position:absolute; top:50%; left:45%; width:9px; height:9px; transform:translate(-50%,-50%); border:1px solid var(--bvh-theme-card); border-radius:50%; background:var(--bvh-theme-slider-dot); box-shadow:0 0 0 2px color-mix(in srgb,var(--bvh-theme-slider-dot) 22%,transparent); }
+            .bvh-theme-preview-track { position:relative; }
+            .bvh-theme-preview-body button { padding:5px 10px; border:0; border-radius:8px; background:var(--bvh-theme-accent); color:var(--bvh-theme-accent-text); }
+            .bvh-theme-contrast { margin:8px 0 0; color:#b35b28; font-size:11px; }
+            .bvh-theme-contrast button,.bvh-theme-reset { margin:5px 0 0; padding:6px 9px; border:1px solid var(--bvh-theme-border); border-radius:8px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
         `);
     }
 
@@ -7760,13 +7938,13 @@
         const contextTitle = collectionTitle && collectionTitle !== partTitle ? collectionTitle : '';
         const detailTitle = partTitle || (partNumber ? `第${partNumber}集` : '当前分集');
         return `
-            ${mediaType ? `<div style="font-size:11px; color:#8b6f82;">${escapeHtml(mediaType)}</div>` : ''}
-            ${contextTitle ? `<div style="font-size:12px; color:#666;">${escapeHtml(contextTitle)}</div>` : ''}
-            <div style="font-size:12px; color:#555;">${escapeHtml(detailTitle)}</div>
-            <div style="font-weight:bold; color:#fb7299;">上次进度: ${escapeHtml(history.lastProgress || '0%')}</div>
-            <div style="font-size:12px; color:#27ae60;">观看次数: ${Number(history.watchCount) || 0}</div>
-            <div style="font-size:12px; color:#666;">UP：${escapeHtml(history.authorName || '作者未知')}</div>
-            <div style="font-size:12px; color:#666;">上次观看：${escapeHtml(lastWatchDate)}</div>
+            ${mediaType ? `<div class="bvh-float-muted" style="font-size:11px;">${escapeHtml(mediaType)}</div>` : ''}
+            ${contextTitle ? `<div class="bvh-float-muted" style="font-size:12px;">${escapeHtml(contextTitle)}</div>` : ''}
+            <div class="bvh-float-record" style="font-size:12px;">${escapeHtml(detailTitle)}</div>
+            <div class="bvh-float-accent" style="font-weight:bold;">上次进度: ${escapeHtml(history.lastProgress || '0%')}</div>
+            <div class="bvh-float-accent-2" style="font-size:12px;">观看次数: ${Number(history.watchCount) || 0}</div>
+            <div class="bvh-float-muted" style="font-size:12px;">UP：${escapeHtml(history.authorName || '作者未知')}</div>
+            <div class="bvh-float-muted" style="font-size:12px;">上次观看：${escapeHtml(lastWatchDate)}</div>
         `;
     }
 
@@ -7978,8 +8156,8 @@
                 existingFloat.innerHTML = history
                     ? buildPlaybackFloatHtml(history)
                     : `
-                        <div style="font-weight:bold; color:#fb7299;">当前视频暂无本地记录</div>
-                        <div style="font-size:12px; color:#666;">${key}</div>
+                        <div class="bvh-float-accent" style="font-weight:bold;">当前视频暂无本地记录</div>
+                        <div class="bvh-float-muted" style="font-size:12px;">${key}</div>
                     `;
                 requestAnimationFrame(() => autoPositionPlaybackPanel(
                     document.getElementById('bvh-history-panel'), existingFloat
@@ -8147,7 +8325,7 @@
                 floatBox.dataset.hasRecord = history ? 'true' : 'false';
                 floatBox.innerHTML = history
                     ? buildPlaybackFloatHtml(history)
-                    : `<div style="font-weight:bold; color:#fb7299;">当前视频暂无本地记录</div><div style="font-size:12px; color:#666;">${key}</div>`;
+                    : `<div class="bvh-float-accent" style="font-weight:bold;">当前视频暂无本地记录</div><div class="bvh-float-muted" style="font-size:12px;">${key}</div>`;
 
                 let isClick = false;
                 let downX = 0, downY = 0;
@@ -8254,8 +8432,10 @@
             entry.id = 'bvh-history-page-entry';
             entry.innerHTML = `
                 <div id="bvh-status-float" style="cursor:pointer;">
-                    <div style="font-weight:bold;color:#fb7299;font-size:13px;">📂 本地记录</div>
-                    <div style="font-size:11px;color:#888;margin-top:2px;">点击打开历史面板</div>
+                    <div class="bvh-page-entry-content">
+                        <span class="bvh-page-entry-icon" aria-hidden="true">📂</span>
+                        <span class="bvh-page-entry-copy"><strong class="bvh-page-entry-title">本地记录</strong><small class="bvh-page-entry-subtitle">点击打开历史面板</small></span>
+                    </div>
                 </div>
             `;
             document.body.appendChild(entry);
@@ -8463,9 +8643,7 @@
         const uiFontSetting = Number(GM_getValue(UI_FONT_SIZE_SETTINGS_KEY, 16));
         if (Number.isFinite(uiFontSetting)) CONFIG.UI_FONT_SIZE = Math.max(14, Math.min(20, Math.round(uiFontSetting)));
         document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
-        const savedTheme = GM_getValue(COLOR_THEME_SETTINGS_KEY, null);
-        const themePreset = COLOR_THEMES[savedTheme?.preset] ? savedTheme.preset : 'pink';
-        applyColorTheme({ ...COLOR_THEMES[themePreset], ...savedTheme, preset: themePreset });
+        applyColorTheme(readColorTheme());
 
         const short = GM_getValue(SHORT_WATCH_SETTINGS_KEY, null);
         if (short && typeof short === 'object') {
@@ -8522,29 +8700,40 @@
                         </div>
                         <div class="bvh-setting-group bvh-theme-settings"><h4>界面配色</h4>
                             <div class="bvh-theme-presets" role="group" aria-label="预设主题">
-                                <button type="button" data-theme-preset="pink"><i style="background:linear-gradient(135deg,#fb7299,#f6a0b9)"></i><span>B站粉</span></button>
-                                <button type="button" data-theme-preset="blue"><i style="background:linear-gradient(135deg,#00a1d6,#8dd8ee)"></i><span>B站蓝</span></button>
-                                <button type="button" data-theme-preset="dark"><i style="background:linear-gradient(135deg,#17191e,#3b3f48)"></i><span>暗色</span></button>
+                                <button type="button" data-theme-preset="pink"><i style="background:linear-gradient(135deg,#f45f8b,#ffb4ca)"></i><span>B站粉</span></button>
+                                <button type="button" data-theme-preset="blue"><i style="background:linear-gradient(135deg,#087fa9,#56c4e4)"></i><span>B站蓝</span></button>
+                                <button type="button" data-theme-preset="dark"><i style="background:linear-gradient(135deg,#a47a2d,#e3c774)"></i><span>黑金</span></button>
                             </div>
                             <details class="bvh-theme-advanced"><summary>高级颜色选择</summary>
-                                <div class="bvh-theme-color-grid">
+                                <section class="bvh-theme-color-section"><h5>设置界面</h5><div class="bvh-theme-color-grid">
                                     <label>主色<input type="color" data-theme-color="accent"></label>
                                     <label>辅助色<input type="color" data-theme-color="accent2"></label>
+                                    <label>设置文字<input type="color" data-theme-color="settingsText"></label>
+                                    <label>标题栏文字和 !<input type="color" data-theme-color="headerText"></label>
+                                    <label>标题栏渐变起点<input type="color" data-theme-color="headerStart"></label>
+                                    <label>标题栏渐变终点<input type="color" data-theme-color="headerEnd"></label>
+                                </div></section>
+                                <section class="bvh-theme-color-section"><h5>历史读取内容</h5><div class="bvh-theme-color-grid">
+                                    <label>记录文字<input type="color" data-theme-color="recordText"></label>
+                                    <label>观看次数文字<input type="color" data-theme-color="watchCountText"></label>
                                     <label>面板背景<input type="color" data-theme-color="panel"></label>
                                     <label>卡片背景<input type="color" data-theme-color="card"></label>
-                                    <label>主文字<input type="color" data-theme-color="text"></label>
                                     <label>次级文字<input type="color" data-theme-color="muted"></label>
                                     <label>边框<input type="color" data-theme-color="border"></label>
+                                </div></section>
+                                <section class="bvh-theme-color-section"><h5>进度和滑轨</h5><div class="bvh-theme-color-grid">
+                                    <label>滑动条刻度点<input type="color" data-theme-color="sliderDot"></label>
                                     <label>进度渐变起点<input type="color" data-theme-color="progressStart"></label>
                                     <label>进度渐变终点<input type="color" data-theme-color="progressEnd"></label>
-                                </div>
+                                </div></section>
                                 <button type="button" class="bvh-theme-reset">恢复 B 站粉默认配色</button>
                             </details>
                             <div class="bvh-theme-preview" id="bvh-theme-preview">
-                                <div class="bvh-theme-preview-head">本地观看记录 <span>预览</span></div>
-                                <div class="bvh-theme-preview-body"><strong>视频标题示例</strong><small>UP主 · 最近观看</small><div class="bvh-theme-preview-track"><i></i></div><button type="button" tabindex="-1">打开记录</button></div>
+                                <div class="bvh-theme-preview-head">本地观看记录 <span>预览</span><button class="bvh-theme-preview-help" type="button" tabindex="-1">!</button></div>
+                                <div class="bvh-theme-preview-body"><strong>视频标题示例</strong><small>UP主 · 最近观看</small><div class="bvh-theme-preview-track"><i></i><b></b></div><button type="button" tabindex="-1">打开记录</button></div>
                             </div>
-                            <p class="bvh-setting-note">切换主题或调色会立即预览；保存后应用，取消会还原。高级颜色支持浏览器调色板；进度条渐变由起点和终点颜色组成。</p>
+                            <p class="bvh-theme-contrast" id="bvh-theme-contrast" hidden>文字与背景对比度偏低，可能不容易看清。<button type="button">自动修正设置/记录文字</button></p>
+                            <p class="bvh-setting-note">切换主题或调色会立即预览；保存后应用，取消会还原。设置界面文字与历史记录文字分开调色；标题、“!”和关闭符号共用标题栏文字色。标题栏与进度条渐变、滑轨刻度点均可单独调色。</p>
                         </div>
                     </div>
                     <footer class="bvh-settings-footer"><button type="button" data-cancel>取消</button><button type="button" data-save>保存设置</button></footer>
@@ -8552,7 +8741,7 @@
             document.body.appendChild(overlay);
             overlay.addEventListener('click', e => {
                 if (e.target === overlay || e.target.closest('[data-close], [data-cancel]')) {
-                    applyColorTheme(GM_getValue(COLOR_THEME_SETTINGS_KEY, { preset: 'pink', ...COLOR_THEMES.pink }));
+                    applyColorTheme(readColorTheme());
                     overlay.style.display = 'none';
                     if (settingTooltip) settingTooltip.hidden = true;
                 }
@@ -8571,7 +8760,7 @@
                 CONFIG.SHORT_WATCH_EXPIRE_DAY = get('bvh-setting-retention');
                 CONFIG.UI_FONT_SIZE = Number(overlay.querySelector('#bvh-setting-font-size').value);
                 const chosenTheme = overlay._bvhThemeDraft || { preset: 'pink', ...COLOR_THEMES.pink };
-                GM_setValue(COLOR_THEME_SETTINGS_KEY, { ...cloneColorTheme(chosenTheme), preset: chosenTheme.preset || 'custom' });
+                GM_setValue(COLOR_THEME_SETTINGS_KEY, { ...cloneColorTheme(chosenTheme), preset: chosenTheme.preset || 'custom', mode: chosenTheme.mode || 'light', version: 2 });
                 applyColorTheme(chosenTheme);
                 document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
                 overlay.querySelector('.bvh-settings-dialog').style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
@@ -8608,15 +8797,22 @@
         const dialog = overlay.querySelector('.bvh-settings-dialog');
         document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
         dialog.style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
-        const savedTheme = GM_getValue(COLOR_THEME_SETTINGS_KEY, null);
-        const preset = COLOR_THEMES[savedTheme?.preset] ? savedTheme.preset : 'pink';
-        const initialTheme = { ...COLOR_THEMES[preset], ...savedTheme, preset };
+        const initialTheme = readColorTheme();
         const syncThemeControls = theme => {
             overlay._bvhThemeDraft = { ...theme };
             const colors = cloneColorTheme(theme);
             applyColorTheme(theme);
             overlay.querySelectorAll('[data-theme-color]').forEach(input => { input.value = colors[input.dataset.themeColor]; });
             overlay.querySelectorAll('[data-theme-preset]').forEach(button => button.classList.toggle('is-active', button.dataset.themePreset === theme.preset));
+            updateThemeContrast(colors);
+        };
+        const updateThemeContrast = colors => {
+            const lowContrast = themeContrastRatio(colors.settingsText, colors.panel) < 4.5
+                || themeContrastRatio(colors.recordText, colors.panel) < 4.5
+                || themeContrastRatio(colors.recordText, colors.card) < 4.5
+                || themeContrastRatio(colors.muted, colors.panel) < 3
+                || themeContrastRatio(colors.muted, colors.card) < 3;
+            overlay.querySelector('#bvh-theme-contrast').hidden = !lowContrast;
         };
         syncThemeControls(initialTheme);
         overlay.querySelectorAll('[data-theme-preset]').forEach(button => {
@@ -8624,22 +8820,35 @@
             button.dataset.bvhThemeBound = 'true';
             button.addEventListener('click', () => {
                 const selected = button.dataset.themePreset;
-                syncThemeControls({ ...COLOR_THEMES[selected], preset: selected });
+                syncThemeControls({ ...COLOR_THEMES[selected], preset: selected, mode: selected === 'dark' ? 'dark' : 'light' });
             });
         });
         overlay.querySelectorAll('[data-theme-color]').forEach(input => {
             if (input.dataset.bvhThemeBound) return;
             input.dataset.bvhThemeBound = 'true';
-            input.addEventListener('input', () => syncThemeControls({
-                ...(overlay._bvhThemeDraft || COLOR_THEMES.pink),
-                preset: 'custom',
-                [input.dataset.themeColor]: input.value
-            }));
+            input.addEventListener('input', () => {
+                const theme = { ...(overlay._bvhThemeDraft || COLOR_THEMES.pink), preset: 'custom', [input.dataset.themeColor]: input.value };
+                overlay._bvhThemeDraft = theme;
+                const colors = applyColorTheme(theme);
+                updateThemeContrast(colors);
+                overlay.querySelectorAll('[data-theme-preset]').forEach(button => button.classList.remove('is-active'));
+            });
         });
+        const contrastFixButton = overlay.querySelector('#bvh-theme-contrast button');
+        if (contrastFixButton && !contrastFixButton.dataset.bvhThemeBound) {
+            contrastFixButton.dataset.bvhThemeBound = 'true';
+            contrastFixButton.addEventListener('click', () => {
+                const current = { ...(overlay._bvhThemeDraft || COLOR_THEMES.pink), preset: 'custom' };
+                const colors = cloneColorTheme(current);
+                const settingsReadable = bestThemeTextColor([colors.panel]);
+                const recordReadable = bestThemeTextColor([colors.panel, colors.card]);
+                syncThemeControls({ ...current, settingsText: settingsReadable, recordText: recordReadable, muted: recordReadable });
+            });
+        }
         const resetThemeButton = overlay.querySelector('.bvh-theme-reset');
         if (resetThemeButton && !resetThemeButton.dataset.bvhThemeBound) {
             resetThemeButton.dataset.bvhThemeBound = 'true';
-            resetThemeButton.addEventListener('click', () => syncThemeControls({ ...COLOR_THEMES.pink, preset: 'pink' }));
+            resetThemeButton.addEventListener('click', () => syncThemeControls({ ...COLOR_THEMES.pink, preset: 'pink', mode: 'light' }));
         }
         let settingTooltip = document.getElementById('bvh-setting-tooltip');
         if (!settingTooltip) {
