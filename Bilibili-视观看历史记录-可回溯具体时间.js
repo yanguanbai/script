@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.7.24
+// @version      5.7.28
 // @description  优化历史搜索规则、界面字号应用和页面高频 DOM 处理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -23,6 +23,10 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
+// 5.7.28：历史页读满设置数量后才固定快照区，未读满时继续更新。
+// 5.7.27：从新版历史卡片外层读取标题、作者和时间，修复时间为空导致同步跳过。
+// 5.7.26：最近 N 条固定读取仅作用于官方历史页，其他页面继续实时更新。
+// 5.7.25：适配新版官方历史卡片；固定官方历史页最近快照显示；编辑弹窗关闭后延迟解锁滚轮。
 // 5.7.24：统一搜索帮助与实际匹配规则；界面字号应用到历史列表/说明卡；合并高频 DOM 观察处理。
 // 5.7.23：修正合成层拖动结束时的最终坐标提交，并完善播放页外部点击保护。
  // 5.7.17：重做设置窗口滑块为 Astra 风格的粗条渐变液体滑轨，取消圆形按钮；设置窗口改为与脚本其他浮层一致的浅色磨砂玻璃风格。
@@ -1234,6 +1238,11 @@
         _recentCacheMemory: null,
         _recentCacheLoaded: false,
         _recentCacheSaveTimer: null,
+        // 每个页面生命周期固定一次最近快照展示；索引后台更新只更新历史记录区。
+        _pageRecentSnapshots: null,
+        _pageRecentSnapshotLimit: null,
+        _pageRecentSnapshotQuota: null,
+        _historyPageInitialReadComplete: false,
         _ensureAfterPaintScheduled: false,
 
         // 快照来源分桶：只认显式的 official / player，其余一律 unknown。
@@ -1302,6 +1311,10 @@
             return { player: [], official: [] };
         },
 
+        _isOfficialHistoryPage() {
+            return location.pathname === '/history' || location.pathname.startsWith('/history/');
+        },
+
         // 全量汇总两桶热池（后台分批构建结束时使用）。
         _collectHotSnapshots(itemsByKey, perSourceLimit = CONFIG.RECENT_SNAPSHOT_COUNT) {
             const hot = this._emptyHotPool();
@@ -1342,8 +1355,8 @@
         },
 
         // 来源配额比例（夹在允许区间内，非法值回退 0.5）。
-        _quotaRatio() {
-            const raw = Number(CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA);
+        _quotaRatio(value = CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA) {
+            const raw = Number(value);
             if (!Number.isFinite(raw)) return 0.5;
             const min = Number(CONFIG.RECENT_SNAPSHOT_QUOTA_MIN) || 0;
             const max = Number.isFinite(Number(CONFIG.RECENT_SNAPSHOT_QUOTA_MAX))
@@ -1362,7 +1375,20 @@
                     && Array.isArray(saved.hotSnapshots.player)
                     && Array.isArray(saved.hotSnapshots.official)
                     && Array.isArray(saved.latestSnapshots)) {
-                    this._recentCacheMemory = saved;
+                    // 缓存可能是旧设置留下的较大池；页面读取时按当前可调数量裁到前 N，
+                    // 同一标签页后续渲染直接复用内存，不再反复读取 GM 存储。
+                    const count = Math.max(1, Math.min(CONFIG.RECENT_SNAPSHOT_MAX,
+                        Math.floor(Number(CONFIG.RECENT_SNAPSHOT_COUNT) || 1)));
+                    const byNewest = (a, b) => Number(b?.ts || 0) - Number(a?.ts || 0);
+                    this._recentCacheMemory = {
+                        ...saved,
+                        count,
+                        hotSnapshots: {
+                            player: saved.hotSnapshots.player.slice().sort(byNewest).slice(0, count),
+                            official: saved.hotSnapshots.official.slice().sort(byNewest).slice(0, count)
+                        },
+                        latestSnapshots: saved.latestSnapshots.slice().sort(byNewest).slice(0, count)
+                    };
                 }
             } catch (err) {
                 console.warn('[Bilibili History] 读取最近快照缓存失败：', err);
@@ -1426,7 +1452,7 @@
         // 同一视频在 RECENT_SNAPSHOT_DEDUP_WINDOW_MS 窗口内的多条快照算同一次观看，只占 1 格；
         // 用窗口而非整分钟，是因为官方 ts 被截断到分钟、播放页是秒级，二者可能差到 59 秒。
         // 热池不足 limit 时用 latestSnapshots 兜底补齐（兼容升级前索引 / 只有官方来源的早期数据）。
-        recentDisplaySnapshots(limit = CONFIG.RECENT_SNAPSHOT_COUNT, sourceIndex = null) {
+        recentDisplaySnapshots(limit = CONFIG.RECENT_SNAPSHOT_COUNT, sourceIndex = null, quotaRatio = null) {
             // 不调用 ensure()：这里必须只读内存或小缓存，不能为了最近 N 条触发整份索引加载。
             const index = sourceIndex || (this._index && this._index.hotSnapshots ? this._index : this._readRecentCache());
             if (!index) return [];
@@ -1454,7 +1480,7 @@
 
             // 第一轮：各桶按自己的配额出，桶内本就按 ts 降序，从前往后取。
             // 去重命中也要前进指针，否则会在重复项上原地打转。
-            const playerQuota = Math.ceil(maxCount * this._quotaRatio());
+            const playerQuota = Math.ceil(maxCount * this._quotaRatio(quotaRatio == null ? CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA : quotaRatio));
             const officialQuota = maxCount - playerQuota;
             let i = 0;
             let j = 0;
@@ -1487,6 +1513,52 @@
                 sortByTs();
             }
             return picked.slice(0, maxCount);
+        },
+
+        // 页面启动时固定 N 和来源配额；有缓存就立即读一次，没有则等首轮索引构建完成。
+        initializePageRecentSnapshots() {
+            if (!this._isOfficialHistoryPage()) return;
+            this._pageRecentSnapshotLimit = Math.max(1, Math.min(CONFIG.RECENT_SNAPSHOT_MAX,
+                Math.floor(Number(CONFIG.RECENT_SNAPSHOT_COUNT) || 1)));
+            this._pageRecentSnapshotQuota = this._quotaRatio();
+        },
+
+        completeInitialHistoryRead(scannedCount) {
+            if (!this._isOfficialHistoryPage() || this._historyPageInitialReadComplete) return;
+            const required = this._pageRecentSnapshotLimit || CONFIG.RECENT_SNAPSHOT_COUNT;
+            if (Number(scannedCount) < required) return;
+            this._historyPageInitialReadComplete = true;
+            if (this._index && this._ready) this._freezePageRecentSnapshots(this._index);
+            else this.ensure();
+        },
+
+        _freezePageRecentSnapshots(source) {
+            if (Array.isArray(this._pageRecentSnapshots) || !source) return;
+            const limit = this._pageRecentSnapshotLimit || CONFIG.RECENT_SNAPSHOT_COUNT;
+            this._pageRecentSnapshots = this.recentDisplaySnapshots(limit, source, this._pageRecentSnapshotQuota)
+                .map(snap => ({ ...snap, mediaTags: Array.isArray(snap.mediaTags) ? snap.mediaTags.slice() : [] }));
+        },
+
+        // 官方历史页只显示启动时固定的前 N 条；整页刷新后才重新读取。
+        pageRecentSnapshots() {
+            // 固定读取范围只针对官方历史页；播放页等其他页面继续读取实时索引/缓存。
+            if (!this._isOfficialHistoryPage()) {
+                const source = (this._index && this._ready ? this._index : null) || this._readRecentCache();
+                return this.recentDisplaySnapshots(CONFIG.RECENT_SNAPSHOT_COUNT, source);
+            }
+            if (Array.isArray(this._pageRecentSnapshots)) return this._pageRecentSnapshots;
+            if (!this._pageRecentSnapshotLimit) this.initializePageRecentSnapshots();
+            if (this._historyPageInitialReadComplete) {
+                const readyIndex = this._index && this._ready ? this._index : null;
+                this._freezePageRecentSnapshots(readyIndex);
+                return this._pageRecentSnapshots || [];
+            }
+            const liveSource = (this._index && this._ready ? this._index : null) || this._readRecentCache();
+            return this.recentDisplaySnapshots(
+                this._pageRecentSnapshotLimit || CONFIG.RECENT_SNAPSHOT_COUNT,
+                liveSource,
+                this._pageRecentSnapshotQuota
+            );
         },
 
         // 重建观看次数排序和最近快照列表，并按需安排索引保存。
@@ -1529,6 +1601,11 @@
                 building: false
             };
             this._ready = true;
+            // 缓存不存在时，首次索引构建结果作为本页固定快照；之后的增量更新不替换它。
+            if (this._isOfficialHistoryPage() && this._historyPageInitialReadComplete
+                && !Array.isArray(this._pageRecentSnapshots)) {
+                this._freezePageRecentSnapshots(this._index);
+            }
             // 卡片角标依赖本页内存索引；索引重建/增量刷新后通知角标重新查询并渲染。
             window.dispatchEvent(new CustomEvent('bvh-history-index-updated'));
             if (shouldSave) this._scheduleSave();
@@ -3821,9 +3898,19 @@
                             </div>
                         </section>`;
                     document.body.appendChild(overlay);
+                    recordDialogWheelLocked = true;
+                    if (recordDialogWheelUnlockTimer) {
+                        clearTimeout(recordDialogWheelUnlockTimer);
+                        recordDialogWheelUnlockTimer = null;
+                    }
                     const input = overlay.querySelector('#bvh-record-count-input');
                     const closeDialog = () => {
                         overlay.remove();
+                        if (recordDialogWheelUnlockTimer) clearTimeout(recordDialogWheelUnlockTimer);
+                        recordDialogWheelUnlockTimer = setTimeout(() => {
+                            recordDialogWheelLocked = false;
+                            recordDialogWheelUnlockTimer = null;
+                        }, 200);
                         document.removeEventListener('keydown', dialogEscape, true);
                     };
                     const dialogEscape = e => { if (e.key === 'Escape') closeDialog(); };
@@ -4419,28 +4506,29 @@
             // 先判断完整索引是否已在内存中；没有就只读独立最近快照缓存，暂不碰大索引。
             const index = HistoryViewIndex._index && HistoryViewIndex._ready
             ? HistoryViewIndex._index : null;
-            const recentSource = index || HistoryViewIndex._readRecentCache();
+            const pageSnapshots = HistoryViewIndex.pageRecentSnapshots();
             const query = SearchQuery.parse(filterTxt);
             const exportedMap = RecordStore._exportedMap();
 
             const isBuilding = !index || HistoryViewIndex._building === true || index.building === true;
+            const recentCount = HistoryViewIndex._isOfficialHistoryPage()
+                ? (HistoryViewIndex._pageRecentSnapshotLimit || CONFIG.RECENT_SNAPSHOT_COUNT)
+                : CONFIG.RECENT_SNAPSHOT_COUNT;
             const latestHeaderText = variant === 'playback'
-            ? `【最近${CONFIG.RECENT_SNAPSHOT_COUNT}次观看记录（快照）】`
-            : `最近${CONFIG.RECENT_SNAPSHOT_COUNT}次快照`;
+            ? `【最近${recentCount}次观看记录（快照）】`
+            : `最近${recentCount}次快照`;
             const allHeaderText = variant === 'playback' ? '【全部内容 · 按观看次数排名】' : '全部内容 · 按观看次数';
 
             // ── 最近 N 次快照：候选恒为 2N，读热池即可，不扫描全部记录 ──
-            const snapMatcher = this._buildSnapMatcher(query, index || recentSource);
+            const snapMatcher = this._buildSnapMatcher(query, index);
             const headTasks = [() => this._header(latestHeaderText)];
-            for (const snap of HistoryViewIndex.recentDisplaySnapshots(CONFIG.RECENT_SNAPSHOT_COUNT, recentSource)) {
-                const item = index?.itemsByKey?.[snap.bvKey];
+            for (const snap of pageSnapshots) {
                 const decorated = decorateEntry({
                     ...snap,
-                    mediaType: item?.mediaType || snap.mediaType || '',
-                    mediaSubtitle: item?.mediaSubtitle || snap.mediaSubtitle || '',
-                    mediaTags: item?.mediaTags || snap.mediaTags || [],
-                    // 快照自身时间比记录时间新时以快照为准，保证过期判定不偏移
-                    lastTs: Math.max(Number(item?.lastTs) || 0, Number(snap.ts) || 0)
+                    mediaType: snap.mediaType || '',
+                    mediaSubtitle: snap.mediaSubtitle || '',
+                    mediaTags: snap.mediaTags || [],
+                    lastTs: Number(snap.ts) || 0
                 }, exportedMap, nowTs);
                 if (!snapMatcher(decorated)) continue;
                 headTasks.push(() => this._renderSnapItem(decorated));
@@ -4552,7 +4640,7 @@
 
         // 从卡片中提取指向视频、番剧或直播的链接。
         extractCardHref(card) {
-            const anchor = card?.querySelector?.('a[href*="/video/"], a[href*="/bangumi/play/"]')
+            const anchor = card?.querySelector?.('a[href*="/video/"], a[href*="/bangumi/play/"], a[href*="live.bilibili.com/"]')
             || card?.querySelector?.('a.bili-cover-card[href]');
             return String(anchor?.getAttribute('href') || '');
         },
@@ -4568,8 +4656,8 @@
 
         // 从卡片的作者链接或作者文本中提取作者名称。
         extractAuthorFromCard(card) {
-            const a = card?.querySelector('.bili-video-card__author, a.bili-video-card__author, .bili-video-card__subtitle a[href*="space.bilibili.com"]');
-            return a?.querySelector('.bili-video-card__text span:last-child')?.textContent?.trim()
+            const a = card?.querySelector('.bili-video-card__author, a.bili-video-card__author, .bili-video-card__subtitle a[href*="space.bilibili.com"], .info__bottom a.subtitle[href*="space.bilibili.com"]');
+            return a?.querySelector('.bili-video-card__text span:last-child, .text')?.textContent?.trim()
             || a?.textContent?.trim() || '';
         },
 
@@ -4609,7 +4697,9 @@
             }
             this._syncing = true;
             try {
-                return await this._runSync(silent);
+                const result = await this._runSync(silent);
+                HistoryViewIndex.completeInitialHistoryRead(result?.scanned || 0);
+                return result;
             } catch (err) {
                 console.error('[BVH] 同步整体失败：', err);
                 return { error: String(err && err.message || err) };
@@ -4626,28 +4716,32 @@
 
             const extractCardData = card => {
                 try {
+                    // 新版 history-card 把封面（.bili-video-card）和信息栏分成左右兄弟节点；
+                    // 链接/进度仍从封面读，标题/作者/时间必须从外层整行读取。
+                    const row = card.closest('.history-card') || card;
                     const href = CardDom.extractCardHref(card);
                     let ident = CardDom.extractIdentity(href);
                     if (!ident) return null;
 
                     let seasonId = 0;
                     if (ident.type === 'bangumi' && RecordKey.isEpisodeKey(ident.key)) {
-                        const ssLink = card.querySelector('a[href*="/bangumi/play/ss"]');
+                        const ssLink = row.querySelector('a[href*="/bangumi/play/ss"]');
                         const ssMatch = ssLink && String(ssLink.getAttribute('href') || '').match(/\/bangumi\/play\/(ss\d+)/i);
                         if (ssMatch) seasonId = Number(ssMatch[1].replace(/^ss/i, '')) || 0;
                     }
 
-                    const titleEl = card.querySelector('.bili-video-card__title a');
+                    const titleEl = row.querySelector('.bili-video-card__title a, .info__top a.title')
+                        || card.querySelector('.bili-video-card__title a');
                     const cardTags = CardDom.extractRawCardTags(card);
                     const mediaTags = [...new Set(cardTags)];
-                    const subtitle = card.querySelector('.bili-video-card__subtitle .bili-video-card__text span')?.textContent?.trim() || '';
+                    const subtitle = row.querySelector('.bili-video-card__subtitle .bili-video-card__text span, .info__bottom a.subtitle .text')?.textContent?.trim() || '';
                     const mediaType = cardTags[0] || (ident.type === 'live' ? '直播' : ident.type === 'bangumi' ? '番剧' : '视频');
                     const progressEl = card.querySelector('.bili-cover-card__progress');
-                    const dateEl = card.querySelector('.bili-video-card__corner span');
+                    const dateEl = row.querySelector('.bili-video-card__corner span, .info__bottom .meta.corner');
                     const durationEl = card.querySelector('.bili-cover-card__stat span');
 
                     const title = titleEl?.getAttribute('title') || titleEl?.textContent?.trim() || null;
-                    const authorName = ident.type === 'bangumi' ? '' : CardDom.extractAuthorFromCard(card);
+                    const authorName = ident.type === 'bangumi' ? '' : CardDom.extractAuthorFromCard(row);
 
                     let progress = '0%';
                     if (progressEl) {
@@ -7004,11 +7098,13 @@
         scheduleDock(2600);
     }
 
-    // 记录编辑弹窗打开时锁住背景滚轮，避免页面在黑色遮罩下意外滚动；弹窗自身仍可滚动。
+    // 记录编辑弹窗打开时锁住背景滚轮；关闭弹窗后延迟 200ms 解锁，弹窗自身仍可滚动。
+    let recordDialogWheelLocked = false;
+    let recordDialogWheelUnlockTimer = null;
     document.addEventListener('wheel', event => {
         const overlay = document.querySelector('.bvh-record-dialog-overlay');
-        if (!overlay) return;
-        if (event.target instanceof Node && event.target !== overlay && overlay.contains(event.target)) return;
+        if (overlay && event.target instanceof Node && event.target !== overlay && overlay.contains(event.target)) return;
+        if (!overlay && !recordDialogWheelLocked) return;
         event.preventDefault();
     }, { capture: true, passive: false });
 
@@ -8339,7 +8435,7 @@
                         <div class="bvh-setting-group"><h4>记录管理</h4>
                             <label class="bvh-setting-row"><span>长期记录过期天数 <b id="bvh-setting-expire-value"></b><small title="超过该天数且已备份的长期未更新记录会被标记为可清理，不会自动删除。">ⓘ</small></span><input id="bvh-setting-expire" type="range" min="1" max="365" step="1"></label>
                             <label class="bvh-setting-row"><span>官方历史同步页数 <b id="bvh-setting-pages-value"></b><small title="每次同步最多加载的官方历史页数；越大读取越多，也越耗时。">ⓘ</small></span><input id="bvh-setting-pages" type="range" min="1" max="100" step="1"></label>
-                            <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="只影响历史面板顶部的最近快照列表，不改变每条记录保存的快照上限。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
+                            <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="官方历史页首次读取到 N 条后，本页固定这批快照；不足 N 条时继续更新。刷新页面后重新读取。不改变每条记录保存的快照上限。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
                             <label class="bvh-setting-row"><span>自动获取来源占比 <b id="bvh-setting-quota-value"></b><small title="最近快照列表中 player 来源至少占用的比例；剩余名额由官方同步来源补足。">ⓘ</small></span><input id="bvh-setting-quota" type="range" min="0" max="100" step="5"></label>
                             <label class="bvh-setting-row"><span>短观看阈值 <b id="bvh-setting-short-value"></b><small title="播放位置严格小于该秒数的记录会被视为短观看，按下面的保留天数清理。">ⓘ</small></span><input id="bvh-setting-short" type="range" min="0" max="120" step="1"></label>
                             <label class="bvh-setting-row"><span>短观看保留天数 <b id="bvh-setting-retention-value"></b><small title="短观看记录保留多久；0 表示立即符合清理条件。">ⓘ</small></span><input id="bvh-setting-retention" type="range" min="0" max="365" step="1"></label>
@@ -8676,6 +8772,7 @@
     function mainInit() {
         injectStyle();
         loadSettings();
+        HistoryViewIndex.initializePageRecentSnapshots();
         registerMenus();
 
         normalizeAllLocalRecords();
