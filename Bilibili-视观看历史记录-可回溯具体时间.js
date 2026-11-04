@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.8.26
-// @description  优化历史搜索规则、界面字号应用和页面高频 DOM 处理。
+// @version      5.9.2
+// @description  本地记录 B 站观看历史；修复番剧分集右键调整次数及删除操作。
 // @author       Bart
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/video/*
@@ -12,6 +12,7 @@
 // @match        https://space.bilibili.com/*
 // @match        https://search.bilibili.com/*
 // @match        https://www.bilibili.com/history
+// @match        https://www.bilibili.com/history/*
 // @grant        GM_setValue
 // @grant        GM_addValueChangeListener
 // @grant        GM_getValue
@@ -23,6 +24,9 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
+// 5.9.2：修复合集子项右键调整次数读取/写入错误的顶层 BV 键；改为按真实容器与分集身份定位，并保留手动设置的 0 次。
+// 5.9.1：修复日志 TAG 作用域、历史子路径匹配、番剧分集删除的旧字段兼容及合集导入按 p 错误合并；番剧分集合并改按 ep 身份，普通视频合集继续按 p 合并。
+// 5.9.0：修复番剧分集右键操作无法修改或删除记录的问题；右键菜单、观看次数写入和删除前置检查均按 ep 精确定位 ss 容器中的对应分集。
 // 5.8.25：合并连续颜色事件以降低预览刷新负载；恢复默认按钮移入高级颜色选择并按当前主题单独显示。
 // 5.8.26：历史搜索卡片观看次数文字接入自定义颜色；设置窗口关闭按钮悬停样式跟随当前主题。
 // 5.8.24：颜色选择过程中不再重设原生颜色控件，只更新样例里实际变化的主题变量，避免选择器卡色。
@@ -65,6 +69,8 @@
 // 5.7.3：电视剧/番剧按明确的 series.series_id 跨季归组；季度名称保存在分集的小合集字段，旧 ss 容器兼容升级，不新增空字段。
 (function () {
     'use strict';
+
+    const TAG = '[BVH]';
 
     // 功能总览（以下注释描述现有职责，不代表新增或改变功能）：
     // 1. 记录采集：普通视频/番剧播放页、直播页分别采集；官方历史同步作为另一数据来源。
@@ -950,14 +956,14 @@
                 || (typeof rec.smallCollectionTitle === 'string' && !!rec.smallCollectionTitle.trim())
                 || (Number.isFinite(Number(rec.collectionOrder)) && Number(rec.collectionOrder) > 0)
                 || (Number.isFinite(Number(rec.seasonId)) && Number(rec.seasonId) > 0);
+            const hasValidWatchCount = Number.isFinite(Number(rec.watchCount)) && Number(rec.watchCount) >= 0;
             const normalized = {
                 title: typeof rec.title === 'string' ? rec.title : (rec.title == null ? null : String(rec.title)),
                 titleSource: rec.titleSource === 'player' || rec.titleSource === 'official' ? rec.titleSource : '',
                 lastTs: Number.isFinite(Number(rec.lastTs)) && Number(rec.lastTs) > 0 ? Number(rec.lastTs) : 0,
                 lastProgress: typeof rec.lastProgress === 'string' && /^\d{1,3}(?:\.\d+)?%$/.test(rec.lastProgress)
                 ? rec.lastProgress : '0%',
-                watchCount: Number.isFinite(Number(rec.watchCount)) && Number(rec.watchCount) >= 0
-                ? Math.floor(Number(rec.watchCount)) : 0,
+                watchCount: hasValidWatchCount ? Math.floor(Number(rec.watchCount)) : 0,
                 snapshots: [],
                 hasReachedWatchThreshold: rec.hasReachedWatchThreshold === true,
                 officialHistorySeen: rec.officialHistorySeen === true,
@@ -1018,7 +1024,7 @@
 
             normalized.snapshots = this.keepSnapshotsWithinLimit(normalized.snapshots);
 
-            if (normalized.watchCount === 0 && normalized.snapshots.length) {
+            if (!hasValidWatchCount && normalized.snapshots.length) {
                 normalized.watchCount = normalized.snapshots.length;
             }
             if (normalized.lastTs <= 0 && normalized.snapshots.length) {
@@ -1091,6 +1097,7 @@
                 .map(value => String(value || '').trim().toLowerCase())
                 .find(value => /^ep\d+$/i.test(value)) || '';
             const rawSmallCollectionTitle = typeof part.smallCollectionTitle === 'string' ? part.smallCollectionTitle.trim() : '';
+            const hasValidWatchCount = Number.isFinite(Number(part.watchCount)) && Number(part.watchCount) >= 0;
             const normalized = {
                 p: Number.isFinite(Number(part.p)) && Number(part.p) > 0 ? Math.floor(Number(part.p)) : (Number.isFinite(Number(part.partNumber)) && Number(part.partNumber) > 0 ? Math.floor(Number(part.partNumber)) : 0),
                 // 与 5.4.5 的实际存储格式一致：番剧/电视剧分集的 bv、epKey 都保留完整 ep 标识；
@@ -1106,13 +1113,13 @@
                 ...(Number.isFinite(Number(part.collectionOrder)) && Number(part.collectionOrder) > 0 ? { collectionOrder: Math.floor(Number(part.collectionOrder)) } : {}),
                 lastTs: Number.isFinite(Number(part.lastTs)) && Number(part.lastTs) > 0 ? Number(part.lastTs) : 0,
                 lastProgress: typeof part.lastProgress === 'string' && /^\d{1,3}(?:\.\d+)?%$/.test(part.lastProgress) ? part.lastProgress : '0%',
-                watchCount: Number.isFinite(Number(part.watchCount)) && Number(part.watchCount) >= 0 ? Math.floor(Number(part.watchCount)) : 0,
+                watchCount: hasValidWatchCount ? Math.floor(Number(part.watchCount)) : 0,
                 snapshots,
                 hasReachedWatchThreshold: part.hasReachedWatchThreshold === true,
                 officialHistorySeen: part.officialHistorySeen === true,
                 emptyRecord: false
             };
-            if (normalized.watchCount === 0 && normalized.snapshots.length) normalized.watchCount = normalized.snapshots.length;
+            if (!hasValidWatchCount && normalized.snapshots.length) normalized.watchCount = normalized.snapshots.length;
             if (normalized.lastTs <= 0 && normalized.snapshots.length) {
                 const newest = normalized.snapshots.reduce((a, b) => Number(a.ts || 0) >= Number(b.ts || 0) ? a : b);
                 if (Number(newest.ts) > 0) normalized.lastTs = Number(newest.ts);
@@ -1259,11 +1266,10 @@
     };
 
     // ── 合集去重合并辅助（导入/归并时复用）──────────────────────────────
-    // 合并两个合集容器：parts 按 p 号合并，快照按签名去重，观看次数取大、最近时间取新，
-    // 非空的标题/作者/元信息保留；不丢弃任何一边的观看事实。
+    // 分集优先按真实身份合并：番剧按 ep；非番剧保持原有按 p 合并行为。
+    // 只要任一分集带有 ep 身份，就必须双方 ep 相同才合并，避免同 p 的不同番剧分集被吞并。
+    // 快照按签名去重，观看次数取大、最近时间取新；非空元信息保留，不丢弃不同身份的分集。
     // 【模块：合并两个容器记录】
-    // 将 incoming 的分集和记录信息并入 target，处理同一分集重复、快照合并及元数据补齐。
-    // 合并时以稳定的分集身份为基础，避免同一视频因标题或入口不同而重复出现。
     function mergeContainers(target, incoming) {
         const out = {
             type: 'collection',
@@ -1273,14 +1279,29 @@
             mediaType: target.mediaType && target.mediaType !== '视频' ? target.mediaType : (incoming.mediaType || '视频'),
             collectionKey: target.collectionKey || incoming.collectionKey || '',
             smallCollections: [...(target.smallCollections || []), ...(incoming.smallCollections || [])],
-            parts: (target.parts || []).map(p => ({ ...p })),
+            parts: (target.parts || []).map(p => ({ ...p, snapshots: [...(p.snapshots || [])] })),
             ...(target.legacyAggregate ? { legacyAggregate: target.legacyAggregate } : (incoming.legacyAggregate ? { legacyAggregate: incoming.legacyAggregate } : {})),
             schemaVersion: 4
         };
-        const byP = new Map(out.parts.map(p => [p.p, p]));
+        const episodeIdentity = part => [part.epKey, part.episodeKey, part.key, part.bvid, part.bvKey, part.bv]
+            .map(value => String(value || '').trim().toLowerCase())
+            .find(value => /^ep\d+$/i.test(value)) || '';
+        const findMatchingPart = candidate => {
+            const candidateEpisode = episodeIdentity(candidate);
+            return out.parts.find(part => {
+                const existingEpisode = episodeIdentity(part);
+                // 番剧分集必须按 ep 身份匹配；缺少身份的一侧不能仅凭 p 猜测。
+                if (candidateEpisode || existingEpisode) return !!candidateEpisode && candidateEpisode === existingEpisode;
+                // 普通视频合集延续旧规则：同一容器内按 p 合并，支持 BV 的多 P 记录。
+                return Number(candidate.p) === Number(part.p);
+            }) || null;
+        };
         for (const incPart of (incoming.parts || [])) {
-            const exist = byP.get(incPart.p);
-            if (!exist) { byP.set(incPart.p, { ...incPart }); continue; }
+            const exist = findMatchingPart(incPart);
+            if (!exist) {
+                out.parts.push({ ...incPart, snapshots: [...(incPart.snapshots || [])] });
+                continue;
+            }
             const snapMap = new Map();
             for (const s of [...(exist.snapshots || []), ...(incPart.snapshots || [])]) {
                 if (!s || typeof s !== 'object') continue;
@@ -1292,6 +1313,7 @@
             exist.watchCount = Math.max(Number(exist.watchCount) || 0, Number(incPart.watchCount) || 0, exist.snapshots.length);
             if (incPart.title && !exist.title) exist.title = incPart.title;
             if (incPart.bv && /^ep\d+$/i.test(String(incPart.bv)) && !/^ep\d+$/i.test(String(exist.bv || ''))) exist.bv = incPart.bv;
+            if (incPart.epKey && !exist.epKey) exist.epKey = incPart.epKey;
             if (incPart.seasonId && !exist.seasonId) exist.seasonId = incPart.seasonId;
             if (incPart.sectionTitle && !exist.sectionTitle) exist.sectionTitle = incPart.sectionTitle;
             if (Number(incPart.lastTs || 0) > Number(exist.lastTs || 0)) {
@@ -1303,7 +1325,7 @@
             exist.officialHistorySeen = exist.officialHistorySeen === true || incPart.officialHistorySeen === true;
             if (incPart.smallCollectionTitle && !exist.smallCollectionTitle) exist.smallCollectionTitle = incPart.smallCollectionTitle;
         }
-        out.parts = [...byP.values()].sort((a, b) => a.p - b.p);
+        out.parts.sort((a, b) => (Number(a.p) || 0) - (Number(b.p) || 0));
         if (!out.legacyAggregate && incoming.legacyAggregate) out.legacyAggregate = incoming.legacyAggregate;
         return out;
     }
@@ -2105,7 +2127,9 @@
                     const season = RecordNormalizer.normalize(GM_getValue(seasonKey, null));
                     if (!season || season.type !== 'collection') continue;
                     const before = season.parts.length;
-                    season.parts = season.parts.filter(part => String(part.bv || part.epKey || '').toLowerCase() !== epKey);
+                    season.parts = season.parts.filter(part => ![
+                        part.bv, part.epKey, part.episodeKey, part.key, part.bvid, part.bvKey
+                    ].some(value => String(value || '').trim().toLowerCase() === epKey));
                     if (season.parts.length !== before) {
                         if (season.parts.length || season.legacyAggregate) this.set(seasonKey, RecordNormalizer.normalize(season));
                         else this.deleteRaw(seasonKey);
@@ -2502,6 +2526,38 @@
             return RecordNormalizer.normalize(container);
         },
 
+        // 从指定合集容器中精确读取一个分集；containerKey 是真实 GM 存储键，partKey 是展示层分集身份。
+        // 跨 BV 合集不能只按 p 猜测，避免同序号分集修改到错误的视频。
+        readCollectionPart(containerKey, partKey, partNumber = 0) {
+            const storageKey = String(containerKey || '').trim();
+            const wantedKey = String(partKey || '').trim().toLowerCase();
+            if (!storageKey || !wantedKey) return null;
+            const container = RecordNormalizer.normalize(GM_getValue(storageKey, null));
+            if (!container || container.type !== 'collection' || !Array.isArray(container.parts)) return null;
+
+            const wantedEpisode = /^ep\d+$/i.test(wantedKey) ? wantedKey : '';
+            const wantedBvMatch = wantedKey.match(/^(BV[a-zA-Z0-9]+)(?:\?p=(\d+))?$/i);
+            const wantedBv = wantedBvMatch ? wantedBvMatch[1].toLowerCase() : '';
+            const wantedP = wantedBvMatch ? Number(wantedBvMatch[2]) || Number(partNumber) || 1 : Number(partNumber) || 0;
+            const identityOf = part => [part.bv, part.epKey, part.episodeKey, part.key, part.bvid, part.bvKey]
+                .map(value => String(value || '').trim().toLowerCase())
+                .filter(Boolean);
+            const matches = container.parts.filter(part => {
+                const identities = identityOf(part);
+                if (identities.includes(wantedKey)) return true;
+                if (wantedEpisode) return identities.some(value => value === wantedEpisode);
+                if (!wantedBv) return false;
+                return identities.some(value => {
+                    const match = value.match(/^(BV[a-zA-Z0-9]+)(?:\?p=(\d+))?$/i);
+                    if (!match || match[1].toLowerCase() !== wantedBv) return false;
+                    const storedP = Number(match[2]) || Number(part.p) || 1;
+                    return storedP === wantedP;
+                });
+            });
+            if (matches.length !== 1) return null;
+            return { container, part: matches[0], storageKey };
+        },
+
         // 播放页读取 ep 历史的只读入口：只按真实 ep 身份精确匹配，不按 p 猜集、不迁移、不写入。
         // 悬浮窗渲染和暂停前读取都必须是纯读取；按集数回填旧 ss part 只能留在明确的写入/修复流程。
         readEpisodeExact(key) {
@@ -2828,12 +2884,44 @@
         },
 
         // 将单条记录的观看次数调低，保留快照、标题、作者和进度等信息。
-        setWatchCount(key, targetCount) {
+        setWatchCount(key, targetCount, collectionContext = null) {
             if (!RecordKey.isRecordKey(key)) return false;
             const nextCount = Number(targetCount);
             if (!Number.isInteger(nextCount) || nextCount < 0 || nextCount > 10000) {
                 alert(`请输入 0 到 ${10000} 之间的整数。`);
                 return false;
+            }
+            // 合集分集必须写回真实容器，不能把展示层分集 key 当成顶层存储键。
+            if (collectionContext?.containerKey) {
+                const located = RecordStore.readCollectionPart(
+                    collectionContext.containerKey,
+                    collectionContext.partKey || key,
+                    collectionContext.partNumber
+                );
+                if (!located) {
+                    alert('这条观看记录已不存在或分集身份不明确。');
+                    return false;
+                }
+                located.part.watchCount = nextCount;
+                RecordStore.set(located.storageKey, located.container);
+                refreshOpenHistoryLists(true);
+                return true;
+            }
+            // 番剧分集是 ss 容器中的 part，不能按 ep 键直接读写顶层存储。
+            if (RecordKey.isEpisodeKey(key)) {
+                const episode = RecordStore.readEpisodeExact(key);
+                if (!episode?.part) {
+                    alert('这条观看记录已不存在。');
+                    return false;
+                }
+                episode.part.watchCount = nextCount;
+                if (episode.container) {
+                    RecordStore.set(episode.seasonKey || key, episode.container);
+                } else {
+                    RecordStore.set(key, episode.part);
+                }
+                refreshOpenHistoryLists(true);
+                return true;
             }
             // 5.3.0：分P键对应容器 part。
             if (RecordKey.isPartKey(key)) {
@@ -2860,9 +2948,17 @@
 
         // 删除单条记录，并同步更新索引与备份标记。
         deleteSingleRecord(key) {
-            // 5.3.0：分P键对应容器 part；纯BV键可能本身是容器。
+            // 番剧分集保存在 ss 容器的 parts[] 中，先精确定位以取得标题。
             let title;
-            if (RecordKey.isPartKey(key)) {
+            if (RecordKey.isEpisodeKey(key)) {
+                const episode = RecordStore.readEpisodeExact(key);
+                if (!episode?.part) {
+                    alert('这条观看记录已不存在。');
+                    return false;
+                }
+                title = episode.part.title || key;
+            // 5.3.0：分P键对应容器 part；纯BV键可能本身是容器。
+            } else if (RecordKey.isPartKey(key)) {
                 const m = String(key).match(/^(BV[a-zA-Z0-9]+)\?p=(\d+)$/i);
                 const bv = m[1], p = Number(m[2]);
                 const container = RecordNormalizer.normalize(GM_getValue(bv, null));
@@ -3945,7 +4041,7 @@
             }, 300);
         },
         // 在查询结果上右键，使用与脚本其他面板一致的粉色玻璃拟态菜单。
-        _bindRecordContextMenu(li, key) {
+        _bindRecordContextMenu(li, key, collectionContext = null) {
             li.addEventListener('contextmenu', event => {
                 if (!RecordKey.isRecordKey(key)) return;
                 event.preventDefault();
@@ -3982,7 +4078,17 @@
                     menu.appendChild(button);
                 };
                 makeButton('调整观看次数', () => {
-                    const rec = RecordNormalizer.normalize(GM_getValue(key));
+                    const collectionPart = collectionContext?.containerKey
+                        ? RecordStore.readCollectionPart(
+                            collectionContext.containerKey,
+                            collectionContext.partKey || key,
+                            collectionContext.partNumber
+                        )
+                        : null;
+                    const episode = !collectionContext?.containerKey && RecordKey.isEpisodeKey(key) ? RecordStore.readEpisodeExact(key) : null;
+                    const rec = collectionContext?.containerKey
+                        ? collectionPart?.part
+                        : (episode?.flat || RecordNormalizer.normalize(GM_getValue(key)));
                     if (!rec) {
                         alert('这条观看记录已不存在。');
                         refreshOpenHistoryLists();
@@ -4030,7 +4136,7 @@
                             return;
                         }
                         closeDialog();
-                        StorageApi.setWatchCount(key, Number(raw));
+                        StorageApi.setWatchCount(key, Number(raw), collectionContext);
                     };
                     overlay.querySelector('[data-action="save"]').addEventListener('click', save);
                     input.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
@@ -4474,7 +4580,11 @@
                     detailToggle.textContent = detailBox.hidden ? '详情⌄' : '收起⌃';
                     row.classList.toggle('is-detail-open', !detailBox.hidden);
                 });
-                this._bindRecordContextMenu(row, part.key);
+                this._bindRecordContextMenu(row, part.key, {
+                    containerKey: part.containerKey,
+                    partKey: part.key,
+                    partNumber: part.partNumber
+                });
                 rowParent.appendChild(row);
             }
             li.appendChild(children);
@@ -4815,7 +4925,6 @@
         async _runSync(silent) {
             const MAX_SCROLL_PAGES = CONFIG.HISTORY_SYNC_PAGES;
             const SCROLL_WAIT_MS = 1500;
-            const TAG = '[BVH]';
 
             const extractCardData = card => {
                 try {
