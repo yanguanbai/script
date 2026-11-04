@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.9.2
-// @description  本地记录 B 站观看历史；修复番剧分集右键调整次数及删除操作。
+// @version      5.9.4
+// @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/video/*
@@ -24,6 +24,8 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
+// 5.9.4：最近快照来源比例只保证 player 最低展示名额，剩余名额从两边候选按时间补齐；0% 时也按时间混排；设置项说明补充建议值。
+// 5.9.3：番剧过期清理按已备份的 ep 分集逐条判断；ss 季导入按季身份合并，旧扁平累计保留为 legacyAggregate；独立 ep 按 seasonId/本地精确身份归季，无法确认时跳过；禁止按标题把不同 ss 季合并。
 // 5.9.2：修复合集子项右键调整次数读取/写入错误的顶层 BV 键；改为按真实容器与分集身份定位，并保留手动设置的 0 次。
 // 5.9.1：修复日志 TAG 作用域、历史子路径匹配、番剧分集删除的旧字段兼容及合集导入按 p 错误合并；番剧分集合并改按 ep 身份，普通视频合集继续按 p 合并。
 // 5.9.0：修复番剧分集右键操作无法修改或删除记录的问题；右键菜单、观看次数写入和删除前置检查均按 ep 精确定位 ss 容器中的对应分集。
@@ -126,8 +128,8 @@
     // 官方历史同步页数、短观看过滤和连续观看合并阈值。脚本内设置窗口按对应配置项读写参数。
     // 配额、缓存上限和时间阈值之间存在配套关系，调整时应同时检查相关注释及使用位置。
     const CONFIG = {
-        EXPIRE_DAY: 90,
-        EXPIRE_MS: 90 * 24 * 3600 * 1000,
+        EXPIRE_DAY: 60,
+        EXPIRE_MS: 60 * 24 * 3600 * 1000,
         MAX_RECORD_COUNT: 5,
         RECENT_SNAPSHOT_COUNT: 5,
         // 最近快照热池的池容量 = N，不是写死的值。N 就是 RECENT_SNAPSHOT_COUNT，
@@ -136,13 +138,12 @@
         // 池容量 = 2N，与全量记录条数无关，因此排序/合并耗时是常数级，不会随历史增长而卡顿。
         RECENT_SNAPSHOT_MAX: 50,
         // 最近快照来源配额：面板显示的 N 条里，player（播放页/直播页自动获取）
-        // 至少占 ceil(N * RECENT_SNAPSHOT_PLAYER_QUOTA) 个名额，official 占其余名额；
-        // 任一来源候选不足时，空出的名额在第二轮按时间全局补满。
-        //   0.5 = 两来源平分；0 = 只显示 official；1 = 只显示 player。
+        // 至少占 ceil(N * RECENT_SNAPSHOT_PLAYER_QUOTA) 个名额；剩余名额从两来源未选候选中按时间补齐。
+        //   0.5 = player 至少占一半；0 = 不设 player 保底，但仍按时间混排；1 = player 先占满展示名额。
         // 引入原因：纯时间归并下，一次官方历史翻页（一页可达 20 条、时间戳跨 2 小时）
         // 就能把 official 桶整桶刷成同一片时间窗，面板 N 个名额被单一来源占满，
         // "2N 候选"买到的只是候选数翻倍、不是覆盖面翻倍。
-        RECENT_SNAPSHOT_PLAYER_QUOTA: 0.5,
+        RECENT_SNAPSHOT_PLAYER_QUOTA: 0,
         RECENT_SNAPSHOT_QUOTA_MIN: 0,
         RECENT_SNAPSHOT_QUOTA_MAX: 1,
         // 同一次观看的时间容差：官方历史只给到分钟精度（ts 落在整分钟），播放页是秒级，
@@ -152,14 +153,14 @@
         STORAGE_WARN_THRESHOLD: 4.5 * 1024 * 1024,
         RECORD_INTERVAL: 5000,
         SEARCH_DEBOUNCE: 300,
-        SHORT_WATCH_EXPIRE_DAY: 30,
-        SHORT_WATCH_MAX_POS_SEC: 10,
+        SHORT_WATCH_EXPIRE_DAY: 7,
+        SHORT_WATCH_MAX_POS_SEC: 5,
         AUTO_SYNC_DEBOUNCE: 1200,
-        HISTORY_SYNC_PAGES: 10,
+        HISTORY_SYNC_PAGES: 30,
         // 连续观看判定：官方历史卡片在该间隔内持续更新、且进度向前推进时，
         // 视为"挂着持续播放的同一次观看"，不累加次数（详见 _isContinuousView）
         CONTINUOUS_GAP_MIN: 30,
-        CONTINUOUS_PROGRESS_DELTA: 5,
+        CONTINUOUS_PROGRESS_DELTA: 10,
         UI_FONT_SIZE: 16,
         CONTINUOUS_DEDUP_MODE: 'both', // time：只看时间；progress：只看进度差；both：两项同时满足
     };
@@ -1270,6 +1271,61 @@
     // 只要任一分集带有 ep 身份，就必须双方 ep 相同才合并，避免同 p 的不同番剧分集被吞并。
     // 快照按签名去重，观看次数取大、最近时间取新；非空元信息保留，不丢弃不同身份的分集。
     // 【模块：合并两个容器记录】
+    function mergeLegacyAggregates(...values) {
+        const aggregates = values.filter(value => value && typeof value === 'object' && !Array.isArray(value));
+        if (!aggregates.length) return null;
+
+        const snapshots = new Map();
+        aggregates.forEach(aggregate => {
+            (Array.isArray(aggregate.snapshots) ? aggregate.snapshots : []).forEach(snap => {
+                if (!snap || typeof snap !== 'object') return;
+                const sig = `${Number(snap.ts) || 0}|${snap.pos == null ? '' : Number(snap.pos)}|${String(snap.progress || '')}|${snap.completed === true ? 1 : 0}`;
+                const previous = snapshots.get(sig);
+                if (!previous || String(snap.watchTimeStr || '').length > String(previous.watchTimeStr || '').length) {
+                    snapshots.set(sig, { ...snap });
+                }
+            });
+        });
+
+        const allSnapshots = [...snapshots.values()].sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+        const latest = aggregates.reduce((best, aggregate) =>
+            Number(aggregate.lastTs || 0) > Number(best?.lastTs || 0) ? aggregate : best, null);
+        return {
+            title: aggregates.find(aggregate => String(aggregate.title || '').trim())?.title || '',
+            watchCount: Math.max(...aggregates.map(aggregate => Number(aggregate.watchCount) || 0), allSnapshots.length),
+            lastTs: Math.max(...aggregates.map(aggregate => Number(aggregate.lastTs) || 0)),
+            lastProgress: latest?.lastProgress || aggregates.find(aggregate => aggregate.lastProgress)?.lastProgress || '0%',
+            snapshots: RecordNormalizer.keepSnapshotsWithinLimit(allSnapshots),
+            hasReachedWatchThreshold: aggregates.some(aggregate => aggregate.hasReachedWatchThreshold === true)
+        };
+    }
+
+    function seasonContainerFromFlatRecord(key, record) {
+        const seasonId = Number(String(key).replace(/^ss/i, '')) || 0;
+        const hasViewingFacts = (Array.isArray(record.snapshots) && record.snapshots.length > 0)
+            || Number(record.watchCount) > 0 || Number(record.lastTs) > 0
+            || record.hasReachedWatchThreshold === true || record.officialHistorySeen === true;
+        const aggregate = hasViewingFacts ? mergeLegacyAggregates({
+            title: record.title || '',
+            watchCount: Number(record.watchCount) || 0,
+            lastTs: Number(record.lastTs) || 0,
+            lastProgress: record.lastProgress || '0%',
+            snapshots: Array.isArray(record.snapshots) ? record.snapshots : [],
+            hasReachedWatchThreshold: record.hasReachedWatchThreshold === true
+        }) : null;
+        return RecordNormalizer.normalize({
+            type: 'collection',
+            key,
+            title: record.title || record.collectionTitle || '',
+            authorName: record.authorName || '',
+            mediaType: record.mediaType && record.mediaType !== '视频' ? record.mediaType : '番剧',
+            collectionKey: record.collectionKey || `season:${seasonId || key}`,
+            parts: [],
+            ...(aggregate ? { legacyAggregate: aggregate } : {}),
+            schemaVersion: 4
+        });
+    }
+
     function mergeContainers(target, incoming) {
         const out = {
             type: 'collection',
@@ -1280,7 +1336,9 @@
             collectionKey: target.collectionKey || incoming.collectionKey || '',
             smallCollections: [...(target.smallCollections || []), ...(incoming.smallCollections || [])],
             parts: (target.parts || []).map(p => ({ ...p, snapshots: [...(p.snapshots || [])] })),
-            ...(target.legacyAggregate ? { legacyAggregate: target.legacyAggregate } : (incoming.legacyAggregate ? { legacyAggregate: incoming.legacyAggregate } : {})),
+            ...((target.legacyAggregate || incoming.legacyAggregate)
+                ? { legacyAggregate: mergeLegacyAggregates(target.legacyAggregate, incoming.legacyAggregate) }
+                : {}),
             schemaVersion: 4
         };
         const episodeIdentity = part => [part.epKey, part.episodeKey, part.key, part.bvid, part.bvKey, part.bv]
@@ -1326,7 +1384,6 @@
             if (incPart.smallCollectionTitle && !exist.smallCollectionTitle) exist.smallCollectionTitle = incPart.smallCollectionTitle;
         }
         out.parts.sort((a, b) => (Number(a.p) || 0) - (Number(b.p) || 0));
-        if (!out.legacyAggregate && incoming.legacyAggregate) out.legacyAggregate = incoming.legacyAggregate;
         return out;
     }
 
@@ -1337,11 +1394,15 @@
     // 【模块：为待合并记录寻找本地容器】
     // 根据 incoming 的身份信息，在本地已有记录中寻找可能承载该记录的容器。
     // 此处用于迁移/修复阶段的归属判断；不能仅凭标题相似就把不同视频或不同番剧季合并。
-    function findLocalContainerToMerge(incoming) {
+    function findLocalContainerToMerge(incoming, incomingKey = '') {
+        const sourceKey = String(incomingKey || incoming.key || '');
+        // 番剧每季都有独立 ss 身份；不得用系列标题/作者把不同季并到一起。
+        if (RecordKey.isSeasonKey(sourceKey)) return null;
         const incomingBv = (incoming.key || '').match(/^(BV[a-zA-Z0-9]+)/i)?.[1] || '';
         const incomingTitle = String(incoming.title || '').trim();
         const incomingAuthor = String(incoming.authorName || '').trim();
         for (const k of GM_listValues()) {
+            if (RecordKey.isSeasonKey(k)) continue;
             const rec = RecordNormalizer.normalize(GM_getValue(k, null));
             if (!rec || rec.type !== 'collection') continue;
             if (incomingBv) {
@@ -1621,9 +1682,8 @@
         },
 
         // 面板显示取用：从两桶（各 N 条，合计 2N 候选）里选出 N 条展示。
-        // 第一轮按来源配额取数：player 先占 ceil(N * quota) 个名额、official 占其余名额，
-        // 保证"自动获取"与"官方同步"两个来源都有可见位置，不再被单一来源整屏占满；
-        // 第二轮把两桶剩余候选按时间全局归并，补满空出的名额（优先更新优先加载）。
+        // player 先满足 ceil(N * quota) 的最低名额；剩余名额从两桶未选候选中按时间补齐。
+        // quota 为 0 时不锁定任何来源，全部名额都按时间从两桶中选取。
         // 选完再按 ts 降序排一次，保证面板呈现仍是"最近的在上"。
         // 同一视频在 RECENT_SNAPSHOT_DEDUP_WINDOW_MS 窗口内的多条快照算同一次观看，只占 1 格；
         // 用窗口而非整分钟，是因为官方 ts 被截断到分钟、播放页是秒级，二者可能差到 59 秒。
@@ -1657,28 +1717,21 @@
                 ? this._pageOfficialSnapshots
                 : hot && Array.isArray(hot.official) ? hot.official : [];
 
-            // 第一轮：各桶按自己的配额出，桶内本就按 ts 降序，从前往后取。
-            // 去重命中也要前进指针，否则会在重复项上原地打转。
+            // 先满足 player 的最低名额。去重命中也要前进指针，否则会原地打转。
             const playerQuota = Math.ceil(maxCount * this._quotaRatio());
-            const officialQuota = maxCount - playerQuota;
             let i = 0;
-            let j = 0;
             let playerTaken = 0;
-            let officialTaken = 0;
             while (i < playerList.length && playerTaken < playerQuota && picked.length < maxCount) {
                 if (push(playerList[i])) playerTaken++;
                 i++;
             }
-            while (j < officialList.length && officialTaken < officialQuota && picked.length < maxCount) {
-                if (push(officialList[j])) officialTaken++;
-                j++;
-            }
 
-            // 第二轮：某一侧候选不足（配额名额没用完）时，两桶剩余候选按时间归并补满。
-            while (picked.length < maxCount && (i < playerList.length || j < officialList.length)) {
-                const takePlayer = j >= officialList.length
-                || (i < playerList.length && Number(playerList[i].ts || 0) >= Number(officialList[j].ts || 0));
-                push(takePlayer ? playerList[i++] : officialList[j++]);
+            // 剩余展示位不预留给某个来源，按时间从两桶候选中全局补齐。
+            const remaining = playerList.slice(i).concat(officialList)
+                .sort((a, b) => Number(b?.ts || 0) - Number(a?.ts || 0));
+            for (const snap of remaining) {
+                if (picked.length >= maxCount) break;
+                push(snap);
             }
 
             sortByTs();
@@ -2353,7 +2406,7 @@
             const episodeNumberVerified = options.disallowLegacyPartFallback !== true;
             const explicitP = episodeNumberVerified
                 ? (Number(options.partNumber) || Number(record.partNumber) || (titleEpisodeNumber ? Number(titleEpisodeNumber[1]) : 0))
-                : 0;
+                : (Number(options.verifiedPartNumber) || 0);
             const existingExact = container.parts.find(item =>
                 [item.bv, item.epKey].some(value => String(value || '').trim().toLowerCase() === episodeKey)
             );
@@ -2824,61 +2877,86 @@
 
         // 只处理已导出备份且符合过期条件的记录，并在删除前向用户确认。
         cleanExpireRecords() {
-            const allKeys = GM_listValues()
-            .filter(k => RecordKey.isRecordKey(k))
-            .map(key => {
-                const rec = RecordNormalizer.normalize(GM_getValue(key));
-                return { key, watchCount: rec?.watchCount || 0, lastTs: rec?.lastTs || 0 };
-            })
-            .sort((a, b) => (b.watchCount - a.watchCount) || (b.lastTs - a.lastTs))
-            .map(item => item.key);
-
             const exportedMap = RecordStore._exportedMap();
             const nowTs = TimeTool.now();
             const expiredExported = [];
             const unknownTimeExported = [];
+            const addCandidate = (key, episodeKey, entity) => {
+                const ts = Number(entity?.lastTs);
+                const candidate = { key, episodeKey, ts: Number.isFinite(ts) && ts > 0 ? ts : 0 };
+                if (candidate.ts <= 0) unknownTimeExported.push(candidate);
+                else if (nowTs - candidate.ts > CONFIG.EXPIRE_MS) expiredExported.push(candidate);
+            };
 
-            allKeys.forEach(key => {
+            GM_listValues().filter(RecordKey.isRecordKey).forEach(key => {
                 if (!Object.prototype.hasOwnProperty.call(exportedMap, key)) return;
-                const rec = LegacyMigration.migrateAny(GM_getValue(key));
+                const rec = RecordNormalizer.normalize(GM_getValue(key));
                 if (!rec || typeof rec !== 'object') return;
-                const ts = Number(rec.lastTs);
-                if (!Number.isFinite(ts) || ts <= 0) unknownTimeExported.push(key);
-                else if (nowTs - ts > CONFIG.EXPIRE_MS) expiredExported.push(key);
+
+                if (RecordKey.isSeasonKey(key) && rec.type === 'collection') {
+                    rec.parts.forEach(part => {
+                        const episodeKey = [part.bv, part.epKey, part.episodeKey, part.key, part.bvid, part.bvKey]
+                            .map(value => String(value || '').trim().toLowerCase())
+                            .find(value => RecordKey.isEpisodeKey(value)) || '';
+                        // 缺少 ep 身份的旧分集不能安全地映射到删除入口，留待人工处理。
+                        if (!episodeKey) return;
+                        addCandidate(key, episodeKey, part);
+                    });
+                    return;
+                }
+
+                addCandidate(key, '', rec);
             });
 
-            if (expiredExported.length === 0 && unknownTimeExported.length === 0) {
-                alert(`没有可清理的已备份记录。\n清理条件：已导出备份，并且超过 ${CONFIG.EXPIRE_DAY} 天未更新；时间不明的记录会单独询问。`);
+            const expiredCount = expiredExported.length;
+            const unknownCount = unknownTimeExported.length;
+
+            if (expiredCount === 0 && unknownCount === 0) {
+                alert(`没有可清理的已备份记录。\n清理条件：已导出备份，并且超过 ${CONFIG.EXPIRE_DAY} 天未更新；时间不明的记录会单独询问。番剧按分集判断。`);
                 return;
             }
 
             let includeUnknownTime = false;
-            if (unknownTimeExported.length > 0) {
+            if (unknownCount > 0) {
                 includeUnknownTime = confirm(
-                    `另发现 ${unknownTimeExported.length} 条已备份但时间不确定的记录（缺少有效时间戳，无法判断是否超过 ${CONFIG.EXPIRE_DAY} 天）。\n\n` +
+                    `另发现 ${unknownCount} 条已备份但时间不确定的记录/分集（缺少有效时间戳，无法判断是否超过 ${CONFIG.EXPIRE_DAY} 天）。\n\n` +
                     `点击"确定"：也清理这些时间不明的记录。\n点击"取消"：保留时间不明的记录，只清理明确过期的记录。`
                 );
             }
-            const candidates = includeUnknownTime ? [...expiredExported, ...unknownTimeExported] : expiredExported;
-            if (candidates.length === 0) {
+            const selected = includeUnknownTime ? [...expiredExported, ...unknownTimeExported] : expiredExported;
+            if (selected.length === 0) {
                 alert('没有选择要删除的记录，时间不明的记录已保留。');
                 return;
             }
 
             const confirmDelete = confirm(
-                `即将删除 ${candidates.length} 条记录：\n` +
-                `- 明确超过 ${CONFIG.EXPIRE_DAY} 天且已导出备份：${expiredExported.length} 条\n` +
-                `- 时间不明且已导出备份：${includeUnknownTime ? unknownTimeExported.length : 0} 条\n\n` +
-                `未导出备份的记录不会删除。确认继续？`
+                `即将清理 ${selected.length} 条记录/分集：\n` +
+                `- 明确超过 ${CONFIG.EXPIRE_DAY} 天且已导出备份：${expiredCount} 条\n` +
+                `- 时间不明且已导出备份：${includeUnknownTime ? unknownCount : 0} 条\n\n` +
+                `番剧只删除符合条件的分集；清掉某季最后一集时，该季的旧累计数据也会删除。未导出备份的记录不会删除。确认继续？`
             );
             if (!confirmDelete) return;
 
-            candidates.forEach(key => {
-                RecordStore.delete(key);
-                delete exportedMap[key];
+            const touchedSeasons = new Set();
+            selected.forEach(candidate => {
+                if (candidate.episodeKey) {
+                    RecordStore.delete(candidate.episodeKey);
+                    touchedSeasons.add(candidate.key);
+                } else {
+                    RecordStore.delete(candidate.key);
+                }
+                delete exportedMap[candidate.key];
+                if (candidate.episodeKey) delete exportedMap[candidate.episodeKey];
+            });
+            touchedSeasons.forEach(seasonKey => {
+                const season = RecordNormalizer.normalize(GM_getValue(seasonKey, null));
+                if (season?.type === 'collection' && season.parts.length === 0) {
+                    RecordStore.deleteRaw(seasonKey);
+                    delete exportedMap[seasonKey];
+                }
             });
             GM_setValue(EXPORTED_RECORDS_KEY, exportedMap);
-            alert(`清理完成，共删除 ${candidates.length} 条记录。`);
+            alert(`清理完成，共处理 ${selected.length} 条记录/分集。`);
             refreshOpenHistoryLists(true);
             updateCleanupButtonLabels();
         },
@@ -3279,7 +3357,7 @@
 
         // 读取 JSON 备份，校验并归一化数据，再按记录键合并或写入本地存储。
         importRecords() {
-            if (!confirm('导入会覆盖备份中同名的视频记录。建议先导出当前数据作为备份，确认继续导入？')) return;
+            if (!confirm('导入番剧时会按 ss 季和 ep 分集身份合并；无法确认归属的分集会跳过。建议先导出当前数据作为备份，确认继续导入？')) return;
 
             const input = document.createElement('input');
             input.type = 'file';
@@ -3311,6 +3389,8 @@
                         let importCnt = 0;
                         let skipCnt = 0;
                         const errors = [];
+                        const partHasEpisode = (part, episodeKey) => [part.bv, part.epKey, part.episodeKey, part.key, part.bvid, part.bvKey]
+                            .some(value => String(value || '').trim().toLowerCase() === episodeKey);
 
                         Object.keys(sourceRecords).forEach(sourceKey => {
                             try {
@@ -3325,6 +3405,97 @@
                                 const normalized = RecordNormalizer.normalize(data);
                                 if (!normalized) throw new Error('无法识别记录结构');
 
+                                if (RecordKey.isSeasonKey(key)) {
+                                    const normalizedKey = key.toLowerCase();
+                                    const seasonId = Number(normalizedKey.replace(/^ss/i, ''));
+                                    if (!Number.isSafeInteger(seasonId) || seasonId <= 0) throw new Error('季 ID 无效');
+                                    if (Number(normalized.seasonId) > 0 && Number(normalized.seasonId) !== seasonId) {
+                                        throw new Error(`记录中的 seasonId 与 ${normalizedKey} 不一致`);
+                                    }
+
+                                    let incomingSeason;
+                                    if (normalized.type === 'collection') {
+                                        const mismatchedPart = normalized.parts.find(part => Number(part.seasonId) > 0 && Number(part.seasonId) !== seasonId);
+                                        if (mismatchedPart) throw new Error(`分集 ${mismatchedPart.epKey || mismatchedPart.bv || '未知'} 的 seasonId 与 ${normalizedKey} 不一致`);
+                                        incomingSeason = { ...normalized, key: normalizedKey };
+                                    } else {
+                                        incomingSeason = seasonContainerFromFlatRecord(normalizedKey, normalized);
+                                    }
+                                    if (!incomingSeason || incomingSeason.type !== 'collection') throw new Error('无法转换为季容器');
+
+                                    const existingRaw = GM_getValue(normalizedKey, null);
+                                    const existingNormalized = RecordNormalizer.normalize(existingRaw);
+                                    const existingSeason = !existingNormalized
+                                        ? null
+                                        : (existingNormalized.type === 'collection'
+                                            ? { ...existingNormalized, key: normalizedKey }
+                                            : seasonContainerFromFlatRecord(normalizedKey, existingNormalized));
+                                    const mergedSeason = existingSeason
+                                        ? mergeContainers(existingSeason, incomingSeason)
+                                        : incomingSeason;
+                                    RecordStore.set(normalizedKey, RecordNormalizer.normalize({ ...mergedSeason, key: normalizedKey }));
+                                    delete exportedMap[key];
+                                    delete exportedMap[normalizedKey];
+                                    importCnt++;
+                                    return;
+                                }
+
+                                if (RecordKey.isEpisodeKey(key)) {
+                                    const episodeKey = key.toLowerCase();
+                                    let episodeRecord = normalized;
+                                    if (normalized.type === 'collection') {
+                                        const sourcePart = normalized.parts.find(part => partHasEpisode(part, episodeKey))
+                                            || (normalized.parts.length === 1 ? normalized.parts[0] : null);
+                                        if (!sourcePart) throw new Error('备份中的 ep 记录无法唯一对应分集');
+                                        episodeRecord = {
+                                            ...sourcePart,
+                                            title: sourcePart.title || '',
+                                            partTitle: sourcePart.title || '',
+                                            partNumber: Number(sourcePart.p) || 0,
+                                            seasonId: Number(sourcePart.seasonId) || Number(data?.seasonId) || 0,
+                                            collectionTitle: normalized.title || '',
+                                            collectionKey: normalized.collectionKey || '',
+                                            authorName: normalized.authorName || '',
+                                            mediaType: normalized.mediaType || '番剧'
+                                        };
+                                    }
+
+                                    let seasonId = Number(episodeRecord.seasonId) || Number(data?.seasonId) || 0;
+                                    let seasonKey = Number.isSafeInteger(seasonId) && seasonId > 0 ? `ss${seasonId}` : '';
+                                    if (!seasonKey) {
+                                        seasonKey = GM_listValues().find(candidateKey => {
+                                            if (!RecordKey.isSeasonKey(candidateKey)) return false;
+                                            const container = RecordNormalizer.normalize(GM_getValue(candidateKey, null));
+                                            return container?.type === 'collection' && container.parts.some(part => partHasEpisode(part, episodeKey));
+                                        }) || '';
+                                        if (seasonKey) seasonId = Number(String(seasonKey).replace(/^ss/i, '')) || 0;
+                                    }
+                                    if (!seasonKey || !seasonId) throw new Error('无法根据 seasonId 或本地精确 ep 身份确定所属 ss，已跳过');
+
+                                    episodeRecord.seasonId = seasonId;
+                                    const partNumber = Number(episodeRecord.partNumber) || Number(episodeRecord.p) || 0;
+                                    const localSeason = RecordNormalizer.normalize(GM_getValue(seasonKey, null));
+                                    const collectionKey = localSeason?.type === 'collection' && localSeason.collectionKey
+                                        ? localSeason.collectionKey
+                                        : (episodeRecord.collectionKey || '');
+                                    const written = RecordStore.upsertRecord(episodeKey, episodeRecord, {
+                                        episodeKey,
+                                        seasonKey,
+                                        seasonId,
+                                        partTitle: episodeRecord.partTitle || episodeRecord.title || '',
+                                        verifiedPartNumber: partNumber,
+                                        partTotal: Number(episodeRecord.partTotal) || 0,
+                                        sectionTitle: episodeRecord.sectionTitle || '',
+                                        collectionKey,
+                                        disallowLegacyPartFallback: true
+                                    });
+                                    if (!written) throw new Error('无法安全合并到目标季，已跳过');
+                                    delete exportedMap[episodeKey];
+                                    delete exportedMap[seasonKey];
+                                    importCnt++;
+                                    return;
+                                }
+
                                 const existing = RecordNormalizer.normalize(GM_getValue(key));
                                 // 合集容器导入：同key容器不再整体覆盖。先找本地可合并目标
                                 // （去?p=后同BV，或标题相同且作者相同），命中则合并分集与快照，
@@ -3333,7 +3504,7 @@
                                     let target = (existing && existing.type === 'collection') ? existing : null;
                                     let targetKey = target ? key : null;
                                     if (!target) {
-                                        const hit = findLocalContainerToMerge(normalized);
+                                        const hit = findLocalContainerToMerge(normalized, key);
                                         if (hit) { target = hit.container; targetKey = hit.key; }
                                     }
                                     if (target) {
@@ -3394,7 +3565,7 @@
                         GM_setValue(EXPORTED_RECORDS_KEY, exportedMap);
                         const errorSummary = errors.slice(0, 5).join('\n');
                         alert(
-                            `导入完成。\n成功导入：${importCnt} 条\n跳过损坏记录：${skipCnt} 条` +
+                            `导入完成。\n成功导入：${importCnt} 条\n跳过记录：${skipCnt} 条` +
                             `${errorSummary ? `\n\n部分错误：\n${errorSummary}` : ''}\n\n` +
                             `导入的记录需重新导出备份后，才会被标记为可清理。`
                         );
@@ -8850,19 +9021,19 @@
                             <div><strong>按你的观看习惯精细调整</strong><p>这里控制本地观看记录的合并、同步和保留规则。滑轨上的节点是常用值，点击即可平滑移动；也可以直接输入数值进行精确调整。</p></div>
                         </section>
                         <div class="bvh-setting-group"><h4>观看去重</h4>
-                            <label class="bvh-setting-row"><span>判定方式 <small title="时间：只比较两次快照的时间间隔；进度：只比较进度百分比差值；同时满足：时间和进度差都在阈值内才合并。">ⓘ</small></span><select id="bvh-setting-dedup-mode"><option value="both">时间和进度都满足</option><option value="time">只根据时间差</option><option value="progress">只根据进度差</option></select></label>
-                            <label class="bvh-setting-row"><span>时间差上限 <b id="bvh-setting-gap-value"></b><small title="两次快照相隔不超过该分钟数时，时间条件成立。范围 1–180 分钟；常用值建议 5–30 分钟。">ⓘ</small></span><input id="bvh-setting-gap" type="range" min="1" max="180" step="1"></label>
-                            <label class="bvh-setting-row"><span>进度差上限 <b id="bvh-setting-progress-value"></b><small title="比较两次快照进度的绝对差值。例如 35% 和 40% 相差 5 个百分点。">ⓘ</small></span><input id="bvh-setting-progress" type="range" min="0" max="100" step="1"></label>
+                            <label class="bvh-setting-row"><span>判定方式 <small title="时间：只比较两次快照的时间间隔；进度：只比较进度百分比差值；同时满足：时间和进度差都在阈值内才合并。建议值：时间和进度都满足。">ⓘ</small></span><select id="bvh-setting-dedup-mode"><option value="both">时间和进度都满足</option><option value="time">只根据时间差</option><option value="progress">只根据进度差</option></select></label>
+                            <label class="bvh-setting-row"><span>时间差上限 <b id="bvh-setting-gap-value"></b><small title="两次快照相隔不超过该分钟数时，时间条件成立。范围 1–180 分钟。建议值：30 分钟。">ⓘ</small></span><input id="bvh-setting-gap" type="range" min="1" max="180" step="1"></label>
+                            <label class="bvh-setting-row"><span>进度差上限 <b id="bvh-setting-progress-value"></b><small title="比较两次快照进度的绝对差值。例如 35% 和 40% 相差 5 个百分点。建议值：10 个百分点。">ⓘ</small></span><input id="bvh-setting-progress" type="range" min="0" max="100" step="1"></label>
                             <p class="bvh-setting-note">差值按百分点计算。选择“只根据时间”时忽略进度；选择“只根据进度”时忽略时间；“时间和进度都满足”要求两项同时在阈值内。</p>
                         </div>
                         <div class="bvh-setting-group"><h4>记录管理</h4>
-                            <label class="bvh-setting-row"><span>长期记录过期天数 <b id="bvh-setting-expire-value"></b><small title="超过该天数且已备份的长期未更新记录会被标记为可清理，不会自动删除。">ⓘ</small></span><input id="bvh-setting-expire" type="range" min="1" max="365" step="1"></label>
-                            <label class="bvh-setting-row"><span>官方历史同步页数 <b id="bvh-setting-pages-value"></b><small title="每次同步最多加载的官方历史页数；越大读取越多，也越耗时。">ⓘ</small></span><input id="bvh-setting-pages" type="range" min="1" max="100" step="1"></label>
-                            <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="player 与 official 各最多保留 N 条候选（合计最多 2N）；历史页读满前 N 条后固定 official 候选，player 候选继续更新。修改 N 后刷新历史页生效。不改变每条记录保存的快照上限。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
-                            <label class="bvh-setting-row"><span>自动获取来源占比 <b id="bvh-setting-quota-value"></b><small title="最近快照列表中 player 来源至少占用的比例；剩余名额由官方同步来源补足。">ⓘ</small></span><input id="bvh-setting-quota" type="range" min="0" max="100" step="5"></label>
-                            <label class="bvh-setting-row"><span>短观看阈值 <b id="bvh-setting-short-value"></b><small title="播放位置严格小于该秒数的记录会被视为短观看，按下面的保留天数清理。">ⓘ</small></span><input id="bvh-setting-short" type="range" min="0" max="120" step="1"></label>
-                            <label class="bvh-setting-row"><span>短观看保留天数 <b id="bvh-setting-retention-value"></b><small title="短观看记录保留多久；0 表示立即符合清理条件。">ⓘ</small></span><input id="bvh-setting-retention" type="range" min="0" max="365" step="1"></label>
-                            <label class="bvh-setting-row"><span>界面字号 <small title="调整设置窗口、历史列表、搜索规则卡和设置说明卡的主要文字字号。">ⓘ</small></span><select id="bvh-setting-font-size"><option value="14">较小（14px）</option><option value="16">标准（16px）</option><option value="18">较大（18px）</option><option value="20">特大（20px）</option></select></label>
+                            <label class="bvh-setting-row"><span>长期记录过期天数 <b id="bvh-setting-expire-value"></b><small title="超过该天数且已备份的长期未更新记录会被标记为可清理，不会自动删除。建议值：60 天；记录约达 2,000 条时建议导出备份。观看越频繁，越应缩短导出和清理间隔。">ⓘ</small></span><input id="bvh-setting-expire" type="range" min="1" max="365" step="1"></label>
+                            <label class="bvh-setting-row"><span>官方历史同步页数 <b id="bvh-setting-pages-value"></b><small title="每次同步最多加载的官方历史页数；页数越多读取越多，也越耗时。建议值：30 页。">ⓘ</small></span><input id="bvh-setting-pages" type="range" min="1" max="100" step="1"></label>
+                            <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="player 与 official 各最多保留 N 条候选（合计最多 2N）；历史页读满前 N 条后固定 official 候选，player 候选继续更新。修改 N 后刷新历史页生效。不改变每条记录保存的快照上限。建议值：5 条。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
+                            <label class="bvh-setting-row"><span>自动获取来源占比 <b id="bvh-setting-quota-value"></b><small title="player 至少占展示名额的该比例；剩余名额从 player 与 official 的未选候选中按观看时间排序补齐。0% 不会排除较新的 player 快照。建议值：0%。">ⓘ</small></span><input id="bvh-setting-quota" type="range" min="0" max="100" step="5"></label>
+                            <label class="bvh-setting-row"><span>短观看阈值 <b id="bvh-setting-short-value"></b><small title="播放位置严格小于该秒数的记录会被视为短观看，按下面的保留天数清理。建议值：5 秒。">ⓘ</small></span><input id="bvh-setting-short" type="range" min="0" max="120" step="1"></label>
+                            <label class="bvh-setting-row"><span>短观看保留天数 <b id="bvh-setting-retention-value"></b><small title="短观看记录保留多久；0 表示立即符合清理条件。建议值：7 天。">ⓘ</small></span><input id="bvh-setting-retention" type="range" min="0" max="365" step="1"></label>
+                            <label class="bvh-setting-row"><span>界面字号 <small title="调整设置窗口、历史列表、搜索规则卡和设置说明卡的主要文字字号。建议值：标准（16 px）。">ⓘ</small></span><select id="bvh-setting-font-size"><option value="14">较小（14px）</option><option value="16">标准（16px）</option><option value="18">较大（18px）</option><option value="20">特大（20px）</option></select></label>
                         </div>
                         <div class="bvh-setting-group bvh-theme-settings"><h4>界面配色</h4>
                             <div class="bvh-theme-presets" role="group" aria-label="预设主题">
@@ -9127,8 +9298,8 @@
             const markerValues = {
                 'bvh-setting-gap': [1, 5, 10, 15, 30, 60, 120, 180],
                 'bvh-setting-progress': [0, 5, 10, 20, 30, 50, 75, 100],
-                'bvh-setting-expire': [1, 7, 30, 90, 180, 365],
-                'bvh-setting-pages': [1, 5, 10, 20, 50, 100],
+                'bvh-setting-expire': [1, 7, 30, 60, 90, 180, 365],
+                'bvh-setting-pages': [1, 5, 10, 20, 30, 50, 100],
                 'bvh-setting-recent': [1, 5, 10, 20, 30, 50],
                 'bvh-setting-quota': [0, 25, 50, 75, 100],
                 'bvh-setting-short': [0, 5, 10, 15, 30, 60, 120],
