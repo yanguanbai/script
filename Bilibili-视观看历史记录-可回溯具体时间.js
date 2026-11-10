@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.9.4
+// @version      5.9.5
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -24,6 +24,7 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
+// 5.9.5：普通视频导入同键冲突时合并快照和观看事实，按较新时间保留最近进度，避免旧备份回滚本地记录。
 // 5.9.4：最近快照来源比例只保证 player 最低展示名额，剩余名额从两边候选按时间补齐；0% 时也按时间混排；设置项说明补充建议值。
 // 5.9.3：番剧过期清理按已备份的 ep 分集逐条判断；ss 季导入按季身份合并，旧扁平累计保留为 legacyAggregate；独立 ep 按 seasonId/本地精确身份归季，无法确认时跳过；禁止按标题把不同 ss 季合并。
 // 5.9.2：修复合集子项右键调整次数读取/写入错误的顶层 BV 键；改为按真实容器与分集身份定位，并保留手动设置的 0 次。
@@ -3550,6 +3551,48 @@
                                         && Array.isArray(existing.mediaTags) && existing.mediaTags.length) {
                                         normalized.mediaTags = existing.mediaTags.slice();
                                     }
+
+                                    // 普通扁平记录按观看事实合并，避免旧备份回滚本地较新的观看时间/快照。
+                                    const getLatestState = record => {
+                                        const snapshots = Array.isArray(record.snapshots) ? record.snapshots : [];
+                                        const latestSnapshot = snapshots.reduce((latest, snapshot) =>
+                                            Number(snapshot?.ts || 0) > Number(latest?.ts || 0) ? snapshot : latest, null);
+                                        const lastTs = Number(record.lastTs) || 0;
+                                        const snapshotTs = Number(latestSnapshot?.ts) || 0;
+                                        return snapshotTs > lastTs
+                                            ? { ts: snapshotTs, progress: latestSnapshot.progress || record.lastProgress || '0%' }
+                                            : { ts: lastTs, progress: record.lastProgress || '0%' };
+                                    };
+                                    const localState = getLatestState(existing);
+                                    const importedState = getLatestState(normalized);
+
+                                    const mergedSnapshots = new Map();
+                                    [...(Array.isArray(existing.snapshots) ? existing.snapshots : []),
+                                        ...(Array.isArray(normalized.snapshots) ? normalized.snapshots : [])]
+                                        .forEach(snapshot => {
+                                            if (!snapshot || typeof snapshot !== 'object') return;
+                                            const signature = `${Number(snapshot.ts) || 0}|${snapshot.pos == null ? '' : Number(snapshot.pos)}|${String(snapshot.progress || '')}|${snapshot.completed === true ? 1 : 0}`;
+                                            const previous = mergedSnapshots.get(signature);
+                                            if (!previous || String(snapshot.watchTimeStr || '').length > String(previous.watchTimeStr || '').length) {
+                                                mergedSnapshots.set(signature, { ...snapshot });
+                                            }
+                                        });
+                                    normalized.snapshots = RecordNormalizer.keepSnapshotsWithinLimit(
+                                        [...mergedSnapshots.values()].sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0))
+                                    );
+
+                                    const latestState = importedState.ts > localState.ts ? importedState : localState;
+                                    normalized.lastTs = latestState.ts;
+                                    normalized.lastProgress = latestState.progress;
+                                    normalized.watchCount = Math.max(
+                                        Number(existing.watchCount) || 0,
+                                        Number(normalized.watchCount) || 0,
+                                        normalized.snapshots.length
+                                    );
+                                    normalized.hasReachedWatchThreshold = existing.hasReachedWatchThreshold === true
+                                        || normalized.hasReachedWatchThreshold === true;
+                                    normalized.officialHistorySeen = existing.officialHistorySeen === true
+                                        || normalized.officialHistorySeen === true;
                                 }
 
                                 RecordStore.set(key, normalized);
