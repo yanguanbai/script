@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.9
+// @version      5.10.18
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -24,6 +24,15 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
+// 5.10.18：修正内部键大小写识别；仅清理历史派生索引中的误入设置项，保留 GM 尺寸设置和观看记录。
+// 5.10.17：恢复路由轮询兜底与切换保护；检查点待落盘期间按会话去重并允许失败后重试。
+// 5.10.16：冷库回热/归档保留更新热层标题；合集标题修复在记录锁内更新最新值并核验后清理未变化来源。
+// 5.10.15：恢复合集扫描整理的原有观看次数、状态和分集创建规则；保留精确身份匹配与提交核验。
+// 5.10.14：补齐普通记录卡片左键跳转；热层与冷库共用原有链接生成方式，保留右键菜单。
+// 5.10.13：统一 SPA 路由订阅和记录器启停；回收媒体事件、观察器及计时器；设置职责拆分、CSS 按原顺序分段复用。
+// 5.10.12：同源维护锁与记录锁协调写入；导入事务内合并、归档/回热保护源副本；落盘核验后通知，冷库编辑/删除失效备份标记并报告部分失败。
+// 5.10.11：普通副本合并逐字段保留有效元信息；统一动态 HTML 文本转义，保持原始记录与备份格式。
+// 5.10.10：主存模式仅由迁移成功标志启用；立即归档不修改设置草稿；设置事件一次绑定、任务防重入及主存控件完整禁用。
 // 5.10.9：设置页可移除已确认不存在的旧冷库登记；只删除油猴目录项，不删除仍存在的数据库或其中记录。
 // 5.10.8：设置页自动扫描并展示 IndexedDB 冷库信息；识别到缺失元信息的可用库时登记并复用，结构异常库显示不可用状态。
 // 5.10.7：新增“无结果自动查冷库”开关，默认关闭；本地数据较少可开启。有搜索词且热层零命中时自动深搜，空查询或热层命中不扫描；保留底部手动深搜卡片。
@@ -90,7 +99,7 @@
         listValues: nativeGMListValues
     };
     const GM_getValue = (key, fallback) => StorageRouter.getValue(key, fallback);
-    const GM_setValue = (key, value) => StorageRouter.setValue(key, value);
+    const GM_setValue = (key, value, options) => StorageRouter.setValue(key, value, options);
     const GM_deleteValue = key => StorageRouter.deleteValue(key);
     const GM_listValues = () => StorageRouter.listValues();
 
@@ -482,10 +491,10 @@
     // 并提供容器键转换、分组键计算、URL 解析和播放链接构建。
     // 这里决定“某条记录属于哪个视频/分集/整季”，是存储、同步、迁移和悬浮窗读取共同依赖的身份规则。
     const RecordKey = {
-        // 判断是否为脚本管理的记录存储键：非空、且不以 bvh_ 开头（设置项/索引/信号都带 bvh_ 前缀）。
+        // 判断是否为脚本管理的记录存储键：非空、且不以 bvh_ 开头（设置项/索引/信号都带该前缀，大小写不敏感）。
         // 跨BV合集容器以标题为键，无法用格式正则判定，故用排除法识别。
         isRecordKey(key) {
-            return typeof key === 'string' && key.trim() !== '' && !key.startsWith('bvh_');
+            return typeof key === 'string' && key.trim() !== '' && !/^bvh_/i.test(key);
         },
         // 判断是否为旧格式分 P 视频键（BV?p=N，迁移前存在，新写入归入容器）。
         isPartKey(key) {
@@ -1678,10 +1687,10 @@
                         ...saved,
                         count,
                         hotSnapshots: {
-                            player: saved.hotSnapshots.player.slice().sort(byNewest).slice(0, count),
-                            official: saved.hotSnapshots.official.slice().sort(byNewest).slice(0, count)
+                            player: saved.hotSnapshots.player.filter(entry => RecordKey.isRecordKey(entry?.bvKey)).sort(byNewest).slice(0, count),
+                            official: saved.hotSnapshots.official.filter(entry => RecordKey.isRecordKey(entry?.bvKey)).sort(byNewest).slice(0, count)
                         },
-                        latestSnapshots: saved.latestSnapshots.slice().sort(byNewest).slice(0, count)
+                        latestSnapshots: saved.latestSnapshots.filter(entry => RecordKey.isRecordKey(entry?.bvKey)).sort(byNewest).slice(0, count)
                     };
                 }
             } catch (err) {
@@ -1918,7 +1927,30 @@
                 && hotOk
                 && saved.itemsByKey && typeof saved.itemsByKey === 'object'
                 && Array.isArray(saved.sortedKeys) && Array.isArray(saved.latestSnapshots)) {
-                this._index = saved;
+                const staleKeys = Object.keys(saved.itemsByKey).filter(key => !RecordKey.isRecordKey(key));
+                if (staleKeys.length) {
+                    const itemsByKey = { ...saved.itemsByKey };
+                    staleKeys.forEach(key => delete itemsByKey[key]);
+                    const validKeys = new Set(Object.keys(itemsByKey));
+                    const keepSnapshots = entries => entries.filter(entry => validKeys.has(String(entry?.bvKey || '')));
+                    this._index = {
+                        ...saved,
+                        itemsByKey,
+                        sortedKeys: saved.sortedKeys.filter(key => validKeys.has(key)),
+                        latestSnapshots: keepSnapshots(saved.latestSnapshots),
+                        hotSnapshots: {
+                            player: keepSnapshots(saved.hotSnapshots.player),
+                            official: keepSnapshots(saved.hotSnapshots.official)
+                        }
+                    };
+                    try {
+                        GM_setValue(HISTORY_VIEW_INDEX_KEY, this._index);
+                    } catch (err) {
+                        console.warn('[Bilibili History] 清理历史索引中的内部键失败：', err);
+                    }
+                } else {
+                    this._index = saved;
+                }
                 this._index.building = false;
                 this._ready = true;
                 return this._index;
@@ -2193,11 +2225,30 @@
         },
 
         // 本地记录变化后同时触发页面事件和油猴跨标签页通知。
+        _notifiedWrites: new WeakSet(),
         _broadcast(key) {
             if (!RecordKey.isRecordKey(key)) return;
             this.notifyChange(key, 'local');
+            const pending = StorageRouter._pendingWrites.get(key);
+            if (pending) {
+                if (this._notifiedWrites.has(pending)) return;
+                this._notifiedWrites.add(pending);
+                const operationId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                pending.then(() => this._broadcastCommitted(key, operationId), () => {
+                    this.notifyChange(key, 'write-failed');
+                }).catch(error => console.warn(`${TAG} 写入完成后的通知失败`, error));
+                return;
+            }
+            if (StorageRouter.isPrimaryMode() && StorageRouter._queue()[key]) return;
+            this._broadcastCommitted(key);
+        },
+        _broadcastCommitted(key, operationId = '') {
+            if (!RecordKey.isRecordKey(key)) return;
+            this.notifyChange(key, 'committed');
             GM_setValue(RECORD_CHANGE_SIGNAL_KEY, {
                 key,
+                phase: 'committed',
+                operationId: operationId || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
                 ts: Date.now(),
                 nonce: Math.random().toString(36).slice(2)
             });
@@ -2220,12 +2271,13 @@
         },
 
         // 写入记录后同步维护分组索引、视图索引、备份标记和跨标签通知。
-        set(key, value) {
-            GM_setValue(key, value);
+        set(key, value, options) {
+            const completion = GM_setValue(key, value, options);
             this._addToIndex(key);
             HistoryViewIndex.updateKey(key, value, false);
             this._clearExportedMark(key);
             this._broadcast(key);
+            return completion;
         },
 
         // 删除记录并同步清理索引、备份标记及跨标签通知。
@@ -2237,15 +2289,15 @@
                     const season = RecordNormalizer.normalize(GM_getValue(seasonKey, null));
                     if (!season || season.type !== 'collection') continue;
                     const before = season.parts.length;
-                    season.parts = season.parts.filter(part => ![
+                    const keepPart = part => ![
                         part.bv, part.epKey, part.episodeKey, part.key, part.bvid, part.bvKey
-                    ].some(value => String(value || '').trim().toLowerCase() === epKey));
-                    if (season.parts.length !== before) {
-                        if (season.parts.length || season.legacyAggregate) this.set(seasonKey, RecordNormalizer.normalize(season));
-                        else this.deleteRaw(seasonKey);
-                        this._clearExportedMark(epKey);
-                        this._broadcast(epKey);
-                        return;
+                    ].some(value => String(value || '').trim().toLowerCase() === epKey);
+                    if (season.parts.filter(keepPart).length !== before) {
+                        return StorageRouter.updateRecord(seasonKey, current => {
+                            if (!current || current.type !== 'collection') return current;
+                            current.parts = current.parts.filter(keepPart);
+                            return current.parts.length || current.legacyAggregate ? RecordNormalizer.normalize(current) : null;
+                        });
                     }
                 }
             }
@@ -2254,20 +2306,21 @@
                 const bv = m[1], p = Number(m[2]);
                 const container = RecordNormalizer.normalize(GM_getValue(bv, null));
                 if (container && container.type === 'collection') {
-                    const idx = container.parts.findIndex(pp => pp.p === p);
-                    if (idx >= 0) container.parts.splice(idx, 1);
-                    if (container.parts.length) {
-                        this.set(bv, RecordNormalizer.normalize(container));
-                        return;
-                    }
-                    // parts 已空 → 落到下面删除整个容器。
+                    return StorageRouter.updateRecord(bv, current => {
+                        if (!current || current.type !== 'collection') return current;
+                        const target = this.findCollectionPart(current, key, p);
+                        if (!target) throw new Error('分集身份不明确，未执行删除');
+                        current.parts = current.parts.filter(part => part !== target);
+                        return current.parts.length || current.legacyAggregate ? RecordNormalizer.normalize(current) : null;
+                    });
                 }
             }
-            GM_deleteValue(key);
+            const completion = GM_deleteValue(key);
             this._removeFromIndex(key);
             HistoryViewIndex.updateKey(key, null, true);
             this._clearExportedMark(key);
             this._broadcast(key);
+            return completion;
         },
 
         // 5.3.0：直接删除一个原始存储键（不经过容器感知），供迁移/合集修复删除旧扁平键时使用。
@@ -2284,6 +2337,72 @@
             this._clearExportedMark(key);
             this._broadcast(key);
             return true;
+        },
+
+        async readCommitted(key) {
+            await StorageRouter.requireCommitted(key);
+            if (StorageRouter.isPrimaryMode()) {
+                const row = await ColdArchiveStore.getRecord(GMNative.getValue(COLD_PRIMARY_DB_KEY, ''), key);
+                return row?.data ?? null;
+            }
+            return GMNative.getValue(key, null);
+        },
+        async _verifyCommitted(key, value, completion) {
+            await completion;
+            const saved = await this.readCommitted(key);
+            if (JSON.stringify(RecordNormalizer.normalize(saved)) !== JSON.stringify(RecordNormalizer.normalize(value))) {
+                throw new Error(`记录落盘核验不一致，源记录保留：${key}`);
+            }
+            return saved;
+        },
+        setCommitted(key, value) {
+            return this._verifyCommitted(key, value, this.set(key, value, { copy: true }));
+        },
+        updateCommitted(key, update, sources = []) {
+            return StorageRouter.updateRecord(key, update, {
+                create: true,
+                returnValue: true,
+                sourceEntries: sources
+            });
+        },
+        async deleteRawCommitted(key, expectedSerializedValue) {
+            await StorageRouter.requireCommitted(key);
+            const current = await this.readCommitted(key);
+            if (current === null) return false;
+            if (arguments.length > 1 && JSON.stringify(current) !== expectedSerializedValue) {
+                throw new Error(`源记录已变化，保留原键：${key}`);
+            }
+            // 原值检查放在锁内；不能经普通副本合并处理删除。
+            const expected = JSON.stringify(current);
+            await StorageRouter.updateRecord(key, latest => {
+                if (JSON.stringify(latest) !== expected) throw new Error(`源记录已变化，保留原键：${key}`);
+                return null;
+            });
+            if (await this.readCommitted(key) !== null) throw new Error(`源记录删除未完成：${key}`);
+            return true;
+        },
+        _finishUpsert(key, value, sources, options) {
+            const sourceEntries = [...sources];
+            // 普通录制只交给 pending tracker；迁移删源或显式等待才额外回读。
+            const write = sourceEntries.length || options.awaitCommit
+                ? this.setCommitted(key, value)
+                : Promise.resolve(this.set(key, value)).then(() => StorageRouter.requireCommitted(key));
+            const completion = write.then(async () => {
+                for (const [sourceKey, original] of sourceEntries) {
+                    if (sourceKey !== key) await this.deleteRawCommitted(sourceKey, original);
+                }
+                return true;
+            });
+            completion.catch(error => console.error(`${TAG} 记录归并未完成，未删除的源键保留：${key}`, error));
+            options.onCommitted?.(completion);
+            return true;
+        },
+        async upsertRecordCommitted(key, record, options = {}) {
+            let completion;
+            const accepted = this.upsertRecord(key, record, { ...options, awaitCommit: true, onCommitted: pending => { completion = pending; } });
+            if (!accepted) return false;
+            if (!completion) throw new Error(`记录写入缺少提交结果：${key}`);
+            return await completion;
         },
 
         // 5.3.0：统一写入入口——把一条记录（可能是分P）合并进合集容器，或作为单视频扁平存储。
@@ -2335,6 +2454,7 @@
                 return oldEpisode;
             };
             if (episodeKey && RecordKey.isEpisodeKey(episodeKey)) {
+                const originalEpisode = GM_getValue(episodeKey, null);
                 const oldEpisode = mergeLegacyEpisodeData();
                 if (RecordKey.isSeasonKey(seasonKey)) {
                     const unsafeLegacyCollection = oldEpisode?.type === 'collection'
@@ -2346,10 +2466,8 @@
                     }
                     const container = this._mergeEpisodeIntoSeason(seasonKey, episodeKey, record, options);
                     if (!container || container.type !== 'collection' || !Array.isArray(container.parts)) return false;
-                    this.set(seasonKey, container);
-                    // 只有能确定旧 ep 键的数据已并入当前分集时才删除重复键。
-                    if (GM_getValue(episodeKey, null) !== null && (!oldEpisode || oldEpisode.type !== 'collection' || oldEpisode.parts.length === 1)) this.deleteRaw(episodeKey);
-                    return true;
+                    const sources = originalEpisode !== null ? [[episodeKey, JSON.stringify(originalEpisode)]] : [];
+                    return this._finishUpsert(seasonKey, container, sources, options);
                 }
                 // ep 只能作为 ss.parts[] 内的分集身份，绝不再写成独立顶层记录。
                 // 如果页面没有提供 seasonId，且本地也找不到该 ep 所属 ss，则停止本次写入；
@@ -2368,41 +2486,44 @@
             const shouldContainer = RecordKey.isPartKey(s) || options.isCollection === true || partTotal > 1 || hasContainer;
             if (!shouldContainer) {
                 // 普通视频写入前统一归一化：自动省略空的合集/分集专用字段，不改变观看事实。
-                this.set(s, RecordNormalizer.normalize(record) || record);
-                return true;
+                return this._finishUpsert(s, RecordNormalizer.normalize(record) || record, [], options);
             }
             // 首次建容器前，把本地已存在的同BV扁平记录（BV 单视频、BV?p=*）一并并入，避免丢失。
+            const sources = new Map();
+            let assembled = existingContainer;
             if (!hasContainer) {
                 const rawFlat = GM_getValue(bv, null);
                 if (rawFlat && typeof rawFlat === 'object' && !Array.isArray(rawFlat) && !rawFlat.type) {
-                    this._mergePartIntoContainer(bv, RecordNormalizer.normalize(rawFlat), { partNumber: 1 });
+                    assembled = this._mergePartIntoContainer(bv, RecordNormalizer.normalize(rawFlat), { partNumber: 1 }, assembled);
                 }
                 for (const k of GM_listValues()) {
                     if (k === s || k === bv) continue;
                     if (RecordKey.isPartKey(k)) {
                         const m = k.match(/^(BV[a-zA-Z0-9]+)\?p=(\d+)$/i);
                         if (m && m[1] === bv) {
-                            this._mergePartIntoContainer(bv, RecordNormalizer.normalize(GM_getValue(k, null)), { partNumber: Number(m[2]) });
+                            const original = GM_getValue(k, null);
+                            const normalized = RecordNormalizer.normalize(original);
+                            if (!normalized || normalized.type === 'collection') continue;
+                            assembled = this._mergePartIntoContainer(bv, normalized, { partNumber: Number(m[2]) }, assembled);
+                            sources.set(k, JSON.stringify(original));
                         }
                     }
                 }
+            }
+            const originalPart = s !== bv ? GM_getValue(s, null) : null;
+            if (originalPart !== null) {
+                const normalizedPart = RecordNormalizer.normalize(originalPart);
+                if (!normalizedPart || normalizedPart.type === 'collection') return false;
+                assembled = this._mergePartIntoContainer(bv, normalizedPart, { partNumber: p }, assembled);
+                sources.set(s, JSON.stringify(originalPart));
             }
             const container = this._mergePartIntoContainer(bv, record, {
                 ...options,
                 partNumber: Number(options.partNumber) || p,
                 partTotal
-            });
+            }, assembled);
             if (!container) return false;
-            this.set(bv, container);
-            // 旧扁平分P键若存在且与容器键不同 → 删除（已并入容器；用 deleteRaw 避免容器感知误删刚并入的 part）
-            for (const k of GM_listValues()) {
-                if (k === bv) continue;
-                if (k === s || RecordKey.isPartKey(k)) {
-                    const m = k.match(/^(BV[a-zA-Z0-9]+)(?:\?p=(\d+))?$/i);
-                    if (m && m[1] === bv && GM_getValue(k, null) !== null) this.deleteRaw(k);
-                }
-            }
-            return true;
+            return this._finishUpsert(bv, container, sources, options);
         },
 
         // 番剧/电视剧统一使用整季 ss 容器，单集 ep 作为 parts[] 中的独立观看实体。
@@ -2551,8 +2672,8 @@
 
         // 5.3.0：把一条扁平记录合并进容器对应分集（p）。
         // 标题优先级：分集标题取选集(options.partTitle)/已有，合集标题取播放页合集框(containerTitle)>视频页>官方；分集标题缺失时保持已有不覆盖。
-        _mergePartIntoContainer(containerKey, record, options = {}) {
-            const existing = RecordNormalizer.normalize(GM_getValue(containerKey, null));
+        _mergePartIntoContainer(containerKey, record, options = {}, assembled = null) {
+            const existing = assembled || RecordNormalizer.normalize(GM_getValue(containerKey, null));
             const container = existing && existing.type === 'collection'
                 ? existing
                 : { type: 'collection', key: containerKey, title: '', authorName: '', mediaType: '视频', parts: [], schemaVersion: 4 };
@@ -2649,29 +2770,8 @@
             const wantedKey = String(partKey || '').trim().toLowerCase();
             if (!storageKey || !wantedKey) return null;
             const container = RecordNormalizer.normalize(GM_getValue(storageKey, null));
-            if (!container || container.type !== 'collection' || !Array.isArray(container.parts)) return null;
-
-            const wantedEpisode = /^ep\d+$/i.test(wantedKey) ? wantedKey : '';
-            const wantedBvMatch = wantedKey.match(/^(BV[a-zA-Z0-9]+)(?:\?p=(\d+))?$/i);
-            const wantedBv = wantedBvMatch ? wantedBvMatch[1].toLowerCase() : '';
-            const wantedP = wantedBvMatch ? Number(wantedBvMatch[2]) || Number(partNumber) || 1 : Number(partNumber) || 0;
-            const identityOf = part => [part.bv, part.epKey, part.episodeKey, part.key, part.bvid, part.bvKey]
-                .map(value => String(value || '').trim().toLowerCase())
-                .filter(Boolean);
-            const matches = container.parts.filter(part => {
-                const identities = identityOf(part);
-                if (identities.includes(wantedKey)) return true;
-                if (wantedEpisode) return identities.some(value => value === wantedEpisode);
-                if (!wantedBv) return false;
-                return identities.some(value => {
-                    const match = value.match(/^(BV[a-zA-Z0-9]+)(?:\?p=(\d+))?$/i);
-                    if (!match || match[1].toLowerCase() !== wantedBv) return false;
-                    const storedP = Number(match[2]) || Number(part.p) || 1;
-                    return storedP === wantedP;
-                });
-            });
-            if (matches.length !== 1) return null;
-            return { container, part: matches[0], storageKey };
+            const part = this.findCollectionPart(container, wantedKey, partNumber);
+            return part ? { container, part, storageKey } : null;
         },
 
         findCollectionPart(container, partKey, partNumber = 0) {
@@ -2872,14 +2972,59 @@
         // 监听其他标签页发来的记录变更，读取最新数据并更新当前标签的索引。
         initRemoteListener() {
             if (typeof GM_addValueChangeListener !== 'function') return;
+            GM_addValueChangeListener(COLD_PRIMARY_MODE_KEY, (_key, _oldValue, enabled, remote) => {
+                if (!remote || enabled !== true || !StorageRouter._isDatabaseOrigin()) return;
+                StorageRouter.initialize().then(() => {
+                    this.clearIndex();
+                    HistoryViewIndex._rebuildAsync();
+                    refreshOpenHistoryLists(true);
+                }).catch(error => console.warn(`${TAG} 主存模式同步失败，待处理记录保留`, error));
+            });
             GM_addValueChangeListener(RECORD_CHANGE_SIGNAL_KEY, (_key, _oldValue, newValue, remote) => {
                 if (!remote || !newValue || !RecordKey.isRecordKey(newValue.key)) return;
-                StorageRouter.refreshKey(newValue.key).then(value => {
+                if (newValue.phase && newValue.phase !== 'committed') return;
+                StorageRouter.refreshKey(newValue.key, newValue.phase === 'committed').then(value => {
                     this._refreshIndexKey(newValue.key);
                     HistoryViewIndex.updateKey(newValue.key, value, value === null);
                     this.notifyChange(newValue.key, 'remote');
                 }).catch(error => console.warn(`${TAG} 跨标签页记录刷新失败：${newValue.key}`, error));
             });
+        }
+    };
+
+    // 锁顺序固定：维护锁 → 排序后的记录锁。底层事务不加锁，避免重入死锁。
+    const StorageOperations = {
+        _tail: Promise.resolve(),
+        _warned: false,
+        get crossTabSafe() { return typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function'; },
+        run(keys, action, exclusive = false) {
+            const ids = [...new Set(keys)].sort();
+            if (this.crossTabSafe) {
+                const lockNext = index => index === ids.length ? action()
+                    : navigator.locks.request(`bvh-record:${ids[index]}`, () => lockNext(index + 1));
+                return navigator.locks.request('bvh-record-maintenance', { mode: exclusive ? 'exclusive' : 'shared' }, () => lockNext(0));
+            }
+            if (!this._warned) {
+                this._warned = true;
+                console.warn(`${TAG} 浏览器不支持 Web Locks，写入仅在本页串行；跨标签并发未保证。`);
+            }
+            const result = this._tail.catch(() => {}).then(action);
+            this._tail = result.catch(() => {});
+            return result;
+        },
+        async publish(key, operationId = '') {
+            // 主存远端刷新使用已提交数据；待处理队列仍由原有恢复入口处理。
+            if (StorageRouter.isPrimaryMode()) await StorageRouter.refreshKey(key, true);
+            RecordStore._refreshIndexKey(key);
+            HistoryViewIndex.updateKey(key, StorageRouter.getValue(key, null), StorageRouter.getValue(key, null) === null);
+            RecordStore._clearExportedMark(key);
+            RecordStore._broadcastCommitted(key, operationId);
+        },
+        async verifyRows(id, expected) {
+            for (const [key, row] of expected) {
+                const saved = await ColdArchiveStore.getRecord(id, key);
+                if (!saved || JSON.stringify(saved.data) !== JSON.stringify(row.data)) throw new Error(`冷库回读核验失败：${key}`);
+            }
         }
     };
 
@@ -2972,6 +3117,9 @@
             return this.list();
         },
         async deleteEmptyDatabases() {
+            return StorageOperations.run([], () => this._deleteEmptyDatabases(), true);
+        },
+        async _deleteEmptyDatabases() {
             await this.reconcileDirectory();
             const removed = [];
             for (const meta of this._directory()) {
@@ -3131,7 +3279,10 @@
             } else collect(data);
             return { minTs, maxTs };
         },
-        async putRecords(id, records, { skipExisting = false, mergeExisting = false } = {}) {
+        async putRecords(id, records, options = {}) {
+            return StorageOperations.run(records.map(row => row.key), () => this._putRecords(id, records, options));
+        },
+        async _putRecords(id, records, { skipExisting = false, mergeExisting = false, preferIncomingTitle = false } = {}) {
             const meta = this.getMeta(id);
             if (!meta) throw new Error('所选冷库不存在');
             const db = await this._open(meta);
@@ -3151,6 +3302,14 @@
                         const data = mergeExisting && existing
                             ? StorageRouter._mergeRecords(record.key, existing.data, record.data)
                             : RecordNormalizer.normalize(record.data);
+                        if (preferIncomingTitle && existing && typeof record.data.title === 'string' && record.data.title.trim()) {
+                            const titlePriority = value => !String(value?.title || '').trim() ? 0 : value.titleSource === 'official' ? 1 : 2;
+                            if (titlePriority(record.data) >= titlePriority(existing.data)
+                                && Number(record.data.lastTs) > Number(existing.data.lastTs)) {
+                                data.title = record.data.title;
+                                data.titleSource = record.data.titleSource || '';
+                            }
+                        }
                         const range = this._recordTimestampRange(data);
                         const value = { key: record.key, data, lastTs: range.maxTs };
                         const request = store.put(value);
@@ -3311,6 +3470,9 @@
             } finally { db.close(); }
         },
         async deleteRecord(id, key, update = null) {
+            return StorageOperations.run([key], () => this._deleteRecord(id, key, update));
+        },
+        async _deleteRecord(id, key, update = null, expectedData = undefined) {
             const meta = this.getMeta(id);
             if (!meta) throw new Error('所选冷库不存在');
             const db = await this._open(meta);
@@ -3322,6 +3484,7 @@
                     let removed = false;
                     request.onsuccess = () => {
                         if (!request.result) return;
+                        if (expectedData !== undefined && JSON.stringify(request.result.data) !== expectedData) return;
                         if (update) {
                             const next = update(request.result.data);
                             if (next) {
@@ -3348,7 +3511,13 @@
             } finally { db.close(); }
         },
         async updateMergedRecord(ids, key, update) {
-            const sourceIds = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(id => this.getMeta(id)))];
+            return StorageOperations.run([key], async () => {
+                try { return await this._updateMergedRecord(ids, key, update); }
+                finally { refreshOpenHistoryLists(true); }
+            });
+        },
+        async _updateMergedRecord(ids, key, update) {
+            const sourceIds = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean))];
             if (!sourceIds.length) throw new Error('冷库来源不存在');
             let merged = null;
             for (const id of sourceIds) {
@@ -3358,21 +3527,41 @@
             if (!merged) return false;
             const next = update(RecordNormalizer.normalize(merged));
             if (!next) {
-                for (const id of sourceIds) await this.deleteRecord(id, key);
+                await this._deleteMergedRecord(sourceIds, key);
                 return true;
             }
             const data = RecordNormalizer.normalize(next);
+            const failed = [];
             for (const id of sourceIds) {
-                await this.putRecords(id, [{ key, data, lastTs: this._recordTimestampRange(data).maxTs }]);
-                const persisted = await this.getRecord(id, key);
-                if (!persisted || JSON.stringify(persisted.data) !== JSON.stringify(data)) throw new Error(`冷库修改回读核验失败：${id}`);
+                try {
+                    await this._putRecords(id, [{ key, data, lastTs: this._recordTimestampRange(data).maxTs }]);
+                    await StorageOperations.verifyRows(id, new Map([[key, { data }]]));
+                } catch (error) { failed.push(`${id}：${error.message}`); }
             }
+            RecordStore._clearExportedMark(key);
+            if (failed.length) throw new Error(`冷库修改未全部完成；失败库：${failed.join('；')}`);
+            await StorageOperations.publish(key);
             return true;
         },
         async deleteMergedRecord(ids, key) {
-            const sourceIds = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(id => this.getMeta(id)))];
+            return StorageOperations.run([key], async () => {
+                try { return await this._deleteMergedRecord(ids, key); }
+                finally { refreshOpenHistoryLists(true); }
+            });
+        },
+        async _deleteMergedRecord(ids, key, notify = true) {
+            const sourceIds = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean))];
             let changed = false;
-            for (const id of sourceIds) changed = await this.deleteRecord(id, key) || changed;
+            const failed = [];
+            for (const id of sourceIds) {
+                try {
+                    changed = await this._deleteRecord(id, key) || changed;
+                    if (await this.getRecord(id, key)) throw new Error('删除后记录仍存在');
+                } catch (error) { failed.push(`${id}：${error.message}`); }
+            }
+            RecordStore._clearExportedMark(key);
+            if (failed.length) throw new Error(`冷库删除未全部完成；失败库：${failed.join('；')}`);
+            if (changed && notify) await StorageOperations.publish(key);
             return changed;
         },
         async search(query, hotKeys = new Set()) {
@@ -3433,20 +3622,22 @@
                 if (!data) return;
                 incoming.set(key, incoming.has(key) ? StorageRouter._mergeRecords(key, incoming.get(key), data) : data);
             });
-            const existing = new Map((await this.readRecords(id)).map(row => [row.key, row.data]));
-            let inserted = 0, merged = 0;
-            const records = [];
-            for (const [key, data] of incoming) {
-                const combined = existing.has(key) ? StorageRouter._mergeRecords(key, existing.get(key), data) : data;
-                if (existing.has(key)) merged++; else inserted++;
-                records.push({ key, data: combined, lastTs: this._recordTimestampRange(combined).maxTs });
-            }
-            await this.putRecords(id, records);
-            return { read: incoming.size, inserted, merged, keys: [...incoming.keys()] };
+            return StorageOperations.run([...incoming.keys()], async () => {
+                const records = [...incoming].map(([key, data]) => ({ key, data, lastTs: this._recordTimestampRange(data).maxTs }));
+                const result = await this._putRecords(id, records, { mergeExisting: true });
+                await StorageOperations.verifyRows(id, result.writtenRecords);
+                for (const key of incoming.keys()) await StorageOperations.publish(key);
+                return { read: incoming.size, inserted: result.inserted, merged: result.existingKeys.length, keys: [...incoming.keys()] };
+            });
         },
         async archiveOldRecords({ ageDays = CONFIG.COLD_ARCHIVE_AGE_DAY, targetId = null } = {}) {
             if (StorageRouter.isPrimaryMode() || !(Number(ageDays) > 0)) throw new Error('年龄为 0 时请保存设置并确认启用主存模式');
             await Promise.all([...StorageRouter._pendingWrites.values()]);
+            const keys = GM_listValues().filter(RecordKey.isRecordKey);
+            return StorageOperations.run(keys, () => this._archiveOldRecords({ ageDays, targetId, keys }));
+        },
+        async _archiveOldRecords({ ageDays, targetId, keys }) {
+            if (StorageRouter.isPrimaryMode() || !(Number(ageDays) > 0)) throw new Error('年龄为 0 时请保存设置并确认启用主存模式');
             await ColdArchiveApi.ensureDefault();
             const id = targetId || CONFIG.COLD_ARCHIVE_TARGET_ID;
             if (!this.getMeta(id)) throw new Error('归档目标冷库不存在');
@@ -3467,7 +3658,7 @@
                     console.warn(`${TAG} 归档时跳过不可用冷库 ${dbMeta.name}`, error);
                 }
             }
-            const candidates = GM_listValues().filter(RecordKey.isRecordKey).map(key => {
+            const candidates = keys.map(key => {
                 const raw = GM_getValue(key, null);
                 const data = RecordNormalizer.normalize(raw);
                 if (!data) return null;
@@ -3479,7 +3670,7 @@
                 GM_setValue(COLD_ARCHIVE_RUN_KEY, Date.now());
                 return { archived: 0, targetId: id, unavailableDatabases };
             }
-            const writeResult = await this.putRecords(id, candidates, { mergeExisting: true });
+            const writeResult = await this._putRecords(id, candidates, { mergeExisting: true, preferIncomingTitle: true });
             const expectedByKey = writeResult.writtenRecords;
             // A same-key row may have appeared after the initial cold-tier scan. Keep the
             // existing row rather than overwriting it, then use the read-back below to
@@ -3524,11 +3715,34 @@
         _degraded: false,
         _activeId: '',
         _pendingWrites: new Map(),
-        isPrimaryMode() { return CONFIG.COLD_PRIMARY_MODE || CONFIG.COLD_ARCHIVE_AGE_DAY === 0; },
+        isPrimaryMode() {
+            const enabled = GMNative.getValue(COLD_PRIMARY_MODE_KEY, false) === true;
+            CONFIG.COLD_PRIMARY_MODE = enabled;
+            if (enabled) CONFIG.COLD_ARCHIVE_AGE_DAY = 0;
+            return enabled;
+        },
         _isDatabaseOrigin() { return location.hostname === 'www.bilibili.com'; },
         _clone(value) {
             if (value === undefined || value === null) return value;
             return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value));
+        },
+        _mergeMetadata(left, right) {
+            const hasText = value => typeof value === 'string' && value.trim().length > 0;
+            const titlePriority = record => !hasText(record.title) ? 0 : record.titleSource === 'official' ? 1 : 2;
+            // player 与无来源的已有标题同级；标题优先级相同时保留 left，来源跟随标题。
+            const titleOwner = titlePriority(right) > titlePriority(left) ? right : left;
+            const newer = (Number(right.lastTs) || 0) > (Number(left.lastTs) || 0) ? right : left;
+            const older = newer === right ? left : right;
+            const nonempty = field => hasText(newer[field]) ? newer[field] : hasText(older[field]) ? older[field] : newer[field];
+            const mediaType = nonempty('mediaType');
+            return {
+                title: titleOwner.title,
+                titleSource: titleOwner.titleSource,
+                authorName: nonempty('authorName'),
+                mediaSubtitle: nonempty('mediaSubtitle'),
+                mediaType: mediaType === '视频' && hasText(older.mediaType) && older.mediaType !== '视频' ? older.mediaType : mediaType,
+                mediaTags: [...new Set([...(left.mediaTags || []), ...(right.mediaTags || [])])]
+            };
         },
         _mergeRecords(key, leftRaw, rightRaw) {
             const left = RecordNormalizer.normalize(leftRaw);
@@ -3549,11 +3763,83 @@
             const older = newer === right ? left : right;
             const snapshots = RecordNormalizer.keepSnapshotsWithinLimit([...(left.snapshots || []), ...(right.snapshots || [])]);
             return RecordNormalizer.normalize({
-                ...older, ...newer, snapshots,
+                ...older, ...newer, ...this._mergeMetadata(left, right), snapshots,
                 watchCount: Math.max(Number(left.watchCount) || 0, Number(right.watchCount) || 0),
                 hasReachedWatchThreshold: left.hasReachedWatchThreshold === true || right.hasReachedWatchThreshold === true,
                 officialHistorySeen: left.officialHistorySeen === true || right.officialHistorySeen === true
             });
+        },
+        // 仅用于正在运行的普通写入；副本导入仍按原合并规则，故障队列恢复也不走这里。
+        _replaySetDelta(key, baselineRaw, incomingRaw, currentRaw) {
+            const baseline = RecordNormalizer.normalize(baselineRaw);
+            const incoming = RecordNormalizer.normalize(incomingRaw);
+            const current = RecordNormalizer.normalize(currentRaw);
+            if (!baseline) return this._mergeRecords(key, current, incoming);
+            if (!current) throw new Error('记录已被其他操作删除，旧写入未覆盖删除结果');
+            if (!incoming || baseline.type !== incoming.type || current.type !== incoming.type) {
+                throw new Error('记录结构已变化，旧写入已保留待处理');
+            }
+            const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+            const applyEntity = (before, next, latest) => {
+                const result = this._clone(latest);
+                for (const field of Object.keys(next)) {
+                    if (['snapshots', 'watchCount', 'lastTs', 'lastProgress', 'parts', 'legacyAggregate', 'title', 'titleSource'].includes(field)) continue;
+                    if (!same(next[field], before[field]) && same(latest[field], before[field])) result[field] = this._clone(next[field]);
+                }
+                if (same(latest.title, before.title) && same(latest.titleSource, before.titleSource)) {
+                    result.title = next.title;
+                    if (Object.prototype.hasOwnProperty.call(next, 'titleSource')) result.titleSource = next.titleSource;
+                    else delete result.titleSource;
+                }
+                const oldSnapshots = new Set((before.snapshots || []).map(snapshot => JSON.stringify(snapshot)));
+                const additions = (next.snapshots || []).filter(snapshot => !oldSnapshots.has(JSON.stringify(snapshot)));
+                if (Array.isArray(latest.snapshots) || additions.length) {
+                    const retained = (latest.snapshots || []).filter(snapshot => !oldSnapshots.has(JSON.stringify(snapshot))
+                        || !additions.some(nextSnapshot => nextSnapshot.ts === snapshot.ts && nextSnapshot.source === snapshot.source));
+                    result.snapshots = RecordNormalizer.keepSnapshotsWithinLimit([...additions, ...retained]);
+                }
+                const delta = (Number(next.watchCount) || 0) - (Number(before.watchCount) || 0);
+                result.watchCount = Math.max(0, (Number(latest.watchCount) || 0) + Math.max(0, delta));
+                if (delta < 0 && Number(latest.watchCount) === Number(before.watchCount)) result.watchCount = next.watchCount;
+                const unchangedLatestState = same([latest.lastTs, latest.lastProgress], [before.lastTs, before.lastProgress]);
+                if ((unchangedLatestState && Number(next.lastTs) >= Number(latest.lastTs))
+                    || (Number(next.lastTs) > Number(before.lastTs) && Number(next.lastTs) > Number(latest.lastTs))) {
+                    result.lastTs = next.lastTs;
+                    result.lastProgress = next.lastProgress;
+                }
+                return result;
+            };
+            const result = applyEntity(baseline, incoming, current);
+            if (current.type === 'collection') {
+                const identity = part => [part.epKey, part.episodeKey, part.key, part.bv, part.bvid, part.bvKey]
+                    .map(value => String(value || '').trim().toLowerCase()).find(value => /^ep\d+$/.test(value))
+                    || collectionPartIdentity(part.bv || part.bvid || key, part);
+                const beforeParts = new Map(baseline.parts.map(part => [identity(part), part]));
+                const currentParts = new Map(current.parts.map(part => [identity(part), part]));
+                const incomingIds = incoming.parts.map(identity);
+                if (beforeParts.has('') || currentParts.has('') || incomingIds.includes('')
+                    || new Set(incomingIds).size !== incomingIds.length
+                    || beforeParts.size !== baseline.parts.length || currentParts.size !== current.parts.length) {
+                    throw new Error('合集身份存在歧义，未重放旧写入');
+                }
+                for (const part of incoming.parts) {
+                    const id = identity(part);
+                    if (!id) throw new Error('分集身份缺失，未重放旧写入');
+                    const before = beforeParts.get(id);
+                    const latest = currentParts.get(id);
+                    if (before && !latest) continue; // 当前删除优先，旧完整容器不能补回已删分集。
+                    if (before) currentParts.set(id, applyEntity(before, part, latest));
+                    else if (!latest) currentParts.set(id, part);
+                    else currentParts.set(id, this._mergeRecords(id, latest, part));
+                }
+                result.parts = [...currentParts.values()];
+                if (baseline.legacyAggregate && incoming.legacyAggregate && current.legacyAggregate) {
+                    result.legacyAggregate = applyEntity(baseline.legacyAggregate, incoming.legacyAggregate, current.legacyAggregate);
+                } else if (!baseline.legacyAggregate && incoming.legacyAggregate && !current.legacyAggregate) {
+                    result.legacyAggregate = incoming.legacyAggregate;
+                }
+            }
+            return RecordNormalizer.normalize(result);
         },
         _countMap(key, raw) {
             const data = RecordNormalizer.normalize(raw);
@@ -3630,21 +3916,116 @@
             else GMNative.deleteValue(COLD_WRITE_QUEUE_KEY);
         },
         async _promoteColdRecordToHot(key) {
+            // 等待维护锁期间其他页面可能完成迁移，必须重新分流，不能删除主库。
+            if (this.isPrimaryMode()) {
+                const hot = GMNative.getValue(key, null);
+                if (hot === null) return;
+                const id = GMNative.getValue(COLD_PRIMARY_DB_KEY, '');
+                const current = await ColdArchiveStore.getRecord(id, key);
+                const data = this._mergeRecords(key, current?.data, hot);
+                await this._writePrimary(key, data, null, id);
+                if (this._ready) this._cache.set(key, data);
+                if (JSON.stringify(GMNative.getValue(key, null)) === JSON.stringify(hot)) GMNative.deleteValue(key);
+                return;
+            }
             for (const meta of ColdArchiveStore.list()) {
+                if (meta.unavailable) continue;
                 const cold = await ColdArchiveStore.getRecord(meta.id, key);
                 if (!cold) continue;
                 const hot = GMNative.getValue(key, null);
                 if (hot === null) return;
-                const merged = this._mergeRecords(key, cold.data, hot);
+                const merged = this._mergeRecords(key, hot, cold.data);
                 GMNative.setValue(key, merged);
                 if (JSON.stringify(GMNative.getValue(key, null)) !== JSON.stringify(merged)) {
                     throw new Error(`热层回读核验失败：${key}`);
                 }
-                await ColdArchiveStore.deleteRecord(meta.id, key);
+                await ColdArchiveStore._deleteRecord(meta.id, key, null, JSON.stringify(cold.data));
                 HistoryViewIndex.updateKey(key, merged, false);
                 RecordStore._clearExportedMark(key);
-                RecordStore._broadcast(key);
             }
+        },
+        _trackWrite(key, action, lockKeys = []) {
+            const prior = this._pendingWrites.get(key) || Promise.resolve();
+            const pending = prior.catch(() => {}).then(() => StorageOperations.run([key, ...lockKeys], action)).then(result => {
+                const value = this.getValue(key, null);
+                RecordStore._refreshIndexKey(key);
+                HistoryViewIndex.updateKey(key, value, value === null);
+                return result;
+            })
+                .finally(() => { if (this._pendingWrites.get(key) === pending) this._pendingWrites.delete(key); });
+            this._pendingWrites.set(key, pending);
+            // 观察错误，但不把供调用者等待的 Promise 变成成功。
+            pending.catch(error => console.error(`${TAG} 记录未完成持久化：${key}`, error));
+            return pending;
+        },
+        whenSettled(key) { return this._pendingWrites.get(key) || Promise.resolve(); },
+        async requireCommitted(key) {
+            await this.whenSettled(key);
+            if (this.isPrimaryMode() && this._queue()[key]) throw new Error(`记录尚在待处理队列，未完成落盘：${key}`);
+        },
+        async _writePrimary(key, data, queuedOperation, id = GMNative.getValue(COLD_PRIMARY_DB_KEY, '')) {
+            if (data === null) {
+                await ColdArchiveStore._deleteRecord(id, key);
+                if (await ColdArchiveStore.getRecord(id, key)) throw new Error('DB 删除核验失败');
+            } else {
+                await ColdArchiveStore._putRecords(id, [{ key, data, lastTs: ColdArchiveStore._recordTimestampRange(data).maxTs }]);
+                const saved = await ColdArchiveStore.getRecord(id, key);
+                if (!saved || JSON.stringify(saved.data) !== JSON.stringify(data)) throw new Error('DB 回读核验失败');
+            }
+            if (queuedOperation) this._ackQueueOperation(key, queuedOperation);
+        },
+        // 主动编辑在锁内应用到最新值；不能借用副本合并的“次数取最大”等规则。
+        updateRecord(key, update, { create = false, returnValue = false, sourceEntries = [] } = {}) {
+            if (!RecordKey.isRecordKey(key)) return Promise.reject(new Error('记录键无效'));
+            const lockKeys = sourceEntries.map(source => source.key).filter(sourceKey => sourceKey !== key);
+            const completion = this._trackWrite(key, async () => {
+                const primary = this.isPrimaryMode();
+                if (primary && (!this._isDatabaseOrigin() || !this._ready || this._degraded)) {
+                    throw new Error('DB 主存尚未就绪，未执行修改');
+                }
+                const id = primary ? GMNative.getValue(COLD_PRIMARY_DB_KEY, '') : '';
+                const sources = [];
+                for (const source of sourceEntries) {
+                    const current = GMNative.getValue(source.key, null);
+                    if (JSON.stringify(current) !== source.serialized) {
+                        throw new Error(`整理来源已变化，保留原键：${source.key}`);
+                    }
+                }
+                if (!primary && this._isDatabaseOrigin()) {
+                    for (const meta of ColdArchiveStore.list().filter(item => !item.unavailable)) {
+                        const row = await ColdArchiveStore.getRecord(meta.id, key);
+                        if (row) sources.push({ id: meta.id, data: row.data });
+                    }
+                }
+                let raw = primary ? (await ColdArchiveStore.getRecord(id, key))?.data : GMNative.getValue(key, null);
+                for (const source of sources) raw = this._mergeRecords(key, raw, source.data);
+                if (!raw && !create) return returnValue ? null : false;
+                const data = RecordNormalizer.normalize(update(this._clone(raw)));
+                if (primary) {
+                    const operation = this._queueOperation(key, data ? { type: 'set', data } : { type: 'delete' });
+                    await this._writePrimary(key, data, operation, id);
+                    // 尚有后续本页乐观写入时保留它，否则刷新为本次已提交值。
+                    if (this._pendingWrites.get(key) === completion) {
+                        if (data) this._cache.set(key, data); else this._cache.delete(key);
+                    }
+                } else {
+                    if (data) GMNative.setValue(key, data); else GMNative.deleteValue(key);
+                    if (JSON.stringify(GMNative.getValue(key, null)) !== JSON.stringify(data)) throw new Error('GM 修改回读核验失败');
+                    for (const source of sources) {
+                        await ColdArchiveStore._deleteRecord(source.id, key, null, JSON.stringify(source.data));
+                    }
+                }
+                for (const source of sourceEntries) {
+                    if (source.key === key) continue;
+                    RecordStore.deleteRaw(source.key, source.serialized);
+                }
+                RecordStore._refreshIndexKey(key);
+                HistoryViewIndex.updateKey(key, this.getValue(key, null), this.getValue(key, null) === null);
+                RecordStore._clearExportedMark(key);
+                RecordStore._broadcastCommitted(key);
+                return returnValue ? data : true;
+            }, lockKeys);
+            return completion;
         },
         getValue(key, fallback) {
             if (!RecordKey.isRecordKey(key) || !this.isPrimaryMode()) return GMNative.getValue(key, fallback);
@@ -3660,16 +4041,12 @@
             const pending = this._queue()[key];
             return pending?.type === 'set' ? this._clone(pending.data) : fallback;
         },
-        setValue(key, value) {
+        setValue(key, value, { copy = false } = {}) {
             if (!RecordKey.isRecordKey(key)) return GMNative.setValue(key, value);
             if (!this.isPrimaryMode()) {
                 const result = GMNative.setValue(key, value);
                 if (this._isDatabaseOrigin() && ColdArchiveStore.list().length) {
-                    const prior = this._pendingWrites.get(key) || Promise.resolve();
-                    const pending = prior.catch(() => {}).then(() => this._promoteColdRecordToHot(key))
-                        .catch(error => console.warn(`${TAG} 冷库旧记录未能合并到热层，冷库源记录已保留：${key}`, error))
-                        .finally(() => { if (this._pendingWrites.get(key) === pending) this._pendingWrites.delete(key); });
-                    this._pendingWrites.set(key, pending);
+                    return this._trackWrite(key, () => this._promoteColdRecordToHot(key));
                 }
                 return result;
             }
@@ -3678,20 +4055,19 @@
                 return;
             }
             if (this._isDatabaseOrigin() && this._ready && !this._degraded) {
+                const baseline = this._clone(this._cache.get(key));
                 const data = this._clone(value);
                 this._cache.set(key, data);
                 const queuedOperation = this._queueOperation(key, { type: 'set', data });
-                const prior = this._pendingWrites.get(key) || Promise.resolve();
-                const pending = prior.catch(() => {}).then(async () => {
-                    await ColdArchiveStore.putRecords(this._activeId, [{ key, data, lastTs: ColdArchiveStore._recordTimestampRange(data).maxTs }]);
-                    const saved = await ColdArchiveStore.getRecord(this._activeId, key);
-                    if (!saved || JSON.stringify(saved.data) !== JSON.stringify(data)) throw new Error('DB 回读核验失败');
-                    this._ackQueueOperation(key, queuedOperation);
-                }).catch(error => {
-                    console.error(`${TAG} DB 主存写入失败，已放入 GM 待处理队列：${key}`, error);
-                }).finally(() => { if (this._pendingWrites.get(key) === pending) this._pendingWrites.delete(key); });
-                this._pendingWrites.set(key, pending);
-                return;
+                return this._trackWrite(key, async () => {
+                    const id = GMNative.getValue(COLD_PRIMARY_DB_KEY, '');
+                    const current = (await ColdArchiveStore.getRecord(id, key))?.data;
+                    const next = JSON.stringify(current) === JSON.stringify(baseline)
+                        ? RecordNormalizer.normalize(data)
+                        : copy ? this._mergeRecords(key, current, data) : this._replaySetDelta(key, baseline, data, current);
+                    await this._writePrimary(key, next, queuedOperation, id);
+                    if (JSON.stringify(this._cache.get(key)) === JSON.stringify(data)) this._cache.set(key, next);
+                });
             }
             this._queueOperation(key, { type: 'set', data: this._clone(value), countMode: 'delta' });
         },
@@ -3700,8 +4076,12 @@
             if (!this.isPrimaryMode()) {
                 const result = GMNative.deleteValue(key);
                 if (this._isDatabaseOrigin() && ColdArchiveStore.list().length) {
-                    for (const meta of ColdArchiveStore.list()) ColdArchiveStore.deleteRecord(meta.id, key)
-                        .catch(error => console.warn(`${TAG} 冷库记录删除失败：${key}`, error));
+                    return this._trackWrite(key, async () => {
+                        if (this.isPrimaryMode()) throw new Error('存储模式已切换，未删除主库记录，请刷新后重试');
+                        // 删除后又发生观看时，保留新热层及其待合并冷库副本。
+                        if (GMNative.getValue(key, null) !== null) return;
+                        await ColdArchiveStore._deleteMergedRecord(ColdArchiveStore.list().map(meta => meta.id), key, false);
+                    });
                 }
                 return result;
             }
@@ -3712,15 +4092,9 @@
             if (this._isDatabaseOrigin() && this._ready && !this._degraded) {
                 this._cache.delete(key);
                 const queuedOperation = this._queueOperation(key, { type: 'delete' });
-                const pending = this._pendingWrites.get(key) || Promise.resolve();
-                const next = pending.catch(() => {}).then(async () => {
-                    for (const meta of ColdArchiveStore.list()) await ColdArchiveStore.deleteRecord(meta.id, key);
-                    this._ackQueueOperation(key, queuedOperation);
-                }).catch(error => {
-                    console.error(`${TAG} DB 主存删除失败，已放入 GM 待处理队列：${key}`, error);
-                }).finally(() => { if (this._pendingWrites.get(key) === next) this._pendingWrites.delete(key); });
-                this._pendingWrites.set(key, next);
-                return;
+                return this._trackWrite(key, async () => {
+                    await this._writePrimary(key, null, queuedOperation);
+                });
             }
             this._queueOperation(key, { type: 'delete' });
         },
@@ -3780,13 +4154,16 @@
         },
         async _migrateToPrimary(activate) {
             if (!this._isDatabaseOrigin()) throw new Error('请到 B 站历史页面启用主存模式');
-            await Promise.all([...this._pendingWrites.values()]);
             await ColdArchiveStore.reconcileDirectory();
             let targetId = GMNative.getValue(COLD_PRIMARY_DB_KEY, '') || CONFIG.COLD_ARCHIVE_TARGET_ID;
             if (!targetId || !ColdArchiveStore.getMeta(targetId)) targetId = ColdArchiveStore.list()[0]?.id || (await ColdArchiveStore.create()).id;
             const { merged, rawGM } = await this._readMergedRecords();
             const originalQueue = this._queue();
             const queueSnapshot = JSON.stringify(originalQueue);
+            // 删除意图不能在激活前应用到任何源库。此种迁移使用空目标库，失败仍保留全部源副本。
+            if (activate && Object.values(originalQueue).some(operation => operation?.type === 'delete')) {
+                targetId = (await ColdArchiveStore.create()).id;
+            }
             for (const [key, operation] of Object.entries(originalQueue)) {
                 if (!RecordKey.isRecordKey(key)) continue;
                 if (operation?.type === 'delete') merged.delete(key);
@@ -3798,7 +4175,7 @@
                 key, data, lastTs: ColdArchiveStore._recordTimestampRange(data).maxTs
             }));
             for (let offset = 0; offset < rows.length; offset += 100) {
-                await ColdArchiveStore.putRecords(targetId, rows.slice(offset, offset + 100));
+                await ColdArchiveStore._putRecords(targetId, rows.slice(offset, offset + 100));
             }
             const persisted = new Map((await ColdArchiveStore.readRecords(targetId)).map(row => [row.key, row.data]));
             for (const [key, data] of merged) {
@@ -3806,16 +4183,16 @@
                     throw new Error(`DB 主存迁移核验失败：${key}；原 GM/冷库记录均已保留`);
                 }
             }
-            for (const key of Object.keys(originalQueue)) {
-                if (originalQueue[key]?.type !== 'delete') continue;
-                for (const meta of ColdArchiveStore.list()) await ColdArchiveStore.deleteRecord(meta.id, key);
-                merged.delete(key);
-            }
             if (activate) {
+                const currentKeys = GMNative.listValues().filter(RecordKey.isRecordKey);
+                if (currentKeys.length !== rawGM.size || currentKeys.some(key =>
+                    !rawGM.has(key) || JSON.stringify(GMNative.getValue(key, null)) !== JSON.stringify(rawGM.get(key)))) {
+                    throw new Error('迁移期间本地记录已变化，原模式与记录保留，请重新保存设置');
+                }
                 GMNative.setValue(COLD_PRIMARY_DB_KEY, targetId);
-                GMNative.setValue(COLD_PRIMARY_MODE_KEY, true);
                 const settings = GMNative.getValue(COLD_ARCHIVE_SETTINGS_KEY, {}) || {};
                 GMNative.setValue(COLD_ARCHIVE_SETTINGS_KEY, { ...settings, ageDays: 0, targetId, updatedAt: Date.now() });
+                GMNative.setValue(COLD_PRIMARY_MODE_KEY, true);
                 CONFIG.COLD_PRIMARY_MODE = true;
                 CONFIG.COLD_ARCHIVE_AGE_DAY = 0;
             }
@@ -3841,16 +4218,43 @@
                 }
             } catch (error) { console.warn(`${TAG} 跨域写入队列待下次启动清理`, error); }
             // 旧库可能被其他标签页继续写入，不能在迁移完成后整库清空。
-            // 保留旧库副本，完整备份会按记录身份合并。
+            // 保留旧库恢复副本；主存完整备份仅使用指定权威主库。
             return { count: merged.size, targetId };
         },
+        _migrationState: 'idle',
+        _migrationPromise: null,
         async enablePrimaryMode() {
-            const result = await this._migrateToPrimary(true);
-            return result;
+            if (this._migrationPromise) return this._migrationPromise;
+            if (this.isPrimaryMode()) return { count: this._cache.size, targetId: this._activeId };
+            this._migrationState = 'running';
+            this._migrationPromise = Promise.all([...this._pendingWrites.values()])
+                .then(() => StorageOperations.run([], async () => {
+                    // 等锁期间可能已由另一个标签页完成迁移，不能再次汇总旧恢复副本。
+                    if (this.isPrimaryMode()) {
+                        await this._initialize();
+                        return { count: this._cache.size, targetId: this._activeId };
+                    }
+                    return this._migrateToPrimary(true);
+                }, true)).then(result => {
+                this._migrationState = 'succeeded';
+                return result;
+            }, error => {
+                this._migrationState = 'failed';
+                throw error;
+            }).finally(() => { this._migrationPromise = null; });
+            return this._migrationPromise;
         },
+        _initializationPromise: null,
         async initialize() {
             if (!this.isPrimaryMode()) return;
             if (!this._isDatabaseOrigin()) return;
+            if (this._initializationPromise) return this._initializationPromise;
+            this._initializationPromise = Promise.all([...this._pendingWrites.values()])
+                .then(() => StorageOperations.run([], () => this._initialize(), true))
+                .finally(() => { this._initializationPromise = null; });
+            return this._initializationPromise;
+        },
+        async _initialize() {
             try {
                 const primaryId = GMNative.getValue(COLD_PRIMARY_DB_KEY, '');
                 const meta = primaryId && ColdArchiveStore.getMeta(primaryId);
@@ -3893,11 +4297,18 @@
                     }
                 }
                 this._activeId = primaryId;
+                // 读库期间本页可能已产生新乐观写入，它们正在等待维护锁，不能用旧快照盖掉。
+                for (const key of this._pendingWrites.keys()) {
+                    if (this._cache.has(key)) records.set(key, this._cache.get(key));
+                    else records.delete(key);
+                }
                 this._cache = records;
                 this._ready = true;
                 this._degraded = false;
                 const currentQueue = this._queue();
-                if (JSON.stringify(currentQueue) === queueSnapshot) GMNative.deleteValue(COLD_WRITE_QUEUE_KEY);
+                if (JSON.stringify(currentQueue) === queueSnapshot && !Object.keys(queue).some(key => this._pendingWrites.has(key))) {
+                    GMNative.deleteValue(COLD_WRITE_QUEUE_KEY);
+                }
             } catch (error) {
                 this._degraded = true;
                 this._ready = false;
@@ -3905,10 +4316,12 @@
                 throw error;
             }
         },
-        async refreshKey(key) {
+        async refreshKey(key, committed = false) {
             if (!this.isPrimaryMode() || !this._isDatabaseOrigin() || !this._activeId) return this.getValue(key, null);
+            if (committed && this._pendingWrites.has(key)) return this.getValue(key, null);
             const row = await ColdArchiveStore.getRecord(this._activeId, key);
-            const queued = this._queue()[key];
+            if (this._pendingWrites.has(key)) return this.getValue(key, null);
+            const queued = committed ? null : this._queue()[key];
             if (queued?.type === 'delete') { this._cache.delete(key); return null; }
             const value = queued?.type === 'set' ? this._mergeQueuedRecord(key, row?.data, queued) : row?.data;
             if (value) this._cache.set(key, value); else this._cache.delete(key);
@@ -3957,9 +4370,10 @@
             this._ensurePromise = wrapped;
             return wrapped;
         },
-        async archiveNow() {
+        async archiveNow(ageDays = CONFIG.COLD_ARCHIVE_AGE_DAY) {
+            if (!(Number(ageDays) > 0)) throw new Error('年龄为 0 时请保存设置并确认启用主存模式');
             const meta = await this.ensureDefault();
-            const result = await ColdArchiveStore.archiveOldRecords({ ageDays: CONFIG.COLD_ARCHIVE_AGE_DAY, targetId: meta.id });
+            const result = await ColdArchiveStore.archiveOldRecords({ ageDays, targetId: meta.id });
             const skipped = result.unavailableDatabases?.length
                 ? `\n另有 ${result.unavailableDatabases.length} 个失联冷库已跳过；完整导出仍会提示处理。`
                 : '';
@@ -4154,70 +4568,37 @@
         },
 
         // 将单条记录的观看次数调低，保留快照、标题、作者和进度等信息。
-        setWatchCount(key, targetCount, collectionContext = null) {
+        async setWatchCount(key, targetCount, collectionContext = null) {
             if (!RecordKey.isRecordKey(key)) return false;
             const nextCount = Number(targetCount);
             if (!Number.isInteger(nextCount) || nextCount < 0 || nextCount > 10000) {
                 alert(`请输入 0 到 ${10000} 之间的整数。`);
                 return false;
             }
-            // 合集分集必须写回真实容器，不能把展示层分集 key 当成顶层存储键。
-            if (collectionContext?.containerKey) {
-                const located = RecordStore.readCollectionPart(
-                    collectionContext.containerKey,
-                    collectionContext.partKey || key,
-                    collectionContext.partNumber
-                );
-                if (!located) {
-                    alert('这条观看记录已不存在或分集身份不明确。');
-                    return false;
-                }
-                located.part.watchCount = nextCount;
-                RecordStore.set(located.storageKey, located.container);
+            const episode = RecordKey.isEpisodeKey(key) ? RecordStore.readEpisodeExact(key) : null;
+            const partMatch = String(key).match(/^(BV[a-zA-Z0-9]+)\?p=(\d+)$/i);
+            const storageKey = collectionContext?.containerKey || episode?.seasonKey || partMatch?.[1] || key;
+            try {
+                const changed = await StorageRouter.updateRecord(storageKey, data => {
+                    const partKey = collectionContext?.partKey || key;
+                    const target = data.type === 'collection'
+                        ? RecordStore.findCollectionPart(data, partKey, collectionContext?.partNumber || Number(partMatch?.[2]))
+                        : data;
+                    if (!target) throw new Error('分集已不存在或身份不明确');
+                    target.watchCount = nextCount;
+                    return data;
+                });
+                if (!changed) alert('这条观看记录已不存在。');
                 refreshOpenHistoryLists(true);
-                return true;
-            }
-            // 番剧分集是 ss 容器中的 part，不能按 ep 键直接读写顶层存储。
-            if (RecordKey.isEpisodeKey(key)) {
-                const episode = RecordStore.readEpisodeExact(key);
-                if (!episode?.part) {
-                    alert('这条观看记录已不存在。');
-                    return false;
-                }
-                episode.part.watchCount = nextCount;
-                if (episode.container) {
-                    RecordStore.set(episode.seasonKey || key, episode.container);
-                } else {
-                    RecordStore.set(key, episode.part);
-                }
-                refreshOpenHistoryLists(true);
-                return true;
-            }
-            // 5.3.0：分P键对应容器 part。
-            if (RecordKey.isPartKey(key)) {
-                const m = String(key).match(/^(BV[a-zA-Z0-9]+)\?p=(\d+)$/i);
-                const bv = m[1], p = Number(m[2]);
-                const container = RecordNormalizer.normalize(GM_getValue(bv, null));
-                const part = container?.parts?.find(pp => pp.p === p);
-                if (!part) { alert('这条观看记录已不存在。'); return false; }
-                part.watchCount = nextCount;
-                RecordStore.set(bv, container);
-                refreshOpenHistoryLists(true);
-                return true;
-            }
-            const rec = RecordNormalizer.normalize(GM_getValue(key));
-            if (!rec) {
-                alert('这条观看记录已不存在。');
+                return changed;
+            } catch (error) {
+                alert(`观看次数未完成保存：${error.message}`);
                 return false;
             }
-            rec.watchCount = nextCount;
-            RecordStore.set(key, rec);
-            refreshOpenHistoryLists(true);
-            return true;
         },
 
         // 删除单条记录，并同步更新索引与备份标记。
-        deleteSingleRecord(key) {
+        async deleteSingleRecord(key) {
             // 番剧分集保存在 ss 容器的 parts[] 中，先精确定位以取得标题。
             let title;
             if (RecordKey.isEpisodeKey(key)) {
@@ -4244,9 +4625,15 @@
                 title = rec?.title || key;
             }
             if (!confirm(`确定删除这条视频记录？\n${title}\n\n删除后无法恢复。`)) return false;
-            RecordStore.delete(key);
-            refreshOpenHistoryLists(true);
-            return true;
+            try {
+                await RecordStore.delete(key);
+                await StorageRouter.requireCommitted(key);
+                refreshOpenHistoryLists(true);
+                return true;
+            } catch (error) {
+                alert(`记录未完成删除：${error.message}`);
+                return false;
+            }
         },
 
         async buildFullBackupPayload() {
@@ -4301,7 +4688,7 @@
         //snapshotKey 用"分钟+进度"而非精确 ts——
         // 官方历史卡片只有分钟精度，用精确 ts 永远匹配不上播放页秒级快照，
         // 导致 watchCount 被重复累加。
-        mergeEpIntoSeason(options = {}) {
+        async mergeEpIntoSeason(options = {}) {
             const silent = options && options.silent === true;
             const epKeys = GM_listValues().filter(k => RecordKey.isEpisodeKey(k));
             if (!epKeys.length) {
@@ -4318,8 +4705,9 @@
             const merged = [];
             const skipped = [];
 
-            epKeys.forEach(epKey => {
-                const rawEpRec = RecordNormalizer.normalize(GM_getValue(epKey));
+            for (const epKey of epKeys) await (async () => {
+                const original = GM_getValue(epKey, null);
+                const rawEpRec = RecordNormalizer.normalize(original);
                 if (!rawEpRec) {
                     skipped.push(epKey);
                     return;
@@ -4385,7 +4773,7 @@
                 const existingTarget = RecordNormalizer.normalize(GM_getValue(target.key));
                 // 无论 ss 旧记录是 collection 还是早期扁平格式，都统一经分集归并入口写入 parts[]。
                 // _mergeEpisodeIntoSeason 会把旧 ss 自身累计数据保存在 legacyAggregate，避免误分配给某一集。
-                const migrated = this._mergeEpisodeIntoSeason(target.key, epKey, epRec, {
+                const migrated = RecordStore._mergeEpisodeIntoSeason(target.key, epKey, epRec, {
                     seasonId: epRec.seasonId || Number(String(target.key).replace(/^ss/i, '')),
                     partTitle: epRec.partTitle || epRec.title || '',
                     partNumber: Number(epRec.p) || Number(epRec.partNumber)
@@ -4398,10 +4786,15 @@
                     skipped.push(epKey);
                     return;
                 }
-                RecordStore.set(target.key, migrated);
-                RecordStore.deleteRaw(epKey);
-                merged.push(`${epKey} → ${target.key}`);
-            });
+                try {
+                    await RecordStore.setCommitted(target.key, migrated);
+                    await RecordStore.deleteRawCommitted(epKey, JSON.stringify(original));
+                    merged.push(`${epKey} → ${target.key}`);
+                } catch (error) {
+                    skipped.push(epKey);
+                    console.error(`${TAG} 分集归并未完成，未删除的源键保留：${epKey}`, error);
+                }
+            })();
 
             if (silent) {
                 if (merged.length) {
@@ -4567,7 +4960,7 @@
                 const file = e.target.files && e.target.files[0];
                 if (!file) return;
                 const reader = new FileReader();
-                reader.onload = evt => {
+                reader.onload = async evt => {
                     try {
                         const rawText = String(evt.target.result || '');
                         let rawData;
@@ -4684,7 +5077,7 @@
                             });
                             members.forEach(member => groupedFlatKeys.add(member.key));
                         }
-                        Object.keys(sourceRecords).forEach(sourceKey => {
+                        for (const sourceKey of Object.keys(sourceRecords)) await (async () => {
                             try {
                                 const entry = sourceRecords[sourceKey];
                                 const key = RecordKey.isRecordKey(sourceKey)
@@ -4727,7 +5120,7 @@
                                     const mergedSeason = existingSeason
                                         ? mergeContainers(existingSeason, incomingSeason)
                                         : incomingSeason;
-                                    RecordStore.set(normalizedKey, RecordNormalizer.normalize({ ...mergedSeason, key: normalizedKey }));
+                                    await RecordStore.setCommitted(normalizedKey, RecordNormalizer.normalize({ ...mergedSeason, key: normalizedKey }));
                                     delete exportedMap[key];
                                     delete exportedMap[normalizedKey];
                                     importCnt++;
@@ -4772,7 +5165,7 @@
                                     const collectionKey = localSeason?.type === 'collection' && localSeason.collectionKey
                                         ? localSeason.collectionKey
                                         : (episodeRecord.collectionKey || '');
-                                    const written = RecordStore.upsertRecord(episodeKey, episodeRecord, {
+                                    const written = await RecordStore.upsertRecordCommitted(episodeKey, episodeRecord, {
                                         episodeKey,
                                         seasonKey,
                                         seasonId,
@@ -4803,12 +5196,12 @@
                                     }
                                     if (target) {
                                         const merged = mergeContainers(target, normalized);
-                                        RecordStore.set(targetKey, merged);
+                                        await RecordStore.setCommitted(targetKey, merged);
                                         delete exportedMap[targetKey];
                                         importCnt++;
                                         return;
                                     }
-                                    RecordStore.set(key, normalized);
+                                    await RecordStore.setCommitted(key, normalized);
                                     delete exportedMap[key];
                                     importCnt++;
                                     return;
@@ -4888,7 +5281,7 @@
                                         || normalized.officialHistorySeen === true;
                                 }
 
-                                RecordStore.set(key, normalized);
+                                await RecordStore.setCommitted(key, normalized);
                                 delete exportedMap[key];
                                 importCnt++;
                             } catch (itemError) {
@@ -4896,7 +5289,7 @@
                                 errors.push(`${sourceKey}: ${itemError.message}`);
                                 console.warn(`导入记录 ${sourceKey} 失败：`, itemError);
                             }
-                        });
+                        })();
 
                         // 先处理非分组记录，再迁移扁平合集，避免同一份备份里已成型容器被后续覆盖。
                         for (const [targetKey, grouped] of groupedFlatRecords) {
@@ -4913,14 +5306,13 @@
                                 if (!latest || latest.type !== 'collection') throw new Error('合集容器无效');
                                 const existingIds = new Set(latest.parts.map(part => collectionPartIdentity(part.bv, part)));
                                 if ([...grouped.expected].some(id => !existingIds.has(id))) throw new Error('合集分集身份校验失败');
-                                RecordStore.set(targetKey, latest);
-                                const persisted = RecordNormalizer.normalize(GM_getValue(targetKey, null));
+                                const persisted = RecordNormalizer.normalize(await RecordStore.setCommitted(targetKey, latest));
                                 if (!persisted || grouped.expected.size > persisted.parts.length
                                     || [...grouped.expected].some(id => !persisted.parts.some(part => collectionPartIdentity(part.bv, part) === id))) {
                                     throw new Error('合集写入回读校验失败；原始 GM 记录未删除');
                                 }
                                 for (const [sourceKey, original] of grouped.originalValues) {
-                                    if (sourceKey !== targetKey) RecordStore.deleteRaw(sourceKey, original);
+                                    if (sourceKey !== targetKey) await RecordStore.deleteRawCommitted(sourceKey, original);
                                 }
                                 grouped.members.forEach(({ key }) => { delete exportedMap[key]; importCnt++; });
                                 delete exportedMap[targetKey];
@@ -4949,13 +5341,16 @@
         },
 
         // 删除当前视频或番剧单集对应的本地记录，并处理关联整季记录。
-        deleteCurrentRecord() {
+        async deleteCurrentRecord() {
             const parsed = RecordKey.parse(window.location.href);
             if (!parsed) return;
-            RecordStore.delete(parsed.key);
-            // ep 单集已由 RecordStore.delete 从 ss 容器中精准移除，不再删除整季容器。
-            alert('已删除本条（当前p）观看记录');
-            location.reload();
+            try {
+                await RecordStore.delete(parsed.key);
+                await StorageRouter.requireCommitted(parsed.key);
+                // ep 单集已由 RecordStore.delete 从 ss 容器中精准移除，不再删除整季容器。
+                alert('已删除本条（当前p）观看记录');
+                location.reload();
+            } catch (error) { alert(`记录未完成删除：${error.message}`); }
         },
 
         // 清除全部观看记录及备份标记，并重置索引。
@@ -5005,7 +5400,7 @@
         // 5.4.9：只根据本地已有的 ep 记录修复旧 ss 容器，不依赖当前页面或 DOM。
         // 旧数据 bv=ssNNNNN、p=N 时，从其他本地记录中寻找同系列、同 p 的明确 ep 身份。
         // 只有唯一候选才改写；p=1 的疑似整季聚合行、候选冲突、没有映射的行全部保留。
-        repairBangumiIdentityFromLocalData() {
+        async repairBangumiIdentityFromLocalData() {
             const keys = GM_listValues().filter(key => RecordKey.isRecordKey(key));
             const records = new Map();
             for (const key of keys) {
@@ -5243,11 +5638,18 @@
                 alert(`无法保存修复前备份，已取消修改。\n${String(error && error.message || error)}`);
                 return;
             }
-            for (const [key, rec] of changes) RecordStore.set(key, RecordNormalizer.normalize(rec) || rec);
-            // 只有容器已写入后才删除旧键；如果写入失败，原始分集仍保留。
-            for (const key of legacyPartKeysToDelete) {
-                const m = key.match(/^(BV[a-zA-Z0-9]+)\?p=(\d+)$/i);
-                if (m && changes.some(([changedKey]) => changedKey.toUpperCase() === m[1].toUpperCase())) RecordStore.deleteRaw(key);
+            try {
+                for (const [key, rec] of changes) await RecordStore.setCommitted(key, RecordNormalizer.normalize(rec) || rec);
+                // 所有目标持久化核验完成后才开始删源。
+                for (const key of legacyPartKeysToDelete) {
+                    const m = key.match(/^(BV[a-zA-Z0-9]+)\?p=(\d+)$/i);
+                    if (m && changes.some(([changedKey]) => changedKey.toUpperCase() === m[1].toUpperCase())) {
+                        await RecordStore.deleteRawCommitted(key, JSON.stringify(backup.records[key]));
+                    }
+                }
+            } catch (error) {
+                alert(`整合未完成，未删除的源记录已保留：${error.message}`);
+                return;
             }
             HistoryViewIndex.reset();
             RecordStore.clearIndex();
@@ -5393,7 +5795,9 @@
             }
 
             // 去重待删键，避免“空记录清理”和“旧键迁移”重复计数。
-            const uniqueToDelete = [...new Set(toDelete)];
+            const targetKeys = new Set(toWrite.filter(({ value }) => value?.type === 'collection').map(({ key }) => key));
+            const uniqueToDelete = [...new Set(toDelete)].filter(key => !targetKeys.has(key));
+            const originalSources = new Map(uniqueToDelete.map(key => [key, JSON.stringify(GM_getValue(key, null))]));
 
             // 3) 删除旧键前确认。
             if (uniqueToDelete.length) {
@@ -5406,14 +5810,22 @@
             }
 
             // 4) 写入容器、删除旧键（旧扁平键用 deleteRaw 直接删，避免容器感知误删刚并入的 part）、重建索引。
-            for (const { key, value } of toWrite) {
-                if (value && value.type === 'collection') RecordStore.set(key, value);
+            let deletedCount = 0;
+            try {
+                for (const { key, value } of toWrite) {
+                    if (value && value.type === 'collection') await RecordStore.setCommitted(key, value);
+                }
+                for (const key of uniqueToDelete) {
+                    if (await RecordStore.deleteRawCommitted(key, originalSources.get(key))) deletedCount++;
+                }
+            } catch (error) {
+                alert(`迁移未完成，未删除的源记录已保留：${error.message}`);
+                return;
             }
-            for (const key of uniqueToDelete) RecordStore.deleteRaw(key);
             HistoryViewIndex.reset();
             RecordStore.clearIndex();
             HistoryViewIndex.ensure();
-            alert(`整理完成：处理 ${toWrite.length} 个键（含 ${collectionCount} 个合集容器），删除旧扁平键/无效空记录 ${uniqueToDelete.length} 条。带观看事实或可用于合集匹配的标题、作者、分组元数据均予以保留；分集标题留空的会在播放页扫描合集时回填。`);
+            alert(`整理完成：处理 ${toWrite.length} 个键（含 ${collectionCount} 个合集容器），删除旧扁平键/无效空记录 ${deletedCount} 条。带观看事实或可用于合集匹配的标题、作者、分组元数据均予以保留；分集标题留空的会在播放页扫描合集时回填。`);
         },
 
         // 检查油猴存储是否接近容量上限，超过警戒线时提示用户。
@@ -5560,6 +5972,12 @@
     // 负责把索引/原始记录转成历史列表 UI，包括搜索过滤、合集分组、分集显示、快照条目、
     // 状态标记、右键菜单和存储信息展示。播放悬浮窗与历史记录页面可复用同一套记录展示逻辑，
     // 通过 variant/options 区分具体场景，而不是各自维护一套互不一致的匹配规则。
+    function escapeHtml(value) {
+        return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        })[ch]);
+    }
+
     const HistoryListRenderer = {
         _states: new WeakMap(),
         _storageUpdateScheduled: false,
@@ -6039,7 +6457,7 @@
         </div>
         <div class="bvh-group-title">${this._escapeHtml(title)}</div>
         <div class="bvh-group-author">UP：${this._escapeHtml(groupAuthor)}</div>
-        <div class="bvh-group-latest">最新快照：${this._escapeHtml(latestTime)} · ${latestPart} · ${this._escapeHtml(latestProgress)}</div>
+        <div class="bvh-group-latest">最新快照：${this._escapeHtml(latestTime)} · ${escapeHtml(latestPart)} · ${this._escapeHtml(latestProgress)}</div>
     </div>
     <div class="bvh-group-actions">
 
@@ -6108,7 +6526,7 @@
                 const displayPartKey = rawPartKey;
                 row.innerHTML = `
                     <div class="bvh-part-main-line">
-                        <span class="bvh-part-label">${this._partLabel(part)}</span>
+                        <span class="bvh-part-label">${escapeHtml(this._partLabel(part))}</span>
                         <span class="bvh-part-title">${this._escapeHtml(part.title || '无标题')}</span>
                         <button type="button" class="bvh-part-detail-toggle" aria-expanded="false" title="查看观看详情">详情⌄</button>
                     </div>
@@ -6168,9 +6586,7 @@
         },
 
         _escapeHtml(value) {
-            return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
-                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-            })[ch]);
+            return escapeHtml(value);
         },
 
         // 根据内容类型或记录键生成列表使用的类型标签。
@@ -6215,13 +6631,13 @@
             const stateMark = this._stateMark(snap);
             li.innerHTML = `
                 ${stateMark}
-                <span class="bvh-count-mark">[观看${snap.watchCount}次]</span>
-                ${mediaLabel} ${snap.bvKey} | ${snap.progress}
-                <br/>${snap.title || '无标题'}
-                ${snap.mediaSubtitle ? `<br/><small style="color:#888;">${snap.mediaSubtitle}</small>` : ''}
-                ${(snap.mediaTags || []).length ? `<br/><small style="color:#888;">标签：${snap.mediaTags.join('、')}</small>` : ''}
-                <br/><small>UP：${snap.authorName || '作者未知'}</small>
-                <br/><small>观看时间：${snap.watchTimeStr}</small>
+                <span class="bvh-count-mark">[观看${escapeHtml(snap.watchCount)}次]</span>
+                ${escapeHtml(mediaLabel)} ${escapeHtml(snap.bvKey)} | ${escapeHtml(snap.progress)}
+                <br/>${escapeHtml(snap.title || '无标题')}
+                ${snap.mediaSubtitle ? `<br/><small style="color:#888;">${escapeHtml(snap.mediaSubtitle)}</small>` : ''}
+                ${(snap.mediaTags || []).length ? `<br/><small style="color:#888;">标签：${escapeHtml(snap.mediaTags.join('、'))}</small>` : ''}
+                <br/><small>UP：${escapeHtml(snap.authorName || '作者未知')}</small>
+                <br/><small>观看时间：${escapeHtml(snap.watchTimeStr)}</small>
             `;
             li.onclick = () => {
                 const url = RecordKey.buildUrl(snap.bvKey);
@@ -6241,13 +6657,17 @@
             const stateMark = this._stateMark(it);
             li.innerHTML = `
                 ${stateMark}
-                ${it._coldDatabaseId ? '<span class="bvh-cold-origin">冷库</span> ' : ''}<span class="bvh-count-mark">[观看${it.watchCount}次]</span>
-                ${mediaLabel} ${it.key} | ${it.lastProgress}
-                <br/>${it.title || '无标题'}
-                ${(it.mediaTags || []).length ? `<br/><small style="color:#888;">标签：${it.mediaTags.join('、')}</small>` : ''}
-                <br/><small>UP：${it.authorName || '作者未知'}</small>
-                <br/><small>最近${CONFIG.MAX_RECORD_COUNT}次快照：${snapshotText || '暂无快照'}</small>
+                ${it._coldDatabaseId ? '<span class="bvh-cold-origin">冷库</span> ' : ''}<span class="bvh-count-mark">[观看${escapeHtml(it.watchCount)}次]</span>
+                ${escapeHtml(mediaLabel)} ${escapeHtml(it.key)} | ${escapeHtml(it.lastProgress)}
+                <br/>${escapeHtml(it.title || '无标题')}
+                ${(it.mediaTags || []).length ? `<br/><small style="color:#888;">标签：${escapeHtml(it.mediaTags.join('、'))}</small>` : ''}
+                <br/><small>UP：${escapeHtml(it.authorName || '作者未知')}</small>
+                <br/><small>最近${escapeHtml(CONFIG.MAX_RECORD_COUNT)}次快照：${escapeHtml(snapshotText || '暂无快照')}</small>
             `;
+            li.onclick = () => {
+                const url = RecordKey.buildUrl(it.key);
+                if (url) window.open(url, '_blank');
+            };
             this._bindRecordContextMenu(li, it.key, null, it._coldDatabaseIds || it._coldDatabaseId || '');
             return li;
         },
@@ -6749,7 +7169,7 @@
 
                     if (!localRecord || typeof localRecord !== 'object') {
                         // 首次创建：直接用官方卡片信息，watchCount=1；分P键经 upsertRecord 归入合集容器。
-                        const writeSucceeded = RecordStore.upsertRecord(key, {
+                        const writeSucceeded = await RecordStore.upsertRecordCommitted(key, {
                             title,
                             collectionTitle: '',
                             titleSource: 'official',
@@ -6899,7 +7319,7 @@
                         // 写入前统一走一次去重，防止历史遗留的重复快照继续存在
                         localRecord.snapshots = RecordNormalizer.keepSnapshotsWithinLimit(localRecord.snapshots);
 
-                        const writeSucceeded = RecordStore.upsertRecord(key, localRecord, ident.type === 'bangumi' && RecordKey.isEpisodeKey(ident.key) && seasonId
+                        const writeSucceeded = await RecordStore.upsertRecordCommitted(key, localRecord, ident.type === 'bangumi' && RecordKey.isEpisodeKey(ident.key) && seasonId
                             ? { episodeKey: ident.key, seasonKey: `ss${seasonId}`, seasonId, partTitle: title || '' }
                             : {});
                         if (writeSucceeded !== true) {
@@ -6947,7 +7367,7 @@
             }
             if (bangumiTouched) {
                 try {
-                    StorageApi.mergeEpIntoSeason({ silent: true });
+                    await StorageApi.mergeEpIntoSeason({ silent: true });
                 } catch (err) {
                     console.warn(`${TAG} 自动归并 ep 到 ss 失败：`, err);
                 }
@@ -6979,7 +7399,121 @@
     // 【模块：普通视频与番剧播放页自动采集】
     // 在播放页面识别当前视频/分集，按配置间隔采集播放位置、进度和观看时间，并在完成播放时记录完成快照。
     // 采集结果写入统一记录存储；页面切换、播放器重建及番剧身份变化时，需要避免把旧播放器状态写给新视频。
-    function startPlaybackRecorder() {
+    const Router = (() => {
+        const subscribers = new Set();
+        let installed = false;
+        let pollTimer = null;
+        const currentRoute = () => {
+            const url = new URL(location.href);
+            return `${url.origin}${url.pathname}${url.search}`;
+        };
+        let lastUrl = currentRoute();
+        const notify = () => {
+            const url = currentRoute();
+            if (url === lastUrl) return;
+            const previousUrl = lastUrl;
+            lastUrl = url;
+            for (const subscriber of [...subscribers]) {
+                if (!subscribers.has(subscriber)) continue;
+                try { subscriber(url, previousUrl); }
+                catch (error) { console.error(`${TAG} [路由调度]`, error); }
+            }
+        };
+        const install = () => {
+            if (installed) return;
+            installed = true;
+            lastUrl = currentRoute();
+            for (const method of ['pushState', 'replaceState']) {
+                const original = history[method];
+                history[method] = function (...args) {
+                    const result = Reflect.apply(original, this, args);
+                    notify();
+                    return result;
+                };
+            }
+            window.addEventListener('popstate', notify);
+            window.addEventListener('hashchange', notify);
+        };
+        return {
+            subscribe(subscriber) {
+                install();
+                subscribers.add(subscriber);
+                if (pollTimer === null) pollTimer = setInterval(notify, Math.max(250, Number(CONFIG.RECORD_INTERVAL) || 5000));
+                return () => {
+                    subscribers.delete(subscriber);
+                    if (!subscribers.size && pollTimer !== null) {
+                        clearInterval(pollTimer);
+                        pollTimer = null;
+                    }
+                };
+            },
+            currentRoute
+        };
+    })();
+
+    const PageRecorderController = (() => {
+        let started = false;
+        let unsubscribe = null;
+        let cleanupRecorder = null;
+        let startTimer = null;
+        const stopRecorder = (reason = 'switch') => {
+            if (startTimer !== null) clearTimeout(startTimer);
+            startTimer = null;
+            const cleanup = cleanupRecorder;
+            cleanupRecorder = null;
+            if (cleanup) cleanup(reason);
+        };
+        const activate = ({ skipInitialCycle = false } = {}) => {
+            const url = new URL(location.href);
+            try { PlaybackUI.render(); }
+            catch (error) { console.error(`${TAG} [播放悬浮窗] 创建失败：`, error); }
+            if (url.hostname === 'live.bilibili.com') {
+                cleanupRecorder = startLiveRecorder();
+            } else if (url.hostname === 'www.bilibili.com'
+                && /^\/(?:video\/|bangumi\/play\/)/.test(url.pathname)) {
+                cleanupRecorder = startPlaybackRecorder({ skipInitialCycle });
+            }
+        };
+        const onRoute = () => {
+            stopRecorder('switch');
+            // 让站点先完成本轮路由更新；连续跳转只启动最后一个页面。
+            startTimer = setTimeout(() => {
+                startTimer = null;
+                activate({ skipInitialCycle: true });
+            }, 300);
+        };
+        const suspend = () => {
+            stopRecorder('exit');
+            if (unsubscribe) unsubscribe();
+            unsubscribe = null;
+        };
+        const resume = () => {
+            if (unsubscribe) return;
+            unsubscribe = Router.subscribe(onRoute);
+            activate();
+        };
+        return {
+            start() {
+                if (started) return;
+                started = true;
+                window.addEventListener('pagehide', suspend);
+                window.addEventListener('pageshow', resume);
+                resume();
+            },
+            stop() {
+                suspend();
+                window.removeEventListener('pagehide', suspend);
+                window.removeEventListener('pageshow', resume);
+                started = false;
+            }
+        };
+    })();
+
+    function startPlaybackRecorder({ skipInitialCycle = false } = {}) {
+        let disposed = false;
+        const recorderUrl = Router.currentRoute();
+        const requests = new AbortController();
+        const isActive = () => !disposed && Router.currentRoute() === recorderUrl;
         let recordTimer = null;
         let activeRecordKey = null;
         let hasSavedSnapshotThisSession = false;
@@ -6990,7 +7524,9 @@
         // 每个视频首次成功写入记录后最多刷新一次浮窗，不能在 timeupdate 高频循环中反复 render。
         let playbackFloatRefreshedAfterSave = false;
 
+        let sessionId = 0;
         const resetForVideo = key => {
+            sessionId++;
             activeRecordKey = key;
             playbackFloatRefreshedAfterSave = false;
             hasSavedSnapshotThisSession = false;
@@ -7145,9 +7681,10 @@
             const currentBv = (location.pathname.match(/\/(BV[a-zA-Z0-9]+)(?:\/|$)/i) || [])[1] || '';
             if (!currentBv) return null;
             try {
-                const response = await fetch(`${location.origin}/x/web-interface/view?bvid=${encodeURIComponent(currentBv)}`, { credentials: 'include' });
+                const response = await fetch(`${location.origin}/x/web-interface/view?bvid=${encodeURIComponent(currentBv)}`, { credentials: 'include', signal: requests.signal });
                 if (!response.ok) return null;
                 const json = await response.json();
+                if (!isActive()) return null;
                 const season = json?.data?.ugc_season;
                 if (!season || !Array.isArray(season.sections)) return null;
                 const episodes = [];
@@ -7170,7 +7707,7 @@
                     episodes
                 };
             } catch (error) {
-                console.warn(`${TAG} [合集扫描] ugc_season 读取失败：`, error);
+                if (isActive()) console.warn(`${TAG} [合集扫描] ugc_season 读取失败：`, error);
                 return null;
             }
         };
@@ -7181,9 +7718,10 @@
             const currentBv = (location.pathname.match(/\/(BV[a-zA-Z0-9]+)(?:\/|$)/i) || [])[1] || '';
             if (!currentBv) return null;
             try {
-                const response = await fetch(`${location.origin}/x/web-interface/view?bvid=${encodeURIComponent(currentBv)}`, { credentials: 'include' });
+                const response = await fetch(`${location.origin}/x/web-interface/view?bvid=${encodeURIComponent(currentBv)}`, { credentials: 'include', signal: requests.signal });
                 if (!response.ok) return null;
                 const json = await response.json();
+                if (!isActive()) return null;
                 const pages = json?.data?.pages;
                 if (!Array.isArray(pages) || pages.length < 2) return null;
                 const result = {
@@ -7199,7 +7737,7 @@
                 videoPagesCache = result;
                 return result;
             } catch (error) {
-                console.warn(`${TAG} [合集扫描] video pages 读取失败：`, error);
+                if (isActive()) console.warn(`${TAG} [合集扫描] video pages 读取失败：`, error);
                 return null;
             }
         };
@@ -7676,7 +8214,7 @@
 
         // 扫描到的合集是修复本地数据的依据：按 BV+P 精确匹配；缺 BV 时才用“分集标题+UP 主”唯一匹配。
         // 同一 BV/P 的别名键（BV 与 BV?p=1）合并成一条原始记录；不同 BV/P 的观看记录绝不互相吞并。
-        const repairKnownPlaylistPartTitles = (currentKey, info) => {
+        const repairKnownPlaylistPartTitles = async (currentKey, info) => {
             if (!info || !Array.isArray(info.parts) || !info.parts.length) return { changed: 0, merged: 0, matched: 0 };
 
             const normalizeBv = value => String(value || '').trim();
@@ -7710,13 +8248,21 @@
 
             // 收集本地记录：5.3.0 容器(type=collection)与旧扁平(BV / BV?p=N)。
             const containers = new Map(); // bv -> { key, container }
+            const containersByPart = new Map(); // BV+P -> 明确包含该分集的容器；歧义时不自动改写。
             const flatRecords = []; // { key, bv, page, record }
             for (const key of GM_listValues()) {
                 const rec = RecordNormalizer.normalize(GM_getValue(key, null));
                 if (!rec) continue;
                 if (rec.type === 'collection') {
                     const bv = normalizeBv(rec.key || key);
-                    if (/^BV[A-Z0-9]+$/.test(bv)) containers.set(bv, { key: bv, container: rec });
+                    if (/^BV[a-zA-Z0-9]+$/.test(bv)) containers.set(bv, { key, container: rec });
+                    for (const part of rec.parts) {
+                        const identity = collectionPartIdentity(part.bv || part.bvid || bv, part);
+                        if (!identity) continue;
+                        const candidates = containersByPart.get(identity) || [];
+                        candidates.push({ key, container: rec });
+                        containersByPart.set(identity, candidates);
+                    }
                 } else {
                     const parsed = parseLocalVideoKey(key);
                     if (parsed) flatRecords.push({ key, bv: parsed.bv, page: parsed.page, record: rec });
@@ -7728,9 +8274,14 @@
                 const bv = normalizeBv(part.bvId);
                 const page = Math.max(1, Number(part.index) || 1);
                 const flatKeys = flatRecords.filter(item => item.bv === bv && item.page === page).map(item => item.key);
-                const container = containers.get(bv);
+                const candidates = containersByPart.get(collectionPartIdentity(bv, { p: page })) || [];
+                if (candidates.length > 1) {
+                    console.warn(`${TAG} [合集扫描迁移] 分集存在多个来源容器，保留原数据：${bv}?p=${page}`);
+                    continue;
+                }
+                const container = candidates[0] || containers.get(bv);
                 if (container || flatKeys.length) {
-                    matches.set(identity, { part, bv, page, flatKeys });
+                    matches.set(identity, { part, bv, page, flatKeys, containerKey: container?.key || bv });
                 }
             }
 
@@ -7760,10 +8311,11 @@
                 return { changed: 0, merged: 0, matched: 0 };
             }
 
-            const mergeRecords = (match) => {
+            const mergeRecords = async (match) => {
                 const { bv, page, part, flatKeys } = match;
+                const storageKey = match.containerKey || bv;
                 // 读/建同BV容器。
-                let container = RecordNormalizer.normalize(GM_getValue(bv, null));
+                let container = RecordNormalizer.normalize(GM_getValue(storageKey, null));
                 if (!container || container.type !== 'collection') {
                     container = { type: 'collection', key: bv, title: containerTitle || '', authorName: scannedAuthor || '', mediaType: '视频', parts: [], schemaVersion: 4 };
                 }
@@ -7777,15 +8329,19 @@
                 const smallTitle = cleanText(part?.smallCollectionTitle || '');
                 const order = Number.isFinite(Number(part?.collectionOrder)) ? Math.floor(Number(part?.collectionOrder)) : 0;
                 const partTotal = Math.max(1, Number(part?.partTotal) || 1);
-                const completePartBv = `${bv}${partTotal > 1 && page > 1 ? `?p=${page}` : ''}`;
+                const completePartBv = `${bv}${page > 1 ? `?p=${page}` : ''}`;
 
-                let targetPart = container.parts.find(pp => pp.p === page);
+                let targetPart = RecordStore.findCollectionPart(container, completePartBv, page);
                 // 汇总 flatKeys（旧扁平记录）的快照/次数/时间。
                 const allSnap = [];
                 let wc = 0, lt = 0, lp = '0%', thr = false;
+                const originalSources = new Map();
                 for (const fk of flatKeys) {
-                    const rec = RecordNormalizer.normalize(GM_getValue(fk, null));
+                    const original = GM_getValue(fk, null);
+                    const rec = RecordNormalizer.normalize(original);
                     if (!rec) continue;
+                    if (rec.type === 'collection') throw new Error(`源记录已变为容器，保留原键：${fk}`);
+                    if (fk !== storageKey) originalSources.set(fk, JSON.stringify(original));
                     wc += Math.max(0, Number(rec.watchCount) || 0);
                     for (const s of (Array.isArray(rec.snapshots) ? rec.snapshots : [])) allSnap.push(s);
                     if (Number(rec.lastTs || 0) > lt) { lt = Number(rec.lastTs || 0); lp = rec.lastProgress || '0%'; }
@@ -7824,42 +8380,70 @@
                     targetPart.officialHistorySeen = true;
                 }
                 container.parts.sort((a, b) => a.p - b.p);
-                const needsWrite = JSON.stringify(container) !== beforeContainer;
-                if (needsWrite) RecordStore.set(bv, RecordNormalizer.normalize(container));
-                let merged = 0;
-                for (const fk of flatKeys) {
-                    if (fk !== bv && GM_getValue(fk, null) !== null) { RecordStore.deleteRaw(fk); merged++; }
-                }
-                return { changed: needsWrite ? 1 : 0, merged };
+                const expectedSources = [...originalSources].map(([key, serialized]) => ({ key, serialized }));
+                const committed = await RecordStore.updateCommitted(storageKey, latest => {
+                    if (latest?.type === 'collection' && latest.collectionKey && info.collectionKey
+                        && latest.collectionKey !== info.collectionKey) {
+                        throw new Error('目标合集身份已变化，保留来源记录');
+                    }
+                    const next = latest?.type === 'collection'
+                        ? mergeContainers(latest, container)
+                        : container;
+                    if (containerTitle) next.title = containerTitle;
+                    if (info.collectionKey) next.collectionKey = info.collectionKey;
+                    if (!next.authorName && scannedAuthor) next.authorName = scannedAuthor;
+                    const committedPart = RecordStore.findCollectionPart(next, completePartBv, page);
+                    if (!committedPart) throw new Error('提交时分集身份不再匹配，保留来源记录');
+                    committedPart.bv = completePartBv;
+                    if (incomingTitle) committedPart.title = incomingTitle;
+                    committedPart.partTotal = Math.max(Number(committedPart.partTotal) || 0, partTotal);
+                    if (smallTitle) committedPart.smallCollectionTitle = smallTitle;
+                    committedPart.collectionOrder = order;
+                    committedPart.hasReachedWatchThreshold = committedPart.hasReachedWatchThreshold === true || thr;
+                    committedPart.officialHistorySeen = true;
+                    next.parts.sort((a, b) => (Number(a.p) || 0) - (Number(b.p) || 0));
+                    return RecordNormalizer.normalize(next);
+                }, expectedSources);
+                if (!committed) throw new Error('合集写入未返回已核验记录，来源记录已保留');
+                return { changed: JSON.stringify(committed) !== beforeContainer ? 1 : 0, merged: expectedSources.length };
             };
 
             let changedCount = 0;
             let mergedCount = 0;
+            let failedCount = 0;
             for (const match of matches.values()) {
-                const result = mergeRecords(match);
-                changedCount += result.changed;
-                mergedCount += result.merged;
+                if (!isActive()) break;
+                try {
+                    const result = await mergeRecords(match);
+                    changedCount += result.changed;
+                    mergedCount += result.merged;
+                } catch (error) {
+                    failedCount++;
+                    console.warn(`${TAG} [合集扫描迁移] 此分集整理未完成，其余继续：${match.bv}?p=${match.page}`, error);
+                }
             }
             if (changedCount || mergedCount) {
                 HistoryViewIndex.reset();
                 RecordStore.clearIndex();
                 console.info(`${TAG} [合集扫描迁移] ${containerTitle || '无标题合集'}：扫描分集=${info.parts.length}，匹配本地=${matches.size}，更新=${changedCount}，合并重复原始键=${mergedCount}，容器=${containerTitle || '按BV'}`);
             }
-            return { changed: changedCount, merged: mergedCount, matched: matches.size };
+            return { changed: changedCount, merged: mergedCount, matched: matches.size, failed: failedCount };
         };
 
         // 独立于播放计数循环：播放页首次打开或选集 DOM 发生变化时才扫描并迁移本地数据，不随进度轮询反复遍历全部记录。
         let collectionRepairTimer = null;
         const scheduleCollectionRepair = (delay = 700) => {
-            if (collectionRepairTimer !== null) return;
+            if (!isActive() || collectionRepairTimer !== null) return;
             collectionRepairTimer = setTimeout(async () => {
                 collectionRepairTimer = null;
+                if (!isActive()) return;
                 try {
                     // 三级来源，按可靠度优先：
                     // 1) ugc_season 独立BV合集全集（每集带真实 bvid+集名）；
                     // 2) 单BV多P的 view.pages（按分P号匹配本地 BV?p=N）；
                     // 3) DOM 解析兜底（data-key=BV 的形态）。
                     const seasonData = await fetchUgcSeasonEpisodes();
+                    if (!isActive()) return;
                     let info = null;
                     let sourceLabel = 'DOM';
                     if (seasonData) {
@@ -7879,6 +8463,7 @@
                         };
                     } else {
                         const videoPages = await fetchVideoPages();
+                        if (!isActive()) return;
                         if (videoPages) {
                             sourceLabel = 'video-pages';
                             info = {
@@ -7895,6 +8480,7 @@
                             };
                         } else {
                             await resolveCollectionAids();
+                            if (!isActive()) return;
                             info = getCurrentCollectionInfo();
                         }
                     }
@@ -7903,7 +8489,7 @@
                         return;
                     }
                     const parsed = RecordKey.parse(window.location.href);
-                    const result = repairKnownPlaylistPartTitles(parsed?.key || location.pathname, info);
+                    const result = await repairKnownPlaylistPartTitles(parsed?.key || location.pathname, info);
                     console.info(`${TAG} [合集扫描诊断] ${info.collectionTitle || '无标题合集'}：来源=${sourceLabel}，扫描分集=${info.parts.length}，已解析BV=${info.parts.filter(part => /^BV/i.test(String(part.bvId || ''))).length}，更新=${result.changed}，合并重复键=${result.merged}`);
                 } catch (error) {
                     console.warn(`${TAG} [合集扫描迁移] 扫描失败：`, error);
@@ -7931,6 +8517,7 @@
         let lastActiveContext = null;
         let lastSavedCheckpoint = null;
         let isSavingCheckpoint = false;
+        const pendingCheckpointSignatures = new Set();
         let contextMetadataKey = '';
         let contextMetadataAt = 0;
         let contextCollectionInfo = null;
@@ -7953,18 +8540,23 @@
 
             const completed = reason === 'ended' || (!useCapturedSample && video.ended === true);
             const progress = completed ? '100%' : `${Math.min(99, Math.max(0, Math.floor((pos / duration) * 100)))}%`;
+            const checkpointSessionId = sessionId;
+            const signature = JSON.stringify([checkpointSessionId, key, Math.round(pos), progress, completed]);
             // pause、ended、beforeunload 可能在同一位置连续触发。相同会话同一进度只保存一次。
             if (lastSavedCheckpoint && lastSavedCheckpoint.key === key
+                && lastSavedCheckpoint.sessionId === sessionId
                 && Math.abs(lastSavedCheckpoint.pos - pos) < 1
-                && lastSavedCheckpoint.progress === progress) {
+                && lastSavedCheckpoint.progress === progress
+                && lastSavedCheckpoint.completed === completed) {
                 return false;
             }
+            if (pendingCheckpointSignatures.has(signature)) return false;
 
             isSavingCheckpoint = true;
             try {
                 const nowTs = TimeTool.now();
                 const liveParsed = RecordKey.parse(window.location.href);
-                const isSameRoute = !!liveParsed && liveParsed.key === key;
+                const isSameRoute = reason !== 'switch' && !!liveParsed && liveParsed.key === key;
                 // 当前集保存用当前页面的新鲜节点；切换上一集只用上一轮已采集的元数据，绝不混读新 URL 的 DOM。
                 const collectionInfo = isSameRoute
                     ? getCurrentCollectionInfo()
@@ -8003,7 +8595,9 @@
                 record.lastTs = nowTs;
                 record.lastProgress = progress;
 
+                let commitCompletion;
                 const writeSucceeded = RecordStore.upsertRecord(key, record, {
+                    onCommitted: completion => { commitCompletion = completion; },
                     ...(context.episodeKey ? {
                         episodeKey: context.episodeKey,
                         seasonKey: context.seasonKey || (Number(collectionInfo?.seasonId) > 0 ? `ss${Number(collectionInfo.seasonId)}` : ''),
@@ -8028,15 +8622,20 @@
                     });
                     return false;
                 }
-                if (!duplicateWatch) StorageApi.checkStorageWarn();
-
-                lastSavedCheckpoint = { key, pos, progress };
-                const playbackFloat = document.getElementById('bvh-status-float');
-                if ((!playbackFloat || playbackFloat.dataset.hasRecord !== 'true') && !playbackFloatRefreshedAfterSave) {
-                    playbackFloatRefreshedAfterSave = true;
-                    PlaybackUI.render();
-                }
-                if (completed) lastEndingSavedKey = key;
+                pendingCheckpointSignatures.add(signature);
+                commitCompletion.then(() => {
+                    if (!disposed && activeRecordKey === key && sessionId === checkpointSessionId) {
+                        if (!duplicateWatch) StorageApi.checkStorageWarn();
+                        lastSavedCheckpoint = { key, pos, progress, completed, sessionId };
+                        const playbackFloat = document.getElementById('bvh-status-float');
+                        if ((!playbackFloat || playbackFloat.dataset.hasRecord !== 'true') && !playbackFloatRefreshedAfterSave) {
+                            playbackFloatRefreshedAfterSave = true;
+                            PlaybackUI.render();
+                        }
+                        if (completed) lastEndingSavedKey = key;
+                    }
+                }).catch(error => console.warn(`${TAG} [播放记录] 检查点未完成落盘，保留重试机会：${key}`, error))
+                    .finally(() => pendingCheckpointSignatures.delete(signature));
                 return true;
             } catch (error) {
                 console.warn(`${TAG} [播放记录] 保存检查点失败：`, error);
@@ -8049,6 +8648,8 @@
         // 只识别当前视频及切换，不在这里写记录；同时把上一集的元数据和播放位置留在内存快照中。
         // 快照只是切换保护，不替代 GM 原始记录；真正保存时 readRecord 仍直接读当前 GM 存储。
         const loop = (refreshMetadata = false) => {
+            if (!isActive()) return;
+            if (skipInitialCycle) { skipInitialCycle = false; return; }
             const context = getCurrentContext();
             if (!context) {
                 if (lastActiveContext) savePlaybackCheckpoint(lastActiveContext, 'switch');
@@ -8106,7 +8707,8 @@
             lastVideoElement = context.video;
         };
 
-        window.addEventListener('bvh-bangumi-season-resolved', event => {
+        const onSeasonResolved = event => {
+            if (!isActive()) return;
             const detail = event?.detail || {};
             const episodeKey = String(detail.episodeKey || '').toLowerCase();
             const seasonId = Number(detail.seasonId) || 0;
@@ -8121,32 +8723,52 @@
             freshContext.seasonId = seasonId;
             freshContext.seasonKey = `ss${seasonId}`;
             savePlaybackCheckpoint(freshContext, 'pause');
-        });
+        };
+        window.addEventListener('bvh-bangumi-season-resolved', onSeasonResolved);
 
+        let attachedVideo = null;
+        const videoHandlers = {
+            playing: () => loop(true),
+            timeupdate: () => loop(),
+            pause: () => {
+                if (!isActive()) return;
+                const context = getCurrentContext();
+                if (context && context.video === attachedVideo && context.key === activeRecordKey) savePlaybackCheckpoint(context, 'pause');
+            },
+            ended: () => {
+                if (!isActive()) return;
+                const context = getCurrentContext();
+                if (context && context.video === attachedVideo) savePlaybackCheckpoint(context, 'ended');
+            }
+        };
+        const detachVideoEvents = () => {
+            if (!attachedVideo) return;
+            for (const [event, handler] of Object.entries(videoHandlers)) {
+                attachedVideo.removeEventListener(event, handler);
+            }
+            attachedVideo = null;
+        };
         const attachVideoEvents = () => {
+            if (!isActive()) return;
             const video = getPlayableMediaElement();
-            if (!video) return;
-            if (video.dataset?.bvhEventsAttached !== 'true') {
-                if (video.dataset) video.dataset.bvhEventsAttached = 'true';
-                // 监听器不能直接传 loop：浏览器会把 Event 对象作为第一个参数，导致每次 timeupdate 都强制重读 DOM 元数据。
-                video.addEventListener('playing', () => loop(true));
-                video.addEventListener('timeupdate', () => loop());
-                video.addEventListener('pause', () => {
-                    const context = getCurrentContext();
-                    if (context && context.key === activeRecordKey) savePlaybackCheckpoint(context, 'pause');
-                });
-                video.addEventListener('ended', () => {
-                    const context = getCurrentContext();
-                    if (context) savePlaybackCheckpoint(context, 'ended');
-                });
+            if (attachedVideo !== video) {
+                if (lastActiveContext) savePlaybackCheckpoint(lastActiveContext, 'switch');
+                detachVideoEvents();
+                if (!video) return;
+                attachedVideo = video;
+                for (const [event, handler] of Object.entries(videoHandlers)) {
+                    video.addEventListener(event, handler);
+                }
                 lastVideoElement = video;
             }
+            if (!video) return;
             loop();
         };
 
         let mutationFrame = 0;
         let collectionRepairQueued = false;
         const observer = new MutationObserver(mutations => {
+            if (!isActive()) return;
             // B 站播放器会连续改写 DOM；同一帧只处理一次，避免每个小节点变化都读播放器元数据。
             const childMutations = mutations.filter(mutation => mutation.type === 'childList');
             if (!childMutations.length) return;
@@ -8161,6 +8783,7 @@
             if (mutationFrame) return;
             mutationFrame = requestAnimationFrame(() => {
                 mutationFrame = 0;
+                if (!isActive()) return;
                 attachVideoEvents();
                 loop();
                 if (collectionRepairQueued) {
@@ -8171,64 +8794,54 @@
         });
         if (document.body) observer.observe(document.body, { childList: true, subtree: true });
 
-        let skipOneLoopAfterRouteChange = false;
-        const onRouteChange = () => {
-            activeRecordKey = null;
-            skipOneLoopAfterRouteChange = true;
-            PlaybackUI.render();
-            scheduleCollectionRepair(1600);
-        };
-        window.addEventListener('popstate', onRouteChange);
-        const originalPushState = history.pushState;
-        const originalReplaceState = history.replaceState;
-        history.pushState = function (...args) { const r = originalPushState.apply(this, args); onRouteChange(); return r; };
-        history.replaceState = function (...args) { const r = originalReplaceState.apply(this, args); onRouteChange(); return r; };
-
-        let lastSeenRoute = location.pathname + location.search;
         recordTimer = setInterval(() => {
-            const routeNow = location.pathname + location.search;
-            if (routeNow !== lastSeenRoute) {
-                lastSeenRoute = routeNow;
-                activeRecordKey = null;
-                skipOneLoopAfterRouteChange = true;
-                PlaybackUI.render();
-            }
+            if (!isActive()) return;
             attachVideoEvents();
-            if (skipOneLoopAfterRouteChange) {
-                skipOneLoopAfterRouteChange = false;
-                return;
-            }
             loop(true);
         }, CONFIG.RECORD_INTERVAL);
 
-        attachVideoEvents();
-        loop();
-        scheduleCollectionRepair(1600);
+        const onBeforeUnload = () => {
+            if (!disposed && lastActiveContext) savePlaybackCheckpoint(lastActiveContext, 'exit');
+        };
+        window.addEventListener('beforeunload', onBeforeUnload);
 
-        window.addEventListener('pagehide', () => {
-            if (lastActiveContext) savePlaybackCheckpoint(lastActiveContext, 'exit');
-        }, { once: true });
-
-        window.addEventListener('beforeunload', () => {
-            if (lastActiveContext) savePlaybackCheckpoint(lastActiveContext, 'exit');
+        const cleanup = (reason = 'switch') => {
+            if (disposed) return;
+            if (lastActiveContext) savePlaybackCheckpoint(lastActiveContext, reason);
+            disposed = true;
+            requests.abort();
             clearInterval(recordTimer);
             if (collectionRepairTimer !== null) clearTimeout(collectionRepairTimer);
             if (mutationFrame) cancelAnimationFrame(mutationFrame);
             observer.disconnect();
-            window.removeEventListener('popstate', onRouteChange);
-            history.pushState = originalPushState;
-            history.replaceState = originalReplaceState;
-        }, { once: true });
+            detachVideoEvents();
+            window.removeEventListener('bvh-bangumi-season-resolved', onSeasonResolved);
+            window.removeEventListener('beforeunload', onBeforeUnload);
+            lastActiveContext = null;
+            lastVideoElement = null;
+        };
+        try {
+            attachVideoEvents();
+            loop();
+            scheduleCollectionRepair(1600);
+        } catch (error) {
+            cleanup();
+            throw error;
+        }
+        return cleanup;
     }
 
     // ── 直播记录器：路由变化时记一条进入直播间的快照（直播没有进度概念） ──
     function startLiveRecorder() {
         if (!/^https:\/\/live\.bilibili\.com\//.test(location.href)) return;
 
+        let disposed = false;
+        const recorderUrl = location.href;
         let lastKey = null;
         let lastRoute = '';
 
         const recordOnce = () => {
+            if (disposed || location.href !== recorderUrl) return;
             const parsed = RecordKey.parse(window.location.href);
             if (!parsed || !parsed.isLive) return;
             const key = parsed.key;
@@ -8266,20 +8879,12 @@
             RecordStore.set(key, record);
         };
 
-        const originalPushState = history.pushState;
-        const originalReplaceState = history.replaceState;
-        const onRoute = () => { lastKey = null; setTimeout(recordOnce, 300); };
-        history.pushState = function (...args) { const r = originalPushState.apply(this, args); onRoute(); return r; };
-        history.replaceState = function (...args) { const r = originalReplaceState.apply(this, args); onRoute(); return r; };
-        window.addEventListener('popstate', onRoute);
-
-        setTimeout(recordOnce, 800);
-
-        window.addEventListener('beforeunload', () => {
-            window.removeEventListener('popstate', onRoute);
-            history.pushState = originalPushState;
-            history.replaceState = originalReplaceState;
-        }, { once: true });
+        const recordTimer = setTimeout(recordOnce, 800);
+        return () => {
+            if (disposed) return;
+            disposed = true;
+            clearTimeout(recordTimer);
+        };
     }
 
     // ── 卡片角标：IntersectionObserver 给已看过的视频卡片盖『已观看 ×N』章 ──
@@ -8964,7 +9569,9 @@
     // 统一添加历史列表、卡片标记、播放页悬浮窗和相关控件的 CSS。
     // 样式与功能逻辑分离；调整视觉效果时应避免改变 DOM 身份识别或记录读写流程。
     function injectStyle() {
-        GM_addStyle(`
+        // 片段按原始 CSS 顺序声明；主题覆盖仍在基础规则之后。
+        const styleFragments = {
+            cardBadges: `
             .bvh-tag {
                 position: absolute; top: 8px; left: 8px; padding: 2px 6px;
                 background: rgba(0,0,0,.75); color: #fff; font-size: 11px;
@@ -8976,6 +9583,8 @@
                 background: rgba(255,255,255,.2); z-index: 11;
             }
             .bvh-progress-bar { height: 100%; background: #fb7299; box-shadow: 0 0 5px #fb7299; }
+            `,
+            playbackFloat: `
             #bvh-status-float {
                 position: fixed; bottom: 20px; left: 20px; box-sizing: border-box;
                 background: rgba(255,255,255,.76); color: #30323a;
@@ -9016,6 +9625,8 @@
             #bvh-status-float.bvh-docked:hover > *,
             #bvh-status-float.bvh-docked:focus-within > * { opacity: 1; pointer-events: auto; transition-delay: .08s; }
 
+            `,
+            playbackMenu: `
             #bvh-menu-panel {
                 position:fixed; bottom:80px; left:20px; width:246px; box-sizing:border-box;
                 padding:13px; z-index:10001; display:none; overflow:hidden;
@@ -9042,6 +9653,8 @@
             #bvh-menu-panel #bvh-show-history { border-color:rgba(251,114,153,.32); background:linear-gradient(110deg,rgba(251,114,153,.14),rgba(255,255,255,.78)); color:#c85d83; font-weight:650; }
 
 
+            `,
+            settingsBase: `
             /* 设置窗口：浅色磨砂玻璃面板，B站粉色液体滑轨与数值输入共用同一数值。 */
             #bvh-settings-overlay { position:fixed; inset:0; z-index:10050; display:none; align-items:center; justify-content:center; padding:16px; background:rgba(35,25,40,.25); backdrop-filter:blur(8px) saturate(1.2); -webkit-backdrop-filter:blur(8px) saturate(1.2); }
             .bvh-settings-dialog { width:min(680px,calc(100vw - 24px)); max-height:min(86vh,820px); display:flex; flex-direction:column; overflow:hidden; border:1px solid rgba(255,255,255,.82); border-radius:20px; background:rgba(255,255,255,.82); color:#30323a; box-shadow:0 18px 55px rgba(35,25,40,.22),inset 0 1px 0 rgba(255,255,255,.92); backdrop-filter:blur(24px) saturate(1.4); -webkit-backdrop-filter:blur(24px) saturate(1.4); }
@@ -9109,6 +9722,8 @@
             .bvh-settings-footer [data-save]:hover { filter:brightness(1.04); transform:translateY(-1px); box-shadow:0 8px 22px rgba(251,114,153,.28); }
             @media (max-width:560px) { .bvh-settings-dialog { border-radius:17px; } .bvh-settings-header,.bvh-settings-footer { padding-left:15px; padding-right:15px; } .bvh-settings-body { padding:9px 15px 14px; } .bvh-setting-row { grid-template-columns:1fr; gap:8px; margin:14px 0; } .bvh-setting-control { grid-template-columns:minmax(0,1fr) 72px; } .bvh-setting-number { width:72px; } }
 
+            `,
+            settingsLayoutOverrides: `
             /* 5.7.19：整体放大设置排版；粗滑轨作为主体，节点刻度浮在轨道上方，点击后由弹性过渡缓慢归位。 */
             .bvh-settings-dialog { width:min(820px,calc(100vw - 28px)); max-height:min(90vh,920px); border-radius:24px; }
             .bvh-settings-header,.bvh-settings-footer { padding:21px 27px; }
@@ -9165,6 +9780,8 @@
                 .bvh-setting-number { width:78px; }
             }
 
+            `,
+            historyPanelAndSearch: `
             .bvh-storage-info {
                 font-size: 12px; color: #555; margin-bottom: 6px;
                 border-bottom: 1px solid #eee; padding-bottom: 4px;
@@ -9244,6 +9861,8 @@
             }
             @keyframes bvh-loading-spin { to { transform: rotate(360deg); } }
 
+            `,
+            recordMenusAndDialogs: `
             .bvh-record-context-menu {
                 position: fixed; z-index: 2147483647; min-width: 188px; padding: 7px;
                 box-sizing: border-box; border: 1px solid rgba(255,255,255,.78);
@@ -9308,6 +9927,8 @@
             @keyframes bvh-record-fade-in { from { opacity: 0; } to { opacity: 1; } }
             @keyframes bvh-record-dialog-in { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 
+            `,
+            historyRecordsAndGroups: `
             .bvh-history-item {
                 font-size: calc(var(--bvh-ui-font-size, 16px) * .75); padding: 7px 5px; border-radius: 10px;
                 line-height: 1.5; cursor: pointer; list-style: none;
@@ -9395,6 +10016,8 @@
             .bvh-count-mark { color: #27ae60; font-weight: bold; }
             .bvh-warn-text { color: #e67e22; font-weight: bold; }
 
+            `,
+            historyPagePanel: `
             #bvh-history-page-entry { position: fixed; left: 24px; bottom: 24px; z-index: 9999; }
             /* 历史页入口卡片只增加高度，不开放尺寸拖拽，保持与视频页相同的收起/展开逻辑。 */
             #bvh-history-page-entry #bvh-status-float {
@@ -9415,6 +10038,8 @@
             #bvh-history-page-panel.bvh-hp-show {
                 display: block; animation: bvh-panel-in .38s cubic-bezier(.22,1,.36,1);
             }
+            `,
+            panelDragAndResize: `
             /* 调整尺寸时暂停昂贵的毛玻璃与子树绘制；半透明遮罩只负责遮住内容，不再执行 backdrop-filter。 */
             #bvh-history-panel.bvh-resizing,
             #bvh-history-page-panel.bvh-resizing {
@@ -9492,6 +10117,8 @@
                 background: color-mix(in srgb,var(--bvh-theme-panel,#fffafd) 8%,transparent);
                 backdrop-filter: none !important; -webkit-backdrop-filter: none !important;
             }
+            `,
+            historyPageControls: `
             #bvh-hp-drag-bar {
                 display: flex; align-items: center; justify-content: space-between;
                 padding: 10px 14px;
@@ -9537,8 +10164,8 @@
                 background: color-mix(in srgb,var(--bvh-theme-panel,#fffafd) 82%,transparent);
                 pointer-events: none; touch-action: pan-y;
             }
-        `);
-        GM_addStyle(`
+            `,
+            themeVariablesAndOverrides: `
             :root {
                 --bvh-theme-accent:#fb7299; --bvh-theme-accent-2:#f6a0b9;
                 --bvh-theme-panel:#fffafd; --bvh-theme-card:#fff; --bvh-theme-text:#624b54;
@@ -9646,6 +10273,8 @@
             .bvh-slider-node:after { background:var(--bvh-theme-slider-dot) !important; }
             .bvh-slider-node:hover:after, .bvh-slider-node.is-active:after { background:var(--bvh-theme-slider-dot) !important; border-color:var(--bvh-theme-border) !important; box-shadow:0 0 0 3px color-mix(in srgb,var(--bvh-theme-slider-dot) 22%,transparent),0 0 9px color-mix(in srgb,var(--bvh-theme-slider-dot) 40%,transparent) !important; }
             .bvh-loading-spinner { border-color:color-mix(in srgb,var(--bvh-theme-accent) 22%,transparent); border-top-color:var(--bvh-theme-accent) !important; border-right-color:var(--bvh-theme-accent) !important; }
+            `,
+            darkThemeOverrides: `
             :root[data-bvh-theme="dark"] #bvh-history-page-panel,
             :root[data-bvh-theme="dark"] #bvh-history-panel,
             :root[data-bvh-theme="dark"] #bvh-menu-panel { background:color-mix(in srgb,var(--bvh-theme-panel) 94%,transparent) !important; }
@@ -9708,6 +10337,8 @@
             :root[data-bvh-theme="dark"] .bvh-history-header { background:#292722 !important; color:#e4c368 !important; }
             :root[data-bvh-theme="dark"] #bvh-hp-list::-webkit-scrollbar-thumb:hover { background:#a28c58; }
             :root[data-bvh-theme="dark"] .bvh-resize-handle { background:linear-gradient(135deg,transparent 0 42%,color-mix(in srgb,var(--bvh-theme-accent) 30%,transparent) 43% 49%,transparent 50% 61%,color-mix(in srgb,var(--bvh-theme-accent) 44%,transparent) 62% 68%,transparent 69%) !important; }
+            `,
+            themeEditorAndPreview: `
             .bvh-theme-presets { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:4px 0 12px; }
             .bvh-theme-option { display:flex; min-width:0; flex-direction:column; gap:5px; }
             .bvh-theme-presets button[data-theme-preset] { display:flex; align-items:center; gap:9px; min-width:0; padding:9px 11px; border:1px solid var(--bvh-theme-border); border-radius:11px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
@@ -9739,7 +10370,9 @@
             .bvh-theme-preview-body button { padding:5px 10px; border:0; border-radius:8px; background:var(--bvh-theme-accent); color:var(--bvh-theme-accent-text); }
             .bvh-theme-contrast { margin:8px 0 0; color:#b35b28; font-size:11px; }
             .bvh-theme-contrast button { margin:5px 0 0; padding:6px 9px; border:1px solid var(--bvh-theme-border); border-radius:8px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
-        `);
+            `
+        };
+        GM_addStyle(Object.values(styleFragments).join(''));
     }
 
     // 播放页浮窗内容：existingFloat 分支和新建分支共用同一份 HTML 生成
@@ -9747,7 +10380,6 @@
     // 根据传入的历史信息生成悬浮窗的展示结构，包括记录状态和可供用户操作的内容。
     // 这里负责生成界面，不单独决定记录是否存在；记录判断应由统一的解析/读取逻辑提供。
     function buildPlaybackFloatHtml(history) {
-        const escapeHtml = value => String(value == null ? '' : value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
         const snapshots = Array.isArray(history.snapshots) ? history.snapshots : [];
         const latest = snapshots.reduce((best, snap) => !best || Number(snap.ts || 0) > Number(best.ts || 0) ? snap : best, null);
         const lastWatchDate = latest?.watchTimeStr || '无记录';
@@ -9977,7 +10609,7 @@
                     ? buildPlaybackFloatHtml(history)
                     : `
                         <div class="bvh-float-accent" style="font-weight:bold;">当前视频暂无本地记录</div>
-                        <div class="bvh-float-muted" style="font-size:12px;">${key}</div>
+                        <div class="bvh-float-muted" style="font-size:12px;">${escapeHtml(key)}</div>
                     `;
                 requestAnimationFrame(() => autoPositionPlaybackPanel(
                     document.getElementById('bvh-history-panel'), existingFloat
@@ -9995,7 +10627,7 @@
             menuPanel.innerHTML = `
                 <div class="bvh-playback-menu-head" title="按住这里可拖动面板"><strong>当前视频</strong><span class="bvh-menu-drag-hint">⠿ 拖动</span></div>
                 <div class="bvh-playback-storage">
-                    <div class="bvh-storage-info">存储：已用 ${usedStr} / 剩余 ${freeStr} / 总条数 ${recordCount}</div>
+                    <div class="bvh-storage-info">存储：已用 ${escapeHtml(usedStr)} / 剩余 ${escapeHtml(freeStr)} / 总条数 ${escapeHtml(recordCount)}</div>
                     <div class="bvh-storage-meter"><i style="width:${Math.min(100, usedByte / Math.max(1, CONFIG.STORAGE_MAX_BYTE) * 100)}%"></i></div>
                     ${warnHtml}
                 </div>
@@ -10145,7 +10777,7 @@
                 floatBox.dataset.hasRecord = history ? 'true' : 'false';
                 floatBox.innerHTML = history
                     ? buildPlaybackFloatHtml(history)
-                    : `<div class="bvh-float-accent" style="font-weight:bold;">当前视频暂无本地记录</div><div class="bvh-float-muted" style="font-size:12px;">${key}</div>`;
+                    : `<div class="bvh-float-accent" style="font-weight:bold;">当前视频暂无本地记录</div><div class="bvh-float-muted" style="font-size:12px;">${escapeHtml(key)}</div>`;
 
                 let isClick = false;
                 let downX = 0, downY = 0;
@@ -10280,7 +10912,7 @@
                         <button id="hp-export">导出JSON</button>
                         <button id="hp-export-csv">导出CSV</button>
                         <button id="hp-import">导入JSON</button>
-                        <button id="hp-clean">清理已备份过期记录（${CONFIG.EXPIRE_DAY}天）</button>
+                        <button id="hp-clean">清理已备份过期记录（${escapeHtml(CONFIG.EXPIRE_DAY)}天）</button>
                         <button id="hp-clearall">清空全部</button>
                     </div>
                     <ul id="bvh-hp-list"></ul>
@@ -10504,10 +11136,56 @@
     }
 
     // ── 脚本内设置窗口：普通参数集中调整，不再依赖油猴菜单逐项输入 ──
-    function openSettingsWindow() {
-        let overlay = document.getElementById('bvh-settings-overlay');
-        if (!overlay) {
-            overlay = document.createElement('div');
+    // 设置任务状态放在窗口节点上，关闭、重新打开都不会绕过同一任务的忙碌状态。
+    const SettingsOperations = {
+        bind(element, event, handler) {
+            if (!element) return;
+            const handlers = element._bvhHandlers || (element._bvhHandlers = {});
+            if (!handlers[event]) element.addEventListener(event, e => element._bvhHandlers[event](e));
+            handlers[event] = handler;
+        },
+        sync(overlay) {
+            const saving = overlay._bvhTask === 'save';
+            if (saving) {
+                const disabledStates = overlay._bvhSaveDisabledStates || (overlay._bvhSaveDisabledStates = new Map());
+                overlay.querySelectorAll('input, select, textarea, button').forEach(el => {
+                    if (!disabledStates.has(el)) disabledStates.set(el, el.disabled);
+                });
+            } else if (overlay._bvhSaveDisabledStates) {
+                for (const [el, disabled] of overlay._bvhSaveDisabledStates) el.disabled = disabled;
+                delete overlay._bvhSaveDisabledStates;
+            }
+            const busy = !!overlay._bvhTask || !!overlay._bvhScanning;
+            const primary = StorageRouter.isPrimaryMode();
+            overlay.querySelectorAll('[data-save], .bvh-cold-management button, [data-cold-file]').forEach(el => {
+                el.disabled = busy || (primary && el.hasAttribute('data-cold-archive'));
+            });
+            for (const id of ['bvh-setting-cold-age', 'bvh-setting-cold-interval']) {
+                const input = overlay.querySelector(`#${id}`);
+                if (!input) continue;
+                input.disabled = primary || busy;
+                const control = input.closest('.bvh-setting-control');
+                control?.querySelectorAll('input, button').forEach(el => { el.disabled = input.disabled; });
+                control?.setAttribute('aria-disabled', String(input.disabled));
+            }
+            const auto = overlay.querySelector('[data-cold-auto]');
+            if (auto) auto.disabled = primary || busy;
+            // 先恢复原状态并应用当前 primary 规则，保存锁只在最后叠加。
+            if (saving) {
+                overlay.querySelectorAll('input, select, textarea, button').forEach(el => { el.disabled = true; });
+            }
+        },
+        async run(overlay, name, action) {
+            if (overlay._bvhTask || overlay._bvhScanning) return;
+            overlay._bvhTask = name;
+            this.sync(overlay);
+            try { return await action(); }
+            finally { overlay._bvhTask = ''; this.sync(overlay); }
+        }
+    };
+
+    function createSettingsWindow() {
+            const overlay = document.createElement('div');
             overlay.id = 'bvh-settings-overlay';
             overlay.innerHTML = `
                 <section class="bvh-settings-dialog" role="dialog" aria-modal="true" aria-label="观看历史设置">
@@ -10602,14 +11280,16 @@
             document.body.appendChild(overlay);
             overlay.addEventListener('click', e => {
                 if (e.target === overlay || e.target.closest('[data-close], [data-cancel]')) {
+                    if (overlay._bvhTask === 'save') return;
                     applyColorTheme(readColorTheme());
                     overlay.style.display = 'none';
-                    if (settingTooltip) settingTooltip.hidden = true;
+                    const tooltip = document.getElementById('bvh-setting-tooltip');
+                    if (tooltip) tooltip.hidden = true;
                 }
             });
-            overlay.querySelector('[data-save]').addEventListener('click', async () => {
+            overlay.querySelector('[data-save]').addEventListener('click', () => SettingsOperations.run(overlay, 'save', async function saveSettings() {
                 const get = id => Number(overlay.querySelector(`#${id}`).value);
-                const requestedColdAge = get('bvh-setting-cold-age');
+                const requestedColdAge = StorageRouter.isPrimaryMode() ? 0 : get('bvh-setting-cold-age');
                 if (requestedColdAge === 0 && !CONFIG.COLD_PRIMARY_MODE) {
                     if (!confirm('不可逆操作：这会把现有记录迁入 IndexedDB，并在核验成功后删除 GM 中的记录副本。完成后不能切回 GM 存储。迁移失败时原数据会保留。确定开始吗？')) return;
                     const saveButton = overlay.querySelector('[data-save]');
@@ -10626,12 +11306,10 @@
                         const autoArchiveControl = overlay.querySelector('[data-cold-auto]');
                         if (autoArchiveControl) autoArchiveControl.disabled = true;
                     } catch (error) {
-                        saveButton.disabled = false;
                         if (status) status.textContent = `迁移未完成，原存储模式与源记录保留：${error.message}`;
                         alert(`DB 主存迁移失败，GM 中的原记录已保留：${error.message}`);
                         return;
                     }
-                    saveButton.disabled = false;
                 }
                 CONFIG.CONTINUOUS_DEDUP_MODE = overlay.querySelector('#bvh-setting-dedup-mode').value;
                 CONFIG.CONTINUOUS_GAP_MIN = Math.max(1, Math.min(180, Math.round(get('bvh-setting-gap'))));
@@ -10643,7 +11321,7 @@
                 CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA = get('bvh-setting-quota') / 100;
                 CONFIG.SHORT_WATCH_MAX_POS_SEC = get('bvh-setting-short');
                 CONFIG.SHORT_WATCH_EXPIRE_DAY = get('bvh-setting-retention');
-                CONFIG.COLD_ARCHIVE_AGE_DAY = get('bvh-setting-cold-age');
+                CONFIG.COLD_ARCHIVE_AGE_DAY = StorageRouter.isPrimaryMode() ? 0 : Math.max(1, requestedColdAge);
                 CONFIG.COLD_ARCHIVE_INTERVAL_DAY = Math.max(1, Math.min(90, get('bvh-setting-cold-interval')));
                 CONFIG.COLD_ARCHIVE_ENABLED = overlay.querySelector('[data-cold-auto]')?.checked === true;
                 CONFIG.COLD_SEARCH_AUTO = overlay.querySelector('[data-cold-search-auto]')?.checked === true;
@@ -10667,6 +11345,7 @@
                 RecordStore.set(RECENT_SNAPSHOT_QUOTA_SETTINGS_KEY, { quota: CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA, updatedAt: now });
                 RecordStore.set(SHORT_WATCH_SETTINGS_KEY, { seconds: CONFIG.SHORT_WATCH_MAX_POS_SEC, days: CONFIG.SHORT_WATCH_EXPIRE_DAY, updatedAt: now });
                 GM_setValue(COLD_ARCHIVE_SETTINGS_KEY, {
+                    ...(GM_getValue(COLD_ARCHIVE_SETTINGS_KEY, {}) || {}),
                     ageDays: CONFIG.COLD_ARCHIVE_AGE_DAY,
                     intervalDays: CONFIG.COLD_ARCHIVE_INTERVAL_DAY,
                     enabled: CONFIG.COLD_ARCHIVE_ENABLED,
@@ -10678,9 +11357,20 @@
                 refreshOpenHistoryLists();
                 StorageApi.cleanShortWatchRecords();
                 overlay.style.display = 'none';
-                if (settingTooltip) settingTooltip.hidden = true;
-            });
-        }
+                const tooltip = document.getElementById('bvh-setting-tooltip');
+                if (tooltip) tooltip.hidden = true;
+            }).catch(error => alert(`保存设置失败：${error.message}`)));
+            return overlay;
+    }
+
+    function openSettingsWindow() {
+        const overlay = document.getElementById('bvh-settings-overlay') || createSettingsWindow();
+        overlay.style.display = 'flex';
+        if (overlay._bvhTask || overlay._bvhScanning) { SettingsOperations.sync(overlay); return; }
+        refreshSettingsWindow(overlay);
+    }
+
+    function refreshSettingsWindow(overlay) {
         const values = {
             'bvh-setting-dedup-mode': CONFIG.CONTINUOUS_DEDUP_MODE,
             'bvh-setting-gap': CONFIG.CONTINUOUS_GAP_MIN,
@@ -10826,15 +11516,17 @@
             });
             help.addEventListener('blur', () => { settingTooltip.hidden = true; });
         });
-        settingTooltip.addEventListener('mouseleave', () => { settingTooltip.hidden = true; });
+        SettingsOperations.bind(settingTooltip, 'mouseleave', () => { settingTooltip.hidden = true; });
         const coldEnabledControl = overlay.querySelector('[data-cold-auto]');
         if (coldEnabledControl) coldEnabledControl.checked = CONFIG.COLD_ARCHIVE_ENABLED;
         const coldSearchAutoControl = overlay.querySelector('[data-cold-search-auto]');
         if (coldSearchAutoControl) coldSearchAutoControl.checked = CONFIG.COLD_SEARCH_AUTO;
-        const refreshColdDatabaseInfo = async () => {
+        const refreshColdDatabaseInfo = async (afterOperation = false) => {
             const button = overlay.querySelector('[data-cold-refresh]');
             const list = overlay.querySelector('[data-cold-databases]');
-            if (!list || button?.disabled) return;
+            if (!list || overlay._bvhScanning || (overlay._bvhTask && !afterOperation)) return;
+            overlay._bvhScanning = true;
+            SettingsOperations.sync(overlay);
             if (button) button.disabled = true;
             list.textContent = '正在扫描并读取冷库信息…';
             const primaryId = GMNative.getValue(COLD_PRIMARY_DB_KEY, '');
@@ -10885,20 +11577,21 @@
                         removeButton.type = 'button';
                         removeButton.textContent = '移除失联旧库登记';
                         removeButton.title = '只移除油猴中的目录登记，不删除数据库记录';
-                        removeButton.addEventListener('click', async () => {
+                        removeButton.addEventListener('click', () => SettingsOperations.run(overlay, 'remove-registration', async () => {
                             if (!confirm(`确认移除失联旧库“${meta.name}”的登记吗？\n\n目录原记载 ${Number(meta.count) || 0} 条记录。此操作只移除油猴目录项，不删除实际数据库内容；数据库已被确认不存在，之后脚本无法再从此登记定位其数据，完整备份也不再等待这个旧库。`)) return;
                             removeButton.disabled = true;
                             try {
                                 await ColdArchiveStore.removeMissingDatabaseRegistration(meta.id);
-                                await refreshColdDatabaseInfo();
+                                await refreshColdDatabaseInfo(true);
                             } catch (error) {
                                 removeButton.disabled = false;
                                 alert(`移除旧库登记失败：${error.message}`);
                             }
-                        });
+                        }));
                         item.appendChild(removeButton);
                     }
                     list.appendChild(item);
+                    if (item.querySelector('button')) SettingsOperations.sync(overlay);
                 }
                 if (typeof indexedDB.databases !== 'function') {
                     const note = document.createElement('small');
@@ -10908,14 +11601,12 @@
             } catch (error) {
                 list.textContent = `数据库扫描失败：${error?.message || error}`;
             } finally {
-                if (button) button.disabled = false;
+                overlay._bvhScanning = false;
+                SettingsOperations.sync(overlay);
             }
         };
         const refreshColdButton = overlay.querySelector('[data-cold-refresh]');
-        if (refreshColdButton && !refreshColdButton.dataset.bvhBound) {
-            refreshColdButton.dataset.bvhBound = 'true';
-            refreshColdButton.addEventListener('click', refreshColdDatabaseInfo);
-        }
+        SettingsOperations.bind(refreshColdButton, 'click', () => refreshColdDatabaseInfo());
         const coldAgeControl = overlay.querySelector('#bvh-setting-cold-age');
         if (coldAgeControl && CONFIG.COLD_PRIMARY_MODE) {
             coldAgeControl.disabled = true;
@@ -10926,7 +11617,7 @@
             const status = overlay.querySelector('[data-cold-status]');
             if (status) status.textContent = 'DB 主存模式已永久启用；新记录直接写入 IndexedDB。';
         }
-        overlay.querySelector('[data-cold-delete-empty]')?.addEventListener('click', async () => {
+        SettingsOperations.bind(overlay.querySelector('[data-cold-delete-empty]'), 'click', () => SettingsOperations.run(overlay, 'delete-empty', async () => {
             const status = overlay.querySelector('[data-cold-status]');
             try {
                 const result = await ColdArchiveStore.deleteEmptyDatabases();
@@ -10937,25 +11628,28 @@
                 if (status) status.textContent = `删除空白冷库失败：${error.message}`;
                 alert(`删除空白冷库失败：${error.message}`);
             }
-        });
-        overlay.querySelector('[data-cold-archive]')?.addEventListener('click', async () => {
-            CONFIG.COLD_ARCHIVE_AGE_DAY = Number(overlay.querySelector('#bvh-setting-cold-age').value);
-            try { await ColdArchiveApi.archiveNow(); } catch (error) { alert(`归档失败，热层记录已保留：${error.message}`); }
-        });
+            await refreshColdDatabaseInfo(true);
+        }));
+        SettingsOperations.bind(overlay.querySelector('[data-cold-archive]'), 'click', () => SettingsOperations.run(overlay, 'archive', async () => {
+            const ageDays = Number(overlay.querySelector('#bvh-setting-cold-age').value);
+            if (!(ageDays > 0)) { alert('年龄为 0 时请点击“保存设置”，确认后再进入主存模式。'); return; }
+            try { await ColdArchiveApi.archiveNow(ageDays); } catch (error) { alert(`归档失败，热层记录已保留：${error.message}`); }
+            await refreshColdDatabaseInfo(true);
+        }));
         const coldFile = overlay.querySelector('[data-cold-file]');
-        overlay.querySelector('[data-cold-import]')?.addEventListener('click', () => coldFile?.click());
-        coldFile?.addEventListener('change', async () => {
+        SettingsOperations.bind(overlay.querySelector('[data-cold-import]'), 'click', () => { if (!overlay._bvhTask) coldFile?.click(); });
+        SettingsOperations.bind(coldFile, 'change', () => SettingsOperations.run(overlay, 'import', async () => {
             const file = coldFile.files?.[0];
             if (!file) return;
             try {
                 const result = await ColdArchiveApi.importFile(file);
                 overlay.querySelector('[data-cold-status]').textContent = `导入完成：${result.inserted} 条新增，${result.merged} 条合并。`;
             } catch (error) { alert(`冷库导入失败：${error.message}`); }
-            finally { coldFile.value = ''; }
-        });
-        overlay.querySelector('[data-cold-export-all]')?.addEventListener('click', async () => {
+            finally { coldFile.value = ''; await refreshColdDatabaseInfo(true); }
+        }));
+        SettingsOperations.bind(overlay.querySelector('[data-cold-export-all]'), 'click', () => SettingsOperations.run(overlay, 'export', async () => {
             await StorageApi.exportAllRecords();
-        });
+        }));
         const coldAutoControl = overlay.querySelector('[data-cold-auto]');
         const fontSizeControl = overlay.querySelector('#bvh-setting-font-size');
         if (!fontSizeControl.dataset.bvhPreviewBound) {
@@ -11047,6 +11741,7 @@
                     marker.addEventListener('click', e => {
                         e.preventDefault();
                         e.stopPropagation();
+                        if (input.disabled) return;
                         input.value = String(markerValue);
                         input.dispatchEvent(new Event('input', { bubbles: true }));
                     });
@@ -11086,12 +11781,14 @@
                     // 常用节点等距排布，节点之间按实际数值线性插值，便于操作密集数值区。
                     let pointerActive = false;
                     const updateFromPointer = e => {
+                        if (input.disabled) return;
                         const rect = liquid.getBoundingClientRect();
                         const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                         input.value = String(fromPercent(percent * 100));
                         input.dispatchEvent(new Event('input', { bubbles: true }));
                     };
                     liquid.addEventListener('pointerdown', e => {
+                        if (input.disabled) return;
                         if (e.target.closest('.bvh-slider-node')) return;
                         pointerActive = true;
                         liquid.classList.add('bvh-pointer-dragging');
@@ -11113,10 +11810,12 @@
                 if (numberInput && !numberInput.dataset.bvhNumberBound) {
                     numberInput.dataset.bvhNumberBound = 'true';
                     numberInput.addEventListener('input', () => {
+                        if (input.disabled) return;
                         if (numberInput.value === '') return;
                         paint(numberInput.value, false);
                     });
                     const normalizeNumber = () => {
+                        if (input.disabled) return;
                         const raw = numberInput.value === '' ? input.min : numberInput.value;
                         paint(raw);
                     };
@@ -11128,6 +11827,7 @@
             }
         });
         overlay.style.display = 'flex';
+        SettingsOperations.sync(overlay);
         refreshColdDatabaseInfo();
     }
 
@@ -11211,6 +11911,8 @@
 
         RecordStore.initRemoteListener();
 
+        PageRecorderController.start();
+
         if (location.href.startsWith('https://www.bilibili.com/history')) {
             if (window.indexedDB) {
                 try { await ColdArchiveStore.reconcileDirectory(); }
@@ -11236,14 +11938,6 @@
         }
 
         startCardBadgeRenderer();
-        // 先初始化播放页悬浮窗，再启动播放器记录器；避免记录器首轮识别/读取异常时跳过入口创建。
-        try {
-            PlaybackUI.render();
-        } catch (error) {
-            console.error(`${TAG} [播放悬浮窗] 初始创建失败：`, error);
-        }
-        startPlaybackRecorder();
-        startLiveRecorder();
     }
 
     mainInit().catch(error => console.error(`${TAG} 脚本初始化失败：`, error));
