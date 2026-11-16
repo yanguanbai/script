@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.18
+// @version      5.10.20
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -24,6 +24,8 @@
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
 // ==/UserScript==
+// 5.10.20：官方多P接口视频名仅补空合集名；扫描迁移保留扁平记录合集名，锁内保护最新名称；页面缺名不清空已有合集名。
+// 5.10.19：扁平记录并入合集时不再用当前视频标题回退覆盖合集名；合集名仅接受明确识别的合集标题。
 // 5.10.18：修正内部键大小写识别；仅清理历史派生索引中的误入设置项，保留 GM 尺寸设置和观看记录。
 // 5.10.17：恢复路由轮询兜底与切换保护；检查点待落盘期间按会话去重并允许失败后重试。
 // 5.10.16：冷库回热/归档保留更新热层标题；合集标题修复在记录锁内更新最新值并核验后清理未变化来源。
@@ -2671,16 +2673,16 @@
         },
 
         // 5.3.0：把一条扁平记录合并进容器对应分集（p）。
-        // 标题优先级：分集标题取选集(options.partTitle)/已有，合集标题取播放页合集框(containerTitle)>视频页>官方；分集标题缺失时保持已有不覆盖。
+        // 分集标题取选集(options.partTitle)/已有；合集标题只接受明确识别的合集标题，不能用分集标题回填。
         _mergePartIntoContainer(containerKey, record, options = {}, assembled = null) {
             const existing = assembled || RecordNormalizer.normalize(GM_getValue(containerKey, null));
             const container = existing && existing.type === 'collection'
                 ? existing
                 : { type: 'collection', key: containerKey, title: '', authorName: '', mediaType: '视频', parts: [], schemaVersion: 4 };
             const p = Math.max(1, Number(options.partNumber) || 1);
-            // 合集标题优先级：播放页合集框/视频页(containerTitle) > 已有 > 官方(record.collectionTitle||title)
+            // 合集标题只接受明确采集到的合集名；record.title 是分集/视频标题，不能回退充当合集名。
             if (options.containerTitle) container.title = String(options.containerTitle).trim();
-            else if (!container.title && (record.collectionTitle || record.title)) container.title = String(record.collectionTitle || record.title || '').trim();
+            else if (!container.title && record.collectionTitle) container.title = String(record.collectionTitle).trim();
             if (!container.authorName && record.authorName) container.authorName = String(record.authorName).trim();
             if (record.mediaType && record.mediaType !== '视频') container.mediaType = record.mediaType;
             // 稳定归属键（collectionKey）：优先播放页传入的指纹；已有非空值不被空值覆盖；缺省可从记录继承。
@@ -7844,19 +7846,9 @@
                 const headerLink = pod.querySelector(':scope > .video-pod__header .title.jumpable')
                 || pod.querySelector('.video-pod__header .title.jumpable');
                 // 这个节点的可见文本常常是进度（如 4.0/16.1h），只能把 title 属性当合集名称。
-                // 无标题大合集退回读取播放页主标题；分集标题仍独立取自选集列表，不互相覆盖。
-                const pageMainTitle = clean(
-                    document.querySelector('h1.video-title')?.getAttribute('title')
-                    || document.querySelector('h1.video-title')?.textContent
-                    || document.querySelector('.video-info-title')?.getAttribute('title')
-                    || document.querySelector('.video-info-title')?.textContent
-                    || document.querySelector('.video-title-container h1')?.getAttribute('title')
-                    || document.querySelector('.video-title-container h1')?.textContent
-                    || document.querySelector('meta[property="og:title"]')?.getAttribute('content')
-                    || ''
-                );
+                // 合集框没有明确标题时留空；播放页主标题属于当前视频/分集，不能冒充合集名。
                 const officialCollectionTitle = clean(headerLink?.getAttribute('title'));
-                const collectionTitle = officialCollectionTitle || pageMainTitle;
+                const collectionTitle = officialCollectionTitle;
                 const href = String(headerLink?.getAttribute('href') || '');
                 const sid = (href.match(/[?&]sid=(\d+)/i) || [])[1] || '';
                 const seasonId = (href.match(/[?&]season_id=(\d+)/i) || [])[1] || '';
@@ -8206,9 +8198,9 @@
             record.collectionOrder = Number(info.collectionOrder) || 0;
             record.partNumber = info.partNumber || record.partNumber || 0;
             record.partTotal = info.partTotal || record.partTotal || 0;
-            // 当前合集框是主名称的唯一来源；没有 title 属性就明确存空，不用进度文本或视频名代替。
-            if (record.collectionTitle !== (info.collectionTitle || '')) {
-                record.collectionTitle = info.collectionTitle || '';
+            // 页面尚未提供合集名时保留已有值，不能把加载中的空结果写回历史。
+            if (String(info.collectionTitle || '').trim()) {
+                record.collectionTitle = info.collectionTitle;
             }
         };
 
@@ -8317,11 +8309,19 @@
                 // 读/建同BV容器。
                 let container = RecordNormalizer.normalize(GM_getValue(storageKey, null));
                 if (!container || container.type !== 'collection') {
-                    container = { type: 'collection', key: bv, title: containerTitle || '', authorName: scannedAuthor || '', mediaType: '视频', parts: [], schemaVersion: 4 };
+                    // 扁平记录的 collectionTitle 才是合集名，title 是视频名。
+                    // 多个来源名称冲突时不猜测；来源读取仍受下方提交前的原值核验保护。
+                    const localTitles = new Set([container, ...flatKeys.map(key => RecordNormalizer.normalize(GM_getValue(key, null)))]
+                        .map(record => cleanText(record?.collectionTitle || '')).filter(Boolean));
+                    if (info.collectionTitleFillOnly === true && localTitles.size > 1) {
+                        throw new Error('本地合集名称冲突，视频标题不足以确定名称，保留来源记录');
+                    }
+                    const localTitle = localTitles.size === 1 ? [...localTitles][0] : '';
+                    container = { type: 'collection', key: bv, title: localTitle, authorName: scannedAuthor || '', mediaType: '视频', parts: [], schemaVersion: 4 };
                 }
                 const beforeContainer = JSON.stringify(container);
-                // 合集标题优先级：播放页合集框 title(containerTitle) 最高，其次已有；分集标题用选集集名覆盖(高优先)。
-                if (containerTitle && container.title !== containerTitle) container.title = containerTitle;
+                // 官方多P接口的 data.title 是视频名，只能补空；明确合集名沿用原有更新规则。
+                if (containerTitle && (info.collectionTitleFillOnly !== true || !String(container.title || '').trim())) container.title = containerTitle;
                 // 稳定归属键（sid/season/指纹）：扫描到的合集按它归组，已有值不被空覆盖。
                 if (info.collectionKey && container.collectionKey !== info.collectionKey) container.collectionKey = info.collectionKey;
                 if (!container.authorName && scannedAuthor) container.authorName = scannedAuthor;
@@ -8389,7 +8389,12 @@
                     const next = latest?.type === 'collection'
                         ? mergeContainers(latest, container)
                         : container;
-                    if (containerTitle) next.title = containerTitle;
+                    // 在锁内以最新值为准；扫描期间另一个标签补上的合集名也不能被视频名覆盖。
+                    if (info.collectionTitleFillOnly === true) {
+                        const latestTitle = cleanText(latest?.type === 'collection' ? latest.title : latest?.collectionTitle);
+                        if (latestTitle) next.title = latestTitle;
+                        else if (!String(next.title || '').trim() && containerTitle) next.title = containerTitle;
+                    } else if (containerTitle) next.title = containerTitle;
                     if (info.collectionKey) next.collectionKey = info.collectionKey;
                     if (!next.authorName && scannedAuthor) next.authorName = scannedAuthor;
                     const committedPart = RecordStore.findCollectionPart(next, completePartBv, page);
@@ -8468,6 +8473,7 @@
                             sourceLabel = 'video-pages';
                             info = {
                                 collectionTitle: videoPages.title,
+                                collectionTitleFillOnly: true,
                                 collectionKey: `bvs:${videoPages.bv}`,
                                 parts: videoPages.pages.map(ep => ({
                                     bvId: videoPages.bv,
