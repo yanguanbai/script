@@ -6,9 +6,9 @@
 
 | 脚本 | 用途 | 版本 | 安装 |
 |---|---|---:|---|
-| [观看历史可回溯](src/bilibili-history/README.md) | 本地记录观看时间、进度和历史快照，支持搜索、备份与恢复 | 5.10.20 | [安装地址（推送后生效）](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js) |
-| [浏览足迹](src/bilibili-footprint/README.md) | 记录列表页出现过的视频并支持搜索回溯 | 10.3.1 | [安装地址（推送后生效）](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-footprint/bilibili-footprint.user.js) |
-| [干净链接](src/bilibili-clean-link/bilibili-clean-link.user.js) | 清理 Bilibili 链接中的追踪参数 | 3.3.0 | [安装地址（推送后生效）](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-clean-link/bilibili-clean-link.user.js) |
+| [观看历史可回溯](src/bilibili-history/README.md) | 本地记录观看时间、进度和历史快照，支持搜索、备份与恢复 | 5.10.20 | [安装](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js) |
+| [浏览足迹](src/bilibili-footprint/README.md) | 记录列表页出现过的视频并支持搜索回溯 | 10.3.1 | [安装](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-footprint/bilibili-footprint.user.js) |
+| [干净链接](src/bilibili-clean-link/bilibili-clean-link.user.js) | 清理 Bilibili 链接中的追踪参数 | 3.3.0 | [安装](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-clean-link/bilibili-clean-link.user.js) |
 
 ## 安装
 
@@ -24,9 +24,9 @@
 
 ## 发行与更新
 
-脚本以独立版本号维护，完整源码保存在各自 `src/` 子目录。上表 Raw 地址对应重构后的目标路径，必须先将本地改动推送到 `main` 后才能安装；在推送前这些地址可能返回 404。浏览器中的更新可由用户脚本管理器按脚本元数据检查；Greasy Fork 上的安装和更新继续由 Greasy Fork 管理。
+脚本以独立版本号维护，完整源码保存在各自 `src/` 子目录。上表 Raw 地址可直接安装；Tampermonkey 或 Violentmonkey 会按脚本元数据检查更新。Greasy Fork 上的安装和更新仍由 Greasy Fork 管理。
 
-当前仓库保留原仓库历史；`tools/` 是仓库维护工具，不属于四个独立脚本项目。
+当前仓库保留原仓库历史；键盘控制脚本为维护者私用，不属于公开发行集合。`tools/` 是仓库维护工具，不属于三个公开脚本项目。
 
 ## 许可证与来源
 
