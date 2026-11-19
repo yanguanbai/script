@@ -1,0 +1,9 @@
+# Local maintenance notes and temporary exports
+/冷库改造计划.md
+/import-test-*.json
+/private/
+/src/bilibili-keyboard/
+
+# Python caches
+__pycache__/
+*.py[cod]

@@ -23,6 +23,8 @@
 // @run-at       document-end
 // @icon         https://www.bilibili.com/favicon.ico
 // @license MIT
+// @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
+// @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
 // 5.10.20：官方多P接口视频名仅补空合集名；扫描迁移保留扁平记录合集名，锁内保护最新名称；页面缺名不清空已有合集名。
 // 5.10.19：扁平记录并入合集时不再用当前视频标题回退覆盖合集名；合集名仅接受明确识别的合集标题。

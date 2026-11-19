@@ -9,6 +9,8 @@
 // @run-at       document-start
 // @icon         https://www.bilibili.com/favicon.ico
 // @license      MIT
+// @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-clean-link/bilibili-clean-link.user.js
+// @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-clean-link/bilibili-clean-link.user.js
 // ==/UserScript==
 
 (() => {

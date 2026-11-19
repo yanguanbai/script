@@ -18,8 +18,8 @@
 // @run-at       document-end
 // @icon         https://www.bilibili.com/favicon.ico
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/scripts/564445/B%E7%AB%99%E8%A7%86%E9%A2%91%E6%B5%8F%E8%A7%88%E8%B6%B3%E8%BF%B9.user.js
-// @updateURL https://update.greasyfork.org/scripts/564445/B%E7%AB%99%E8%A7%86%E9%A2%91%E6%B5%8F%E8%A7%88%E8%B6%B3%E8%BF%B9.meta.js
+// @downloadURL https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-footprint/bilibili-footprint.user.js
+// @updateURL https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-footprint/bilibili-footprint.user.js
 // ==/UserScript==
 
 (function () {

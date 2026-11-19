@@ -1,0 +1,30 @@
+{
+  "format": "bvh-history-backup",
+  "version": 2,
+  "exportedAt": 1794000120000,
+  "records": {
+    "BVTEST123456": {
+      "key": "BVTEST123456",
+      "data": {
+        "title": "导入合并测试视频",
+        "lastTs": 1794000060000,
+        "lastProgress": "78%",
+        "watchCount": 2,
+        "snapshots": [
+          {
+            "ts": 1794000000000,
+            "pos": 150,
+            "progress": "72%",
+            "source": "player"
+          },
+          {
+            "ts": 1794000060000,
+            "pos": 165,
+            "progress": "78%",
+            "source": "player"
+          }
+        ]
+      }
+    }
+  }
+}
