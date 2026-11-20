@@ -7,6 +7,7 @@ const ui = {
   file: $('#history-file'), pick: $('#pick-file'), drop: $('#drop-zone'),
   fileLabel: $('#file-label'), fileBadge: $('#file-badge'), fileMeta: $('#file-meta'), loadLatest: $('#load-latest'), pickDir: $('#pick-dir'),
   listBackups: $('#list-backups'), listCount: $('#list-count'), localList: $('#local-list'), localRows: $('#local-rows'),
+  localTitle: $('#local-title'), localScanned: $('#local-scanned'),
   localAll: $('#local-all'), localNone: $('#local-none'), localLoad: $('#local-load'),
   status: $('#status'), progress: $('#load-progress'),
   range: $('#range-control'), start: $('#date-start'), end: $('#date-end'), analyze: $('#analyze'),
@@ -637,6 +638,8 @@ function loadFiles(fileList, options = {}) {
   }
   sessionFiles = [...sessionFiles, ...added];
   const files = sessionFiles;
+  // 导入完顺手重扫一遍清单（新导出的备份可能刚落地），并把已经在报告里的那几份勾上
+  refreshLocalBackups();
 
   hasData = false; latestResult = null;
   activeKeyword = ''; searchQuery = ''; ui.search.value = '';
@@ -740,8 +743,10 @@ async function pickBackupDir() {
   if (result?.cancelled) { toast('没有选择文件夹'); return; }
   if (!result?.ok) { toast(`没能记住目录：${result?.error || '未知原因'}`, true); return; }
   toast(`已记住备份目录：${result.savedDir}`);
+  // 换了目录就立刻重扫一遍清单，不用手动刷新页面
+  const listed = await refreshLocalBackups({ expand: true });
   if (result.found) await loadLatestBackup();
-  else toast('这个目录里还没有备份文件，导出后放进来再点「读最新备份」', true);
+  else if (!listed) toast('这个目录里还没有备份文件，导出后放进来再点「读最新备份」', true);
 }
 
 ui.loadLatest?.addEventListener('click', () => loadLatestBackup());
@@ -765,13 +770,15 @@ function updateLocalCount() {
 
 function renderLocalRows() {
   ui.localRows.textContent = '';
+  // 报告里已经有的那几份直接勾上；一份都没导入时才退回「只勾最新」
+  const loadedNames = new Set(sessionFiles.map(file => file.name));
   localBackups.forEach((item, index) => {
     const row = document.createElement('label');
     row.className = 'local-row';
     const box = document.createElement('input');
     box.type = 'checkbox';
     box.value = String(index);
-    box.checked = index === 0;
+    box.checked = loadedNames.size ? loadedNames.has(item.name) : index === 0;
     box.addEventListener('change', updateLocalCount);
     const name = document.createElement('span');
     name.className = 'local-name';
@@ -793,13 +800,22 @@ async function refreshLocalBackups({ expand = false } = {}) {
     return false;
   }
   localBackups = Array.isArray(data?.items) ? data.items : [];
+  const scanned = Array.isArray(data?.searched) ? data.searched : [];
+  if (scanned.length) {
+    const shown = scanned.slice(0, 3).join('、') + (scanned.length > 3 ? ` 等 ${scanned.length} 处` : '');
+    ui.localScanned.textContent = `扫描范围：${shown}`;
+    ui.localScanned.title = scanned.join('\n');
+    ui.localScanned.hidden = false;
+  }
   if (!localBackups.length) {
     ui.listBackups.hidden = true;
-    ui.localList.hidden = true;
+    if (!expand) ui.localList.hidden = true;
+    else { ui.localList.hidden = false; ui.localRows.textContent = '这些目录里还没有备份文件。'; }
     return false;
   }
   ui.listBackups.hidden = false;
   ui.listCount.textContent = String(localBackups.length);
+  ui.localTitle.textContent = `本机找到 ${localBackups.length} 份备份`;
   renderLocalRows();
   if (expand) ui.localList.hidden = false;
   return true;

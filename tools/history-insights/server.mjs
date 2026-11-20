@@ -249,55 +249,53 @@ async function pickBackupDir(initialDir) {
 }
 
 async function findLatestBackup() {
-  const dirs = await backupDirs();
-  // 第一轮按严格命名找（bvh_history_backup*.json），第二轮才用宽松的 *history*.json，
-  // 且宽松匹配跳过浏览器下载目录，免得把那里无关的 json 当成备份。
-  for (let i = 0; i < backupPatterns.length; i += 1) {
-    const pattern = backupPatterns[i];
-    const loose = i > 0;
-    let best = null;
-    for (const dir of dirs) {
-      if (loose && isBrowserDir(dir)) continue;
-      let entries;
-      try { entries = await readdir(dir, { withFileTypes: true }); } catch { continue; }
-      for (const entry of entries) {
-        if (!entry.isFile() || !pattern.test(entry.name)) continue;
-        const file = join(dir, entry.name);
-        try {
-          const info = await stat(file);
-          if (!best || info.mtimeMs > best.mtimeMs) best = { file, name: entry.name, dir, size: info.size, mtimeMs: info.mtimeMs };
-        } catch { /* 文件刚好被移走，跳过 */ }
-      }
-    }
-    if (best) return best;
-  }
-  return null;
+  // 严格命名（bvh_history_backup*.json）优先；没有才退回宽松的 *history*.json。
+  // 子目录也一起扫，所以按日期分文件夹存放的备份同样能被「读最新备份」找到。
+  const items = await listBackups();
+  return items.find(item => item.strict) || items[0] || null;
 }
 
 // 扫到的所有备份（新的在前），给「本机文件」那张勾选表用。
+// 除了扫描根目录本身，往下再走几层子目录：很多人会把备份按日期/来源分文件夹放
+// （下载\哔哩哔哩历史\、下载\2026-11\ 这种），只扫顶层会漏掉。
+const MAX_SCAN_DEPTH = 3;
+const MAX_SCAN_DIRS = 3000;
+
 async function listBackups() {
   const dirs = await backupDirs();
   const seen = new Set();
   const items = [];
-  for (let i = 0; i < backupPatterns.length; i += 1) {
-    const pattern = backupPatterns[i];
-    const loose = i > 0;
-    for (const dir of dirs) {
-      if (loose && isBrowserDir(dir)) continue;
-      let entries;
-      try { entries = await readdir(dir, { withFileTypes: true }); } catch { continue; }
-      for (const entry of entries) {
-        if (!entry.isFile() || !pattern.test(entry.name)) continue;
-        const file = join(dir, entry.name);
-        if (seen.has(file)) continue;
-        try {
-          const info = await stat(file);
-          seen.add(file);
-          items.push({ file, name: entry.name, dir, size: info.size, mtimeMs: info.mtimeMs });
-        } catch { /* 读不到就跳过 */ }
+  let visited = 0;
+
+  async function walk(dir, depth, browserDir) {
+    if (visited >= MAX_SCAN_DIRS) return;
+    visited += 1;
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (depth >= MAX_SCAN_DEPTH) continue;
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        await walk(join(dir, entry.name), depth + 1, browserDir);
+        continue;
       }
+      if (!entry.isFile()) continue;
+      const strict = backupPatterns[0].test(entry.name);
+      // 浏览器下载目录里只认严格命名的备份；宽松的 *history*.json 只用在用户直接指定的扫描目录顶层，
+      // 免得子目录里的无关 json 被当成备份。
+      const loose = !strict && depth === 0 && !browserDir && backupPatterns[1].test(entry.name);
+      if (!strict && !loose) continue;
+      const file = join(dir, entry.name);
+      if (seen.has(file)) continue;
+      try {
+        const info = await stat(file);
+        seen.add(file);
+        items.push({ file, name: entry.name, dir, size: info.size, mtimeMs: info.mtimeMs, strict });
+      } catch { /* 读不到就跳过 */ }
     }
   }
+
+  for (const dir of dirs) await walk(dir, 0, isBrowserDir(dir));
   return items.sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 

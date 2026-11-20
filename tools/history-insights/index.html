@@ -72,8 +72,9 @@
         </div>
         <div id="local-list" class="local-list" hidden>
           <div class="local-list-head">
-            <strong>本机找到的备份</strong>
-            <small>默认勾最新的一份；日期不同的备份可以多勾几份一起合并，也可以一个都不勾。</small>
+            <strong id="local-title">本机找到的备份</strong>
+            <small>默认勾最新的一份，也可以勾几份不同日期的合并看，或者一个都不勾。</small>
+            <small id="local-scanned" class="local-scanned"></small>
           </div>
           <div id="local-rows" class="local-rows" role="group" aria-label="本机备份列表"></div>
           <div class="local-list-foot">
