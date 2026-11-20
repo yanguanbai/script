@@ -12,6 +12,28 @@ English version: [README.en.md](README.en.md)
 | [浏览足迹](src/bilibili-footprint/README.md) | 记录列表页出现过的视频并支持搜索回溯 | 10.3.1 | [中文文档](src/bilibili-footprint/README.md) · [English](src/bilibili-footprint/README.en.md) · [安装](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-footprint/bilibili-footprint.user.js) |
 | [干净链接](src/bilibili-clean-link/README.md) | 清理 Bilibili 链接中的追踪参数 | 3.3.0 | [中文文档](src/bilibili-clean-link/README.md) · [English](src/bilibili-clean-link/README.en.md) · [安装](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-clean-link/bilibili-clean-link.user.js) |
 
+## 本地分析工具
+
+[History Insights](tools/history-insights/README.md)（[English](tools/history-insights/README.en.md)）把「观看历史可回溯」导出的 JSON 备份在**本机**解析成一份可交互的观看报告：按日/按月波形、24 小时 × 7 天作息热力图、六维内容域雷达与占比环形、高频关键词星云、常看 UP 主与最常看的视频。不登录、不联网、不上传文件。
+
+启动：双击仓库根目录的 `看我的观看历史.cmd`，它会启动服务、自动找到最新的脚本备份并打开报告；也可以手动 `node tools/history-insights/server.mjs` 后在页面里点「读最新备份」或自己选文件。备份有几份就一起给：点「选文件（多选）」一次挑多个，或者分批点、后挑的会追加，重复记录自动合并去重。
+
+装了发行版之后更简单：桌面「观看报告」双击就先用内置 Node 在后台起服务，再打开 `http://127.0.0.1:4173`（不弹黑窗口）。不要直接双击程序目录里的 `app\report.html`——那是离线单文件版，读备份 / 指定目录 / 导出这些要靠服务的按钮会变成禁用状态。
+
+只想起停服务：双击根的 `服务启停.cmd`，一次启动（会在浏览器打开报告），再双击就停掉。
+
+两种装法：不想碰命令行的直接装 `tools/history-insights/release/dist/HistoryInsights-Setup.exe`（自带便携 Node，装完桌面有「观看报告」图标，可正常卸载）；想改代码的就用上面这条命令行的路子，依赖已在 `vendor/`，不需要 `npm install`。
+
+升级：新版 Setup 双击覆盖旧版就行——它会先停掉还在跑的服务、整个重建程序目录（旧文件不会残留），版本号写进 `version.txt`；你自己指定的备份目录保持不变。
+
+两套独立设计：亮色是纸本（米白纸面、细墨线分节、宋体标题），暗色是观测台（玻璃面板、霓虹光阶）；「导出长图」与「打印 / PDF」由本地服务另起干净的浏览器渲染，不带浏览器插件挂件，暗色主题导出仍是暗色。效果样张：[docs/展示.md](tools/history-insights/docs/展示.md)。
+
+| 纸本（亮色） | 观测台（暗色） |
+|---|---|
+| ![纸本](tools/history-insights/docs/screen-paper.png) | ![观测台](tools/history-insights/docs/screen-dark.png) |
+
+备份放在哪由你决定：页面里的「指定备份文件夹」会弹系统选择框，选完记进 `%APPDATA%\HistoryInsights\config.json`，以后只认这个目录。仓库里不含任何真实备份——上面的样张和 PDF 都是用 `tests/make-demo-backup.mjs` 生成的合成数据渲染的。
+
 ## 安装
 
 1. 安装 Tampermonkey 或 Violentmonkey 浏览器扩展。
@@ -28,7 +50,7 @@ English version: [README.en.md](README.en.md)
 
 脚本以独立版本号维护，完整源码保存在各自 `src/` 子目录。上表 Raw 地址可直接安装；Tampermonkey 或 Violentmonkey 会按脚本元数据检查更新。Greasy Fork 上的安装和更新仍由 Greasy Fork 管理。
 
-当前仓库保留原仓库历史；键盘控制脚本为维护者私用，不属于公开发行集合。`tools/` 是仓库维护工具，不属于三个公开脚本项目。
+当前仓库保留原仓库历史；键盘控制脚本为维护者私用，不属于公开发行集合。`tools/` 里是本地分析工具 History Insights，独立运行，不随脚本一起安装。
 
 ## 许可证与来源
 

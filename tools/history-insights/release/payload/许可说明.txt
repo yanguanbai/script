@@ -1,0 +1,16 @@
+History Insights 观看报告 · 许可说明
+
+本工具由 History Insights 提供，随仓库一起分发，不含任何第三方商业组件。
+
+内置组件与许可：
+- Apache ECharts 5.5.0：Apache License 2.0，许可原文见 app\server\vendor\echarts.LICENSE
+- segmentit 2.0.3（中文分词）：MIT License，许可原文见 app\server\vendor\segmentit.LICENSE
+- Node.js（仅在「导出长图与 PDF」时调用，位于 node\node.exe）：MIT License，详见 https://nodejs.org/about/license
+
+隐私：
+- 观看历史文件只在你自己这台电脑上解析，不上传任何地方，关掉页面即丢弃。
+- 只有在你点击视频链接时，才会访问 bilibili.com。
+
+卸载：
+- 开始菜单「History Insights」→「卸载 History Insights」
+- 或「设置 → 应用 → 已安装的应用」里找到「History Insights 观看报告」卸载

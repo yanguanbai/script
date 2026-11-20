@@ -7,3 +7,12 @@
 # Python caches
 __pycache__/
 *.py[cod]
+
+tools/history-insights/tests/fixtures/*.json
+tools/history-insights/.export-tmp/
+
+# 单文件版是构建产物（build-standalone.mjs 生成），不跟着源码进仓库
+tools/history-insights/观看报告.html
+
+tools/history-insights/release/.stage/
+tools/history-insights/release/dist/

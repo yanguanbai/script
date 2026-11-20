@@ -39,6 +39,16 @@ The history panel supports ordinary keyword search and structured filters for wa
 
 Records are stored locally through the userscript manager and optional local IndexedDB storage. The history script also reads Bilibili pages and official endpoints when collecting or synchronizing history; local storage does not mean that the browser makes no network requests. This is not a cloud sync service. Clearing extension data, changing browser profiles, or uninstalling the manager can remove local records; export a JSON backup before migration or cleanup.
 
+## Reading Your Backup
+
+The exported JSON backup is itself a usable archive: every record carries a watch count, the last progress, and up to five snapshot timestamps. [History Insights](../../tools/history-insights/README.en.md) turns that file into an interactive report, entirely on your machine — no login, no uploads.
+
+Double-click `看我的观看历史.cmd` in the repository root: it starts the server, finds the newest backup on its own, and opens the report already loaded. Manually, run `node tools/history-insights/server.mjs` and click the `读最新备份` button (or pick the file yourself).
+
+It answers: what rhythm did my year follow (daily/monthly waveform, 24-hour × 7-day heatmap), where did my attention go (six content domains with share donut), what did I rewatch (creator leaderboard, most-watched videos, keyword nebula), and when was I most absorbed (peak day, highest rewatch count, earliest record).
+
+Measurements are snapshots: "cumulative watches" is a field carried by the backup, not the number of plays inside the selected range, and snapshots cannot reconstruct watch duration. Sample gallery: [docs/展示.md](../../tools/history-insights/docs/展示.md).
+
 ## Testing
 
 The repository keeps isolated Node.js checks under `tests/`. They exercise collection import, title correction, cold database handling, migration, and queue behavior. They do not replace real browser verification against the current Bilibili site.
