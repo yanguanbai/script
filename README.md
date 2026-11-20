@@ -4,6 +4,8 @@
 
 English version: [README.en.md](README.en.md)
 
+> **桌面上看自己的观看历史？** [History Insights 安装包（Windows，36 MB）](https://github.com/yanguanbai/script/releases/latest/download/HistoryInsights-Setup.exe) · [免安装便携版 / 全部版本](https://github.com/yanguanbai/script/releases/latest) —— 把「观看历史可回溯」导出的备份拖进去，就是一份本地生成的年度报告，数据不出本机。
+
 ## 脚本
 
 | 脚本 | 用途 | 版本 | 安装 |

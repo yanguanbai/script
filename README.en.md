@@ -4,6 +4,8 @@ Small browser userscripts for Bilibili. Each public script has its own source fi
 
 中文入口：[README.md](README.md)
 
+> **Want a desktop report of your own watch history?** [History Insights installer (Windows, 36 MB)](https://github.com/yanguanbai/script/releases/latest/download/HistoryInsights-Setup.exe) · [portable zip / all releases](https://github.com/yanguanbai/script/releases/latest) - drop in the backup exported by the Watch History script and get a locally generated annual report. Data never leaves the machine.
+
 ## Public Scripts
 
 | Script | What it does | Version | Documentation | Install |
