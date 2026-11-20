@@ -53,12 +53,26 @@ async function pickBackupDir() {
   const resultFile = join(tmpdir(), `history-insights-pick-${Date.now()}.txt`);
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms',
+    'Add-Type -AssemblyName System.Drawing',
+    // 先起一个透明置顶的小窗口当父窗口，否则选择框会弹在浏览器窗口后面，看起来像没反应
+    '$frame = New-Object System.Windows.Forms.Form',
+    "$frame.FormBorderStyle = 'None'",
+    '$frame.ShowInTaskbar = $false',
+    '$frame.TopMost = $true',
+    '$frame.Opacity = 0',
+    '$frame.Size = New-Object System.Drawing.Size(1, 1)',
+    "$frame.StartPosition = 'Manual'",
+    '$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds',
+    '$frame.Location = New-Object System.Drawing.Point([int]($bounds.X + $bounds.Width / 2), [int]($bounds.Y + $bounds.Height / 2))',
+    '$frame.Show()',
+    '$frame.Activate()',
     '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
     "$dialog.Description = '选择存放观看历史备份的文件夹'",
     '$dialog.ShowNewFolderButton = $false',
-    'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {',
+    'if ($dialog.ShowDialog($frame) -eq [System.Windows.Forms.DialogResult]::OK) {',
     `  [IO.File]::WriteAllText('${resultFile.replace(/\\/g, '\\\\')}', $dialog.SelectedPath, (New-Object System.Text.UTF8Encoding($false)))`,
-    '}'
+    '}',
+    '$frame.Close()'
   ].join('; ');
   try {
     await execFileAsync('powershell.exe', ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 180000 });
