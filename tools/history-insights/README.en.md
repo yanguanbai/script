@@ -9,7 +9,7 @@ History Insights is a local viewing-history dashboard. It turns an exported back
 Requires Node.js 18 or later. You do not need to run `npm install`.
 
 1. Open a terminal at the repository root.
-**Install the release (no terminal, no Node)** : double-click `release/dist/HistoryInsights-Setup.exe`; it installs into the user profile, adds a Start-menu and desktop shortcut, registers a normal uninstall entry, and ships a portable Node so image / PDF export works out of the box. Windows SmartScreen may warn because the build is unsigned - choose *More info -> Run anyway*.
+**Install the release (no terminal, no Node)** : grab `HistoryInsights-Setup.exe` from [Releases](https://github.com/yanguanbai/script/releases/latest) (or the `-portable.zip` on the same page if you prefer no installer) and double-click it; it installs into the location you pick, adds a Start-menu and desktop shortcut, registers a normal uninstall entry, and ships a portable Node so image / PDF export works out of the box. Windows SmartScreen may warn because the build is unsigned - choose *More info -> Run anyway*.
 
 **You choose where it goes**: the first install opens a folder picker pre-filled with `%LOCALAPPDATA%\Programs\HistoryInsights` - confirm it, or pick any parent folder (say `D:\Apps`) and it creates a `HistoryInsights` subfolder inside, so nothing is scattered into the folder you picked; cancelling writes nothing. Later upgrades reuse that location without asking again. Scripted installs can pass the full path: `-Dir "D:\Apps\HistoryInsights"`.
 

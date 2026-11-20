@@ -1,6 +1,6 @@
 # History Insights（本地观看历史分析）
 
-[English](README.en.md)
+[English](README.en.md) · **[下载最新版](https://github.com/yanguanbai/script/releases/latest)**（Windows 安装包 / 便携包，自带运行时，不用装 Node）
 
 History Insights 是一个本地运行的观看历史分析页面。它把导出的观看历史整理成日期趋势、观看时段、关键词、内容类型、UP 主和高频视频视图。分析在浏览器 Worker 中运行，不需要登录、API Key 或分析服务。
 
@@ -18,7 +18,7 @@ History Insights 是一个本地运行的观看历史分析页面。它把导出
 
 **一、装发行版（不想碰命令行就用这个）**
 
-1. 双击 `release/dist/HistoryInsights-Setup.exe`（仓库里没有就按下面「打发行包」自己生成一次）。
+1. 到 [Releases](https://github.com/yanguanbai/script/releases/latest) 下载 `HistoryInsights-Setup.exe`（约 36 MB，自带节点运行时，别人的电脑也不用装 Node），双击安装。不想安装就用同一页的 `HistoryInsights-*-portable.zip`，解压后双击 `打开报告.cmd`。
 2. 装完桌面和开始菜单会多一个「观看报告」，双击它：先确保本地服务在跑（后台起一个，窗口不弹），再用浏览器打开 `http://127.0.0.1:4173`——「读最新备份 / 指定备份文件夹 / 导出长图 / 打印 PDF」都要靠这个服务，所以入口一律走服务，不直接开 html。把备份拖进去就出报告。
 
    注意：`app\report.html` 是单文件离线版，直接双击也能看，但页面上「读最新备份」「指定备份文件夹」「导出」会被禁用并提示——没有服务就没有这些能力。
@@ -40,7 +40,11 @@ History Insights 是一个本地运行的观看历史分析页面。它把导出
 
 两种装法都不需要 `npm install`（依赖已经放进 `vendor/`）。
 
-**打发行包**：在仓库根目录执行 `pwsh -File tools/history-insights/release/build.ps1`，产物在 `release/dist/`：`HistoryInsights-Setup.exe`（自解压安装包，约 36 MB）和 `HistoryInsights-1.0.0-portable.zip`（解压即用，不写注册表）。
+**发行与更新（维护者用）**：安装包不在仓库里，而是挂在 GitHub Releases 上，`release/dist/` 已在 `.gitignore` 里。发新版本三步：
+
+1. 在仓库根目录执行 `pwsh -File tools/history-insights/release/build.ps1`，产物落到 `release/dist/`：`HistoryInsights-Setup.exe`（自解压安装包，约 36 MB）和 `HistoryInsights-<版本>-portable.zip`（解压即用，不写注册表）。
+2. 提交代码并打标签：`git tag -a v1.0.0 -m "History Insights 1.0.0"` → `git push origin main --tags`。
+3. 用标签建 Release，把两个产物作为 assets 传上去（`gh release create v1.0.0 release/dist/*.exe release/dist/*.zip`，没有 gh 就用网页「Attach binaries」）。
 
 导入：点「选文件」（按钮带「多选」标记）可以一次选好几份备份；想分批来就再点一次，新文件会**追加**进去，同名同大小的不重复读，记录级的重复也会自动合并——两次导出里都有的视频只算一条，快照取并集。也可以直接把多个文件拖进面板。导入之后可以选“全部、近 30 天、近 7 天”，或者自己指定开始/结束日期。页面有两套独立设计：亮色是纸本（无卡片、细墨线分节），暗色是观测台（玻璃面板与霓虹光阶），样张见 [docs/展示.md](docs/展示.md)。
 

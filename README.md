@@ -22,7 +22,7 @@ English version: [README.en.md](README.en.md)
 
 只想起停服务：双击根的 `服务启停.cmd`，一次启动（会在浏览器打开报告），再双击就停掉。
 
-两种装法：不想碰命令行的直接装 `tools/history-insights/release/dist/HistoryInsights-Setup.exe`（自带便携 Node，装完桌面有「观看报告」图标，可正常卸载）；想改代码的就用上面这条命令行的路子，依赖已在 `vendor/`，不需要 `npm install`。
+两种装法：不想碰命令行的到 [Releases](https://github.com/yanguanbai/script/releases/latest) 下载 `HistoryInsights-Setup.exe`（自带便携 Node，装完桌面有「观看报告」图标，可正常卸载）；想改代码的就用上面这条命令行的路子，依赖已在 `vendor/`，不需要 `npm install`。
 
 升级：新版 Setup 双击覆盖旧版就行——它会先停掉还在跑的服务、整个重建程序目录（旧文件不会残留），版本号写进 `version.txt`；你自己指定的备份目录保持不变。
 
