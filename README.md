@@ -56,4 +56,4 @@ English version: [README.en.md](README.en.md)
 
 ## 许可证
 
-本仓库采用 [MIT 许可证](LICENSE)。三个公开脚本在头部各自声明 @license MIT；	ools/history-insights/ 及其构建、安装脚本同样适用 MIT。endor/ 下的第三方文件保持原许可证：ECharts（Apache-2.0）、segmentit（MIT），详见 [发行来源说明](DISTRIBUTION.md)。
+本仓库采用 [MIT 许可证](LICENSE)。三个公开脚本在头部各自声明 `@license MIT`；`tools/history-insights/` 及其构建、安装脚本同样适用 MIT。`vendor/` 下的第三方文件保持原许可证：ECharts（Apache-2.0）、segmentit（MIT），详见 [发行来源说明](DISTRIBUTION.md)。

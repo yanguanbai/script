@@ -45,6 +45,9 @@ jobs:
           done
           exit $fail
 
+      - name: Docs control-character check
+        run: node tools/history-insights/tests/check-docs.mjs
+
       - name: History script tests
         run: node --test src/bilibili-history/tests/*.test.cjs
 
