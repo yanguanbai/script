@@ -54,6 +54,6 @@ English version: [README.en.md](README.en.md)
 
 当前仓库保留原仓库历史；键盘控制脚本为维护者私用，不属于公开发行集合。`tools/` 里是本地分析工具 History Insights，独立运行，不随脚本一起安装。
 
-## 许可证与来源
+## 许可证
 
-键盘控制脚本是维护者私用内容，不属于本仓库的公开发行集合。其他三个脚本暂不声明仓库级统一许可证；各脚本保留原有元数据，详见 [发行来源说明](DISTRIBUTION.md)。
+本仓库采用 [MIT 许可证](LICENSE)。三个公开脚本在头部各自声明 @license MIT；	ools/history-insights/ 及其构建、安装脚本同样适用 MIT。endor/ 下的第三方文件保持原许可证：ECharts（Apache-2.0）、segmentit（MIT），详见 [发行来源说明](DISTRIBUTION.md)。

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Syntax check (all JS / MJS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 只查语法，不执行；单文件构建产物不在仓库里，用 --check 扫源码即可。
+          # vendor/ 是第三方原样文件（1MB ECharts + 3.8MB segmentit），不在检查范围内。
+          git ls-files '*.js' '*.mjs' '*.cjs' ':!tools/history-insights/vendor/*' | while read -r f; do
+            node --check "$f"
+          done
+
+      - name: Userscript metadata sanity
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in src/*/*.user.js; do
+            for key in '@name' '@version' '@license' '@downloadURL' '@updateURL'; do
+              if ! grep -q -- "$key" "$f"; then
+                echo "::error file=$f::missing metadata $key"
+                fail=1
+              fi
+            done
+          done
+          exit $fail
+
+      - name: History script tests
+        run: node --test src/bilibili-history/tests/*.test.cjs
+
+      - name: Analysis engine tests
+        run: node --test tools/history-insights/tests/analytics.test.mjs
+
+      - name: Page wiring check
+        run: node tools/history-insights/tests/wiring-check.mjs

@@ -37,6 +37,6 @@ The scripts store preferences and records locally through the userscript manager
 - `tools/` contains History Insights, a local analysis tool that runs on its own and is not installed with the userscripts.
 - The keyboard-control script is private and excluded from the public release set.
 
-## License and Source Notes
+## License
 
-The repository does not declare one license for every file. Existing per-script metadata is preserved while authorship and third-party source checks are completed. See [DISTRIBUTION.md](DISTRIBUTION.md).
+This repository is released under the [MIT license](LICENSE). The three public userscripts also declare `@license MIT` in their metadata, and `tools/history-insights/` (page, build and installer scripts included) falls under the same MIT terms. Bundled third-party files keep their own licenses: ECharts (Apache-2.0) and segmentit (MIT). Source notes and the verification checklist are in [DISTRIBUTION.md](DISTRIBUTION.md).
