@@ -296,7 +296,12 @@ body {
 
 .console-main { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 
-.console-file { display: flex; align-items: center; gap: 14px; min-width: 240px; flex: 1 1 320px; }
+.console-file {
+  display: flex; align-items: center; gap: 14px 16px; flex: 1 1 420px; min-width: 0; flex-wrap: wrap;
+}
+
+/* 文件名/说明这一块必须有个实实在在的宽度下限，否则在窄窗口或高缩放下会被压成一个字一行（竖排）。 */
+.file-copy { flex: 1 1 240px; min-width: 190px; }
 
 .upload-tile {
   position: relative; flex: 0 0 auto;
@@ -308,7 +313,7 @@ body {
 }
 .tile-label { font-size: 12.5px; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
 .tile-tag {
-  position: absolute; top: -8px; right: -10px;
+  position: static;
   font-size: 10.5px; line-height: 1.1; padding: 3px 6px; border-radius: 999px;
   background: var(--accent-bright); color: var(--bg); font-weight: 700; letter-spacing: .02em;
   white-space: nowrap; box-shadow: 0 1px 4px rgba(0,0,0,.35);
@@ -323,13 +328,13 @@ html[data-palette="paper"] .tile-tag { background: var(--ink-strong, #2f2d25); c
 .upload-tile svg { width: 22px; height: 22px; }
 .upload-tile input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 
-.file-copy { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 3px; }
+.file-copy { display: flex; flex-direction: column; gap: 3px; }
 .file-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .file-line strong {
   font-family: var(--font-mono); font-size: 13.5px; font-weight: 700; color: var(--text-strong);
   /* 文件名必须给个下限：overflow-wrap:anywhere 会让它在被挤压时把 min-content 算成一个字，
      结果长文件名变成竖着一列一个字母（超宽窗口 / 高缩放下必现）。 */
-  flex: 1 1 auto; min-width: 12em;
+  flex: 0 1 auto; min-width: 0;
   overflow-wrap: anywhere;
 }
 .file-copy small { font-size: 12px; line-height: 1.55; color: var(--muted); overflow-wrap: anywhere; }

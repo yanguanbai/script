@@ -34,7 +34,7 @@ if (-not $Dir -and -not $NoAsk) {
     Add-Type -AssemblyName System.Windows.Forms
     New-Item -ItemType Directory -Force $Defaults | Out-Null
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = '选择 History Insights 的安装位置。直接用默认目录就点「确定」。'
+    $dialog.Description = '选一个放置位置：安装程序会在你选的文件夹里自动新建 HistoryInsights 子文件夹（文件夹不存在也会创建）；如果选的文件夹本身就叫 HistoryInsights，就直接装进去。想用默认位置，什么都不改直接点「确定」。'
     $dialog.SelectedPath = $Defaults
     $dialog.ShowNewFolderButton = $true
     $result = $dialog.ShowDialog()
@@ -45,8 +45,23 @@ if (-not $Dir -and -not $NoAsk) {
     # 选的是「父目录」：自动建一个 HistoryInsights 子目录，避免把文件直接铺在 D:\Apps 这种通用目录里。
     # 如果用户本身就是选中了某个名为 HistoryInsights 的目录，就按原样用。
     $picked = $dialog.SelectedPath.TrimEnd('\')
-    if ([IO.Path]::GetFileName($picked) -eq 'HistoryInsights') { $Dir = $picked }
-    else { $Dir = Join-Path $picked 'HistoryInsights' }
+    if (-not (Test-Path $picked)) { New-Item -ItemType Directory -Force $picked | Out-Null }
+    # 选完再明确告诉用户最终落点，避免"到底装到哪儿"的疑问
+    Add-Type -AssemblyName System.Windows.Forms
+    if ([IO.Path]::GetFileName($picked) -eq 'HistoryInsights') {
+      $Dir = $picked
+      $note = '（这个文件夹本身就叫 HistoryInsights，直接装在里面。）'
+    } else {
+      $Dir = Join-Path $picked 'HistoryInsights'
+      $note = '（你选的是「' + (Split-Path $picked -Leaf) + '」，程序会在它下面新建 HistoryInsights 子文件夹，所有文件都放进去。这个文件夹本来不存在也可以，会自动创建。）'
+    }
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+      ('将安装到：' + $Dir + "`n`n" + $note),
+      '确认安装位置', [System.Windows.Forms.MessageBoxButtons]::OKCancel, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::OK) {
+      Write-Host '已取消安装，没有写入任何文件。'
+      exit 1
+    }
   } catch {
     Write-Host '无法弹出目录选择框，改用默认位置。'
   }
