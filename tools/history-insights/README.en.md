@@ -11,7 +11,7 @@ Requires Node.js 18 or later. You do not need to run `npm install`.
 1. Open a terminal at the repository root.
 **Install the release (no terminal, no Node)** : double-click `release/dist/HistoryInsights-Setup.exe`; it installs into the user profile, adds a Start-menu and desktop shortcut, registers a normal uninstall entry, and ships a portable Node so image / PDF export works out of the box. Windows SmartScreen may warn because the build is unsigned - choose *More info -> Run anyway*.
 
-**You choose where it goes**: the first install opens a folder picker pre-filled with `%LOCALAPPDATA%\Programs\HistoryInsights` - confirm it, or point it at any folder you like; cancelling writes nothing. Later upgrades reuse that location without asking again. Scripted installs can pass `-Dir "D:\Apps\HistoryInsights"`.
+**You choose where it goes**: the first install opens a folder picker pre-filled with `%LOCALAPPDATA%\Programs\HistoryInsights` - confirm it, or pick any parent folder (say `D:\Apps`) and it creates a `HistoryInsights` subfolder inside, so nothing is scattered into the folder you picked; cancelling writes nothing. Later upgrades reuse that location without asking again. Scripted installs can pass the full path: `-Dir "D:\Apps\HistoryInsights"`.
 
 The installed shortcut launches the local server first (silently, in the background), then opens `http://127.0.0.1:4173`. That is deliberate: *read newest backup*, *choose backup folder*, *export image* and *print / PDF* all need the local service. If you open `app\report.html` directly instead, those controls are disabled with a note - it is the offline single-file build.
 

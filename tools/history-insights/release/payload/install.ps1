@@ -42,7 +42,11 @@ if (-not $Dir -and -not $NoAsk) {
       Write-Host '已取消安装，没有写入任何文件。'
       exit 1
     }
-    $Dir = $dialog.SelectedPath
+    # 选的是「父目录」：自动建一个 HistoryInsights 子目录，避免把文件直接铺在 D:\Apps 这种通用目录里。
+    # 如果用户本身就是选中了某个名为 HistoryInsights 的目录，就按原样用。
+    $picked = $dialog.SelectedPath.TrimEnd('\')
+    if ([IO.Path]::GetFileName($picked) -eq 'HistoryInsights') { $Dir = $picked }
+    else { $Dir = Join-Path $picked 'HistoryInsights' }
   } catch {
     Write-Host '无法弹出目录选择框，改用默认位置。'
   }

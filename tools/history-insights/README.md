@@ -26,7 +26,7 @@ History Insights 是一个本地运行的观看历史分析页面。它把导出
 
 安装包内置了单文件网页版和便携 Node，所以别人的电脑不用装 Node、不用开终端。装在当前用户目录，不弹管理员权限。
 
-**装在哪里由你选**：首次安装会弹一个目录选择框，预选的是 `%LOCALAPPDATA%\Programs\HistoryInsights`，直接点「确定」就用它；想放 D 盘就换成自己的文件夹，点「取消」则什么都不写。之后升级会自动沿用上次那个位置，不再重复问。命令行也能指定：`install.ps1 -Dir "D:\Apps\HistoryInsights"`。
+**装在哪里由你选**：首次安装会弹一个目录选择框，预选的是 `%LOCALAPPDATA%\Programs\HistoryInsights`，直接点「确定」就用它；想放 D 盘就选一个父目录（例如 `D:\Apps`），它会自动在下面建 `HistoryInsights` 子目录，不会把文件铺进你选的目录里；点「取消」则什么都不写。之后升级会自动沿用上次那个位置，不再重复问。命令行也能指定完整路径：`install.ps1 -Dir "D:\Apps\HistoryInsights"`。
 
 **升级就再装一次**：新版 Setup 直接双击覆盖旧版即可。安装时会先按端口（4173）停掉正在跑的服务，然后整个重建 `app` 目录——旧版本留下的文件（包括以前叫 `观看报告.html` 的那份）都会被清掉，不会出现新旧混杂。程序目录里会写一个 `version.txt`，「设置 → 应用」里的版本号也会跟着更新。**你自己指定的备份目录（`%APPDATA%\HistoryInsights\config.json`）不受影响**，装完还是原来那个目录。
 
