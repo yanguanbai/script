@@ -2,6 +2,9 @@
 
 [![CI](https://github.com/yanguanbai/script/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yanguanbai/script/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-16705a)](LICENSE) [![Release](https://img.shields.io/github/v/release/yanguanbai/script?label=release)](https://github.com/yanguanbai/script/releases/latest)
 
+![Bart's userscripts: three Bilibili scripts plus a desktop watch-history report that runs locally](docs/banner.png#gh-light-mode-only)
+![Bart's userscripts: three Bilibili scripts plus a desktop watch-history report that runs locally](docs/banner-dark.png#gh-dark-mode-only)
+
 Small browser userscripts for Bilibili. Each public script has its own source file, version, documentation, and direct installation link.
 
 中文入口：[README.md](README.md)

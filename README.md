@@ -2,6 +2,9 @@
 
 [![CI](https://github.com/yanguanbai/script/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yanguanbai/script/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-16705a)](LICENSE) [![Release](https://img.shields.io/github/v/release/yanguanbai/script?label=release)](https://github.com/yanguanbai/script/releases/latest)
 
+![Bart 的用户脚本：三个 Bilibili 用户脚本，外加一个在本机跑的观看报告桌面工具](docs/banner.png#gh-light-mode-only)
+![Bart 的用户脚本：三个 Bilibili 用户脚本，外加一个在本机跑的观看报告桌面工具](docs/banner-dark.png#gh-dark-mode-only)
+
 面向 Bilibili 的浏览器用户脚本。项目按可独立安装和维护的脚本划分；本仓库继续作为总目录和发行源，不需要额外克隆子仓库。
 
 English version: [README.en.md](README.en.md)
@@ -57,6 +60,8 @@ English version: [README.en.md](README.en.md)
 脚本以独立版本号维护，完整源码保存在各自 `src/` 子目录。上表 Raw 地址可直接安装；Tampermonkey 或 Violentmonkey 会按脚本元数据检查更新。Greasy Fork 上的安装和更新仍由 Greasy Fork 管理。
 
 上表「版本」列不手写：`node tools/sync-readme-versions.mjs` 从每个脚本头部的 `@version` 回填，改了脚本版本跑一次就行；CI 会带上 `--check` 校验，两边不一致直接失败。
+
+头图也不是手截的：改 `docs/banner.html` 的文案后跑 `node docs/build-banner.mjs`，无头 Chrome 会重出 `docs/banner.png` 与 2x 版。
 
 当前仓库保留原仓库历史；键盘控制脚本为维护者私用，不属于公开发行集合。`tools/` 里是本地分析工具 History Insights，独立运行，不随脚本一起安装。
 

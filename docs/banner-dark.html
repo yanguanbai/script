@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>banner dark</title>
+<style>
+  @page { margin: 0 }
+  * { margin: 0; padding: 0; box-sizing: border-box }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background:
+      radial-gradient(880px 520px at 8% -12%, rgba(34,180,140,.20), transparent 62%),
+      radial-gradient(700px 460px at 96% 108%, rgba(34,180,140,.12), transparent 60%),
+      #0a1210;
+    color: #e9f2ee;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    position: absolute; inset: 0; padding: 56px 72px 50px;
+    display: grid; grid-template-columns: 1fr 392px; gap: 54px;
+  }
+  .left { display: flex; flex-direction: column; justify-content: space-between }
+  .kicker {
+    font-size: 13px; letter-spacing: .26em; text-transform: uppercase;
+    color: #7ea79a; font-weight: 600;
+  }
+  h1 {
+    font-size: 72px; line-height: 1.16; font-weight: 700;
+    margin: 26px 0 0; letter-spacing: -.01em;
+    background: linear-gradient(96deg, #eafff7 8%, #a7f3d0 58%, #22b48c 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .glow { height: 2px; width: 220px; margin: 24px 0 18px;
+    background: linear-gradient(90deg, #22b48c, rgba(34,180,140,0)); }
+  .lead { font-size: 21px; line-height: 1.72; color: #b9cdc5; max-width: 556px }
+  .lead em { font-style: normal; color: #7ff0c8; font-weight: 700 }
+  .chips { display: flex; flex-wrap: wrap; margin-top: 4px }
+  .chip { font-size: 12.5px; color: #93b3a8; letter-spacing: .06em }
+  .chip + .chip::before { content: "·"; margin: 0 11px; color: #4d6b62 }
+  .foot { font-size: 12px; color: #5f8177; letter-spacing: .14em; margin-top: 14px }
+  .right {
+    border-left: 1px solid rgba(255,255,255,.09); padding-left: 34px;
+    display: flex; flex-direction: column; justify-content: center; gap: 22px;
+  }
+  .panel-title { font-size: 12px; letter-spacing: .22em; color: #7ea79a; font-weight: 600; text-transform: uppercase }
+  .panel-title b { color: #7ff0c8 }
+  svg.trend { width: 100%; height: 92px; display: block; filter: drop-shadow(0 0 10px rgba(34,180,140,.55)) }
+  .heat { display: grid; grid-template-columns: repeat(14, 1fr); gap: 5px }
+  .cell { height: 15px; background: #0d1c17 }
+  .caption { font-size: 11.5px; color: #6d8f84; letter-spacing: .1em }
+  .big { font-size: 33px; line-height: 1.34; font-weight: 700; color: #f0fbf6; letter-spacing: .01em }
+  .big span { color: #7ff0c8 }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="left">
+    <div>
+      <div class="kicker">Bilibili Userscripts · 用户脚本</div>
+      <h1>Bart 的用户脚本</h1>
+      <div class="glow"></div>
+      <div class="lead">
+        观看历史、浏览足迹、干净链接：三个 Bilibili 用户脚本，<br>
+        外加一个<em>在本机跑</em>的观看报告桌面工具。数据不出本机。
+      </div>
+    </div>
+    <div>
+      <div class="chips">
+        <span class="chip">本地记录</span><span class="chip">不上传</span><span class="chip">无需登录</span><span class="chip">MIT 许可</span><span class="chip">Windows 10 / 11</span>
+      </div>
+      <div class="foot">GITHUB.COM/YANGUANBAI/SCRIPT</div>
+    </div>
+  </div>
+  <div class="right">
+    <div class="panel-title">观看报告 · <b>History Insights</b></div>
+    <div>
+      <svg class="trend" viewBox="0 0 358 92" preserveAspectRatio="none">
+        <polygon fill="url(#g)" opacity=".9" points="0,92 0,78 27.5,68 55,72 82.5,56 110,60 137.5,46 165,52 192.5,40 220,44 247.5,32 275,36 302.5,22 330,28 357.5,14 357.5,92"></polygon>
+        <defs>
+          <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#22b48c" stop-opacity=".55"></stop>
+            <stop offset="1" stop-color="#22b48c" stop-opacity="0"></stop>
+          </linearGradient>
+        </defs>
+        <polyline fill="none" stroke="#a7f3d0" stroke-width="2.2" points="0,78 27.5,68 55,72 82.5,56 110,60 137.5,46 165,52 192.5,40 220,44 247.5,32 275,36 302.5,22 330,28 357.5,14"></polyline>
+      </svg>
+      <div class="heat" id="heat"></div>
+      <div class="caption" style="margin-top:10px">按日波形 · 24 小时 × 7 天热图</div>
+    </div>
+    <div>
+      <div class="big">不进浏览器沙盒，<br>直接读你的<span>备份</span>。</div>
+      <div class="caption" style="margin-top:10px">本地服务 · 无头渲染导出 · 可打印 A4</div>
+    </div>
+  </div>
+</div>
+<script>
+  let s = 20261120;
+  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const ramp = ['#0d1c17', '#0f3f33', '#157a63', '#22b48c', '#a7f3d0'];
+  const heat = document.getElementById('heat');
+  for (let i = 0; i < 14 * 7; i++) {
+    const r = rnd();
+    let idx = 0;
+    if (r > 0.94) idx = 4; else if (r > 0.82) idx = 3; else if (r > 0.62) idx = 2; else if (r > 0.34) idx = 1;
+    const d = document.createElement('div');
+    d.className = 'cell';
+    d.style.background = ramp[idx];
+    heat.appendChild(d);
+  }
+</script>
+</body>
+</html>

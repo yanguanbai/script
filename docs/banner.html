@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>banner</title>
+<style>
+  @page { margin: 0 }
+  * { margin: 0; padding: 0; box-sizing: border-box }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: #f4f1e8; color: #2f2d25;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .paper { position: absolute; inset: 0; border-top: 3px solid #2f2d25 }
+  .wrap {
+    position: absolute; inset: 0; padding: 58px 72px 52px;
+    display: grid; grid-template-columns: 1fr 392px; gap: 56px;
+  }
+  /* 左栏 */
+  .left { display: flex; flex-direction: column; justify-content: space-between }
+  .kicker {
+    font-size: 14px; letter-spacing: .28em; text-transform: uppercase;
+    color: #6b6553; font-weight: 600;
+  }
+  h1 {
+    font-family: "SimSun", "Songti SC", serif;
+    font-size: 74px; line-height: 1.12; letter-spacing: -.01em;
+    font-weight: 700; margin: 22px 0 0;
+  }
+  .rule { width: 100%; height: 1px; background: #cfc8b4; margin: 26px 0 20px }
+  .lead {
+    font-size: 21px; line-height: 1.75; color: #4a463a; max-width: 560px;
+  }
+  .lead em { font-style: normal; color: #16705a; font-weight: 700 }
+  .chips { display: flex; gap: 0; flex-wrap: wrap; margin-top: 4px }
+  .chip {
+    font-size: 13px; color: #5a5546; padding: 5px 0; letter-spacing: .04em;
+  }
+  .chip + .chip::before {
+    content: "·"; margin: 0 12px; color: #b4ac95;
+  }
+  .foot { font-size: 12px; color: #8a8474; letter-spacing: .12em }
+  /* 右栏 */
+  .right {
+    border-left: 1px solid #cfc8b4; padding-left: 34px;
+    display: flex; flex-direction: column; justify-content: center; gap: 22px;
+  }
+  .panel-title {
+    font-size: 12px; letter-spacing: .22em; color: #6b6553; font-weight: 600;
+    text-transform: uppercase;
+  }
+  .panel-title b { color: #16705a; }
+  svg.trend { width: 100%; height: 92px; display: block }
+  .heat { display: grid; grid-template-columns: repeat(14, 1fr); gap: 5px }
+  .cell { height: 15px; background: #eceee2 }
+  .caption { font-size: 11.5px; color: #8a8474; letter-spacing: .1em }
+  .big {
+    font-family: "SimSun", serif; font-size: 34px; color: #2f2d25; font-weight: 700;
+    letter-spacing: .02em;
+  }
+</style>
+</head>
+<body>
+<div class="paper"></div>
+<div class="wrap">
+  <div class="left">
+    <div>
+      <div class="kicker">Bilibili Userscripts · 用户脚本</div>
+      <h1>Bart&#8202;的用户脚本</h1>
+      <div class="rule"></div>
+      <div class="lead">
+        观看历史、浏览足迹、干净链接：三个 Bilibili 用户脚本，<br>
+        外加一个<em>在本机跑</em>的观看报告桌面工具。数据不出本机。
+      </div>
+    </div>
+    <div>
+      <div class="chips">
+        <span class="chip">本地记录</span><span class="chip">不上传</span><span class="chip">无需登录</span><span class="chip">MIT 许可</span><span class="chip">Windows 10 / 11</span>
+      </div>
+      <div class="foot" style="margin-top:14px">GITHUB.COM/YANGUANBAI/SCRIPT</div>
+    </div>
+  </div>
+  <div class="right">
+    <div class="panel-title">观看报告 · <b>History Insights</b></div>
+    <div>
+      <svg class="trend" viewBox="0 0 358 92" preserveAspectRatio="none">
+        <polygon fill="#cfe0d3" opacity=".75" points="0,92 0,78 27.5,68 55,72 82.5,56 110,60 137.5,46 165,52 192.5,40 220,44 247.5,32 275,36 302.5,22 330,28 357.5,14 357.5,92"></polygon>
+        <polyline fill="none" stroke="#16705a" stroke-width="2.4" points="0,78 27.5,68 55,72 82.5,56 110,60 137.5,46 165,52 192.5,40 220,44 247.5,32 275,36 302.5,22 330,28 357.5,14"></polyline>
+      </svg>
+      <div class="heat" id="heat"></div>
+      <div class="caption" style="margin-top:10px">按日波形 · 24 小时 × 7 天热图</div>
+    </div>
+    <div>
+      <div class="big">不进浏览器沙盒，<br>直接读你的备份。</div>
+      <div class="caption" style="margin-top:10px">本地服务 · 无头渲染导出 · 可打印 A4</div>
+    </div>
+  </div>
+</div>
+<script>
+  // 确定性伪随机，保证每次出图一致
+  let s = 20261120;
+  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const ramp = ['#eceee2', '#cfe0d3', '#a3cbb6', '#63a98e', '#16705a'];
+  const heat = document.getElementById('heat');
+  for (let i = 0; i < 14 * 7; i++) {
+    const r = rnd();
+    let idx = 0;
+    if (r > 0.94) idx = 4; else if (r > 0.82) idx = 3; else if (r > 0.62) idx = 2; else if (r > 0.34) idx = 1;
+    const d = document.createElement('div');
+    d.className = 'cell';
+    d.style.background = ramp[idx];
+    heat.appendChild(d);
+  }
+</script>
+</body>
+</html>
