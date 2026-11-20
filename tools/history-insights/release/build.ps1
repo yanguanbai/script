@@ -2,7 +2,7 @@
 # 用法（在仓库根目录）：powershell -ExecutionPolicy Bypass -File tools\history-insights\release\build.ps1
 param(
   [switch]$SkipNode,
-  [string]$Version = '1.0.0'
+  [string]$Version = '1.0.1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -117,3 +117,4 @@ $exe = Get-Item (Join-Path $dist 'HistoryInsights-Setup.exe') -ErrorAction Silen
 if (-not $exe) { throw '安装包生成失败' }
 Write-Host ('完成：' + $exe.FullName + '（' + [Math]::Round($exe.Length / 1MB, 1) + ' MB）')
 Write-Host ('便携包：' + (Join-Path $dist "HistoryInsights-$Version-portable.zip"))
+

@@ -4,7 +4,7 @@
 param(
   [string]$Source = $PSScriptRoot,
   [string]$Dir = '',
-  [string]$Version = '1.0.0',
+  [string]$Version = '1.0.1',
   [switch]$NoShortcut,
   [switch]$NoLaunch,
   [switch]$NoAsk
@@ -179,3 +179,4 @@ if (-not $NoShortcut) {
 if ($oldVersion -and $oldVersion -ne $Version) { Write-Host ('已从 ' + $oldVersion + ' 升级到 ' + $Version) }
 Write-Host ('安装完成。安装位置：' + $Dir)
 if (-not $NoLaunch) { Start-Process (Join-Path $Dir '打开报告.cmd') }
+
