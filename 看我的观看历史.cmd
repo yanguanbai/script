@@ -4,8 +4,13 @@ rem Keep this file ASCII-only: cmd reads batch files as GBK, so a Chinese path h
 cd /d "%~dp0tools\history-insights"
 
 where node >nul 2>&1
+if errorlevel 1 if exist "%ProgramFiles%\nodejs\node.exe" set "PATH=%ProgramFiles%\nodejs;%PATH%"
+where node >nul 2>&1
 if errorlevel 1 (
-  echo Node.js not found. Install it from https://nodejs.org and double-click this file again.
+  echo Node.js was not found on this computer.
+  echo Install the LTS build ^(https://nodejs.org/zh-cn/download^), or use the Setup.exe release
+  echo which ships its own Node runtime and needs nothing preinstalled.
+  start "" "https://nodejs.org/zh-cn/download"
   pause
   exit /b 1
 )
