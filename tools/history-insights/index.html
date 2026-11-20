@@ -67,7 +67,20 @@
             <small id="file-meta">点「选文件」可一次全选多份；想分批来就再点一次，新文件会追加进来并自动去重。也可以把几个文件一起拖进这个面板。</small>
           </div>
           <button id="load-latest" class="ghost-button" type="button" title="自动读取最新一份备份">读最新备份</button>
+          <button id="list-backups" class="ghost-button" type="button" title="列出本机扫到的所有备份，勾选要一起合并的那几份" hidden>本机备份 <span id="list-count">0</span></button>
           <button id="pick-dir" class="ghost-button" type="button" title="指定一个长期存放备份的文件夹，下次自动用">指定备份文件夹</button>
+        </div>
+        <div id="local-list" class="local-list" hidden>
+          <div class="local-list-head">
+            <strong>本机找到的备份</strong>
+            <small>默认勾最新的一份；日期不同的备份可以多勾几份一起合并，也可以一个都不勾。</small>
+          </div>
+          <div id="local-rows" class="local-rows" role="group" aria-label="本机备份列表"></div>
+          <div class="local-list-foot">
+            <button id="local-all" class="link-button" type="button">全选</button>
+            <button id="local-none" class="link-button" type="button">全不选</button>
+            <button id="local-load" class="primary-button" type="button" disabled>载入勾选的</button>
+          </div>
         </div>
         <div id="range-control" class="console-range" hidden>
           <div class="segmented" role="group" aria-label="快捷时间范围">

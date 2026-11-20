@@ -124,36 +124,125 @@ async function backupDirs() {
   return [...new Set([saved, ...defaultBackupDirs()].filter(Boolean))];
 }
 
-// 让用户选一个长期存放备份的文件夹（Windows 原生选择框），路径记进配置，下次自动用这个目录。
-async function pickBackupDir() {
+// 让用户选一个长期存放备份的文件夹，路径记进配置，下次自动用这个目录。
+// 用的是和「选文件」同一个资源管理器对话框（IFileDialog）的「选文件夹」模式：有地址栏、能直接粘路径，
+// 并且从当前找到备份的位置打开，不用在旧式树形框里一层层点。
+const pickScript = String.raw`
+$ErrorActionPreference = 'Stop'
+$code = @'
+using System;
+using System.Runtime.InteropServices;
+
+public class HiFolderPicker
+{
+    [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
+    private class FileOpenDialog { }
+
+    [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IFileDialog
+    {
+        [PreserveSig] int Show(IntPtr parent);
+        void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+        void SetFileTypeIndex(uint iFileType);
+        void GetFileTypeIndex(out uint piFileType);
+        void Advise(IntPtr pfde, out uint pdwCookie);
+        void Unadvise(uint dwCookie);
+        void SetOptions(uint fos);
+        void GetOptions(out uint pfos);
+        void SetDefaultFolder(IShellItem psi);
+        void SetFolder(IShellItem psi);
+        void GetFolder(out IShellItem ppsi);
+        void GetCurrentSelection(out IShellItem ppsi);
+        void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+        void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+        void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+        void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+        void GetResult(out IShellItem ppsi);
+        void AddPlace(IShellItem psi, int fdap);
+        void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+        void Close(int hr);
+        void SetClientGuid(ref Guid guid);
+        void ClearClientData();
+        void SetFilter(IntPtr pFilter);
+    }
+
+    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellItem
+    {
+        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+        void GetParent(out IShellItem ppsi);
+        void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+        void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+        void Compare(IShellItem psi, uint hint, out int piOrder);
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    private static extern void SHCreateItemFromParsingName(string pszPath, IntPtr pbc, [In] ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItem ppsi);
+
+    public static string Pick(string initial, string title)
+    {
+        IFileDialog dialog = (IFileDialog)new FileOpenDialog();
+        uint options;
+        dialog.GetOptions(out options);
+        // FOS_PICKFOLDERS(0x20) | FOS_FORCEFILESYSTEM(0x40) | FOS_PATHMUSTEXIST(0x800)
+        dialog.SetOptions(options | 0x20u | 0x40u | 0x800u);
+        if (title != null && title.Length > 0) dialog.SetTitle(title);
+        if (initial != null && initial.Length > 0)
+        {
+            try
+            {
+                Guid iid = typeof(IShellItem).GUID;
+                IShellItem folder;
+                SHCreateItemFromParsingName(initial, IntPtr.Zero, ref iid, out folder);
+                dialog.SetFolder(folder);
+                Marshal.ReleaseComObject(folder);
+            }
+            catch { }
+        }
+        if (dialog.Show(IntPtr.Zero) != 0)
+        {
+            Marshal.ReleaseComObject(dialog);
+            return null;
+        }
+        IShellItem result;
+        dialog.GetResult(out result);
+        string path = "";
+        if (result != null)
+        {
+            // SIGDN_FILESYSPATH
+            result.GetDisplayName(0x80058000u, out path);
+            Marshal.ReleaseComObject(result);
+        }
+        Marshal.ReleaseComObject(dialog);
+        return path;
+    }
+}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+$path = [HiFolderPicker]::Pick($env:HI_PICK_INIT, $env:HI_PICK_TITLE)
+if ($path) { [IO.File]::WriteAllText($env:HI_PICK_OUT, $path, (New-Object System.Text.UTF8Encoding($false))) }
+`;
+
+async function pickBackupDir(initialDir) {
   if (process.platform !== 'win32') throw new Error('这个按钮目前只在 Windows 上可用，其他系统把目录填进配置文件的 backupDir 即可');
-  const resultFile = join(tmpdir(), `history-insights-pick-${Date.now()}.txt`);
-  const script = [
-    'Add-Type -AssemblyName System.Windows.Forms',
-    'Add-Type -AssemblyName System.Drawing',
-    // 先起一个透明置顶的小窗口当父窗口，否则选择框会弹在浏览器窗口后面，看起来像没反应
-    '$frame = New-Object System.Windows.Forms.Form',
-    "$frame.FormBorderStyle = 'None'",
-    '$frame.ShowInTaskbar = $false',
-    '$frame.TopMost = $true',
-    '$frame.Opacity = 0',
-    '$frame.Size = New-Object System.Drawing.Size(1, 1)',
-    "$frame.StartPosition = 'Manual'",
-    '$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds',
-    '$frame.Location = New-Object System.Drawing.Point([int]($bounds.X + $bounds.Width / 2), [int]($bounds.Y + $bounds.Height / 2))',
-    '$frame.Show()',
-    '$frame.Activate()',
-    '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
-    "$dialog.Description = '选择存放观看历史备份的文件夹'",
-    '$dialog.ShowNewFolderButton = $false',
-    'if ($dialog.ShowDialog($frame) -eq [System.Windows.Forms.DialogResult]::OK) {',
-    `  [IO.File]::WriteAllText('${resultFile.replace(/\\/g, '\\\\')}', $dialog.SelectedPath, (New-Object System.Text.UTF8Encoding($false)))`,
-    '}',
-    '$frame.Close()'
-  ].join('; ');
+  const stamp = Date.now();
+  const resultFile = join(tmpdir(), `history-insights-pick-${stamp}.txt`);
+  const scriptFile = join(tmpdir(), `history-insights-pick-${stamp}.ps1`);
+  await writeFile(scriptFile, `\uFEFF${pickScript}`, 'utf8');
   try {
-    await execFileAsync('powershell.exe', ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 180000 });
-  } catch { /* 用户点取消或窗口被关掉，当作没选 */ }
+    await execFileAsync('powershell.exe', ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], {
+      timeout: 300000,
+      env: {
+        ...process.env,
+        HI_PICK_INIT: initialDir || '',
+        HI_PICK_TITLE: '选择存放观看历史备份的文件夹',
+        HI_PICK_OUT: resultFile
+      }
+    });
+  } catch { /* 用户点取消或窗口被关掉，当作没选 */ } finally {
+    await rm(scriptFile, { force: true }).catch(() => {});
+  }
   const chosen = await readFile(resultFile, 'utf8').catch(() => '');
   await rm(resultFile, { force: true }).catch(() => {});
   return chosen.trim();
@@ -183,6 +272,33 @@ async function findLatestBackup() {
     if (best) return best;
   }
   return null;
+}
+
+// 扫到的所有备份（新的在前），给「本机文件」那张勾选表用。
+async function listBackups() {
+  const dirs = await backupDirs();
+  const seen = new Set();
+  const items = [];
+  for (let i = 0; i < backupPatterns.length; i += 1) {
+    const pattern = backupPatterns[i];
+    const loose = i > 0;
+    for (const dir of dirs) {
+      if (loose && isBrowserDir(dir)) continue;
+      let entries;
+      try { entries = await readdir(dir, { withFileTypes: true }); } catch { continue; }
+      for (const entry of entries) {
+        if (!entry.isFile() || !pattern.test(entry.name)) continue;
+        const file = join(dir, entry.name);
+        if (seen.has(file)) continue;
+        try {
+          const info = await stat(file);
+          seen.add(file);
+          items.push({ file, name: entry.name, dir, size: info.size, mtimeMs: info.mtimeMs });
+        } catch { /* 读不到就跳过 */ }
+      }
+    }
+  }
+  return items.sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
 function openBrowser(url) {
@@ -318,10 +434,13 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  // 弹一个原生文件夹选择框，选完就记下来
+  // 弹一个原生文件夹选择框，选完就记下来；打开时定位到当前备份所在的目录
   if (request.method === 'POST' && pathname === '/local/pick') {
     try {
-      const dir = await pickBackupDir();
+      const config = await readConfig();
+      const before = await findLatestBackup();
+      const startDir = (config.backupDir || '').trim() || (before ? before.dir : join(homedir(), 'Downloads'));
+      const dir = await pickBackupDir(startDir);
       if (!dir) {
         response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify({ ok: false, cancelled: true }));
         return;
@@ -333,6 +452,31 @@ const server = createServer(async (request, response) => {
     } catch (error) {
       response.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify({ ok: false, error: error.message }));
     }
+    return;
+  }
+
+  // 扫到的全部备份，给页面上的勾选表用
+  if (pathname === '/local/list.json') {
+    const items = await listBackups();
+    response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    response.end(JSON.stringify({ items, searched: await backupDirs() }));
+    return;
+  }
+
+  // 按路径取其中一份（只允许取扫描结果里出现过的文件，不做任意路径读取）
+  if (pathname === '/local/backup') {
+    const here = new URL(request.url, 'http://localhost');
+    const wanted = decodeURIComponent(here.searchParams.get('path') || '');
+    const items = await listBackups();
+    const hit = items.find(item => item.file === wanted);
+    if (!hit) { response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Not found'); return; }
+    response.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Backup-Name': encodeURIComponent(hit.name),
+      'X-Backup-Dir': encodeURIComponent(hit.dir)
+    });
+    response.end(await readFile(hit.file));
     return;
   }
 

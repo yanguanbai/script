@@ -6,6 +6,8 @@ const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matche
 const ui = {
   file: $('#history-file'), pick: $('#pick-file'), drop: $('#drop-zone'),
   fileLabel: $('#file-label'), fileBadge: $('#file-badge'), fileMeta: $('#file-meta'), loadLatest: $('#load-latest'), pickDir: $('#pick-dir'),
+  listBackups: $('#list-backups'), listCount: $('#list-count'), localList: $('#local-list'), localRows: $('#local-rows'),
+  localAll: $('#local-all'), localNone: $('#local-none'), localLoad: $('#local-load'),
   status: $('#status'), progress: $('#load-progress'),
   range: $('#range-control'), start: $('#date-start'), end: $('#date-end'), analyze: $('#analyze'),
   dashboard: $('#dashboard'), activeRange: $('#active-range'),
@@ -745,18 +747,125 @@ async function pickBackupDir() {
 ui.loadLatest?.addEventListener('click', () => loadLatestBackup());
 ui.pickDir?.addEventListener('click', () => pickBackupDir());
 
+// ---- 本机备份勾选表：扫到多份时默认只勾最新那份，想合并就多勾几份 ----
+let localBackups = [];
+
+function formatBackupMeta(item) {
+  const date = new Date(item.mtimeMs);
+  const stamp = Number.isNaN(date.getTime()) ? '' : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  const size = item.size >= 1024 * 1024 ? `${(item.size / 1024 / 1024).toFixed(1)} MB` : `${Math.round(item.size / 1024)} KB`;
+  return [stamp, size, item.dir].filter(Boolean).join(' · ');
+}
+
+function updateLocalCount() {
+  const checked = [...ui.localRows.querySelectorAll('input[type="checkbox"]:checked')].length;
+  ui.localLoad.disabled = checked === 0;
+  ui.localLoad.textContent = checked ? `载入勾选的 ${checked} 份` : '载入勾选的';
+}
+
+function renderLocalRows() {
+  ui.localRows.textContent = '';
+  localBackups.forEach((item, index) => {
+    const row = document.createElement('label');
+    row.className = 'local-row';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = String(index);
+    box.checked = index === 0;
+    box.addEventListener('change', updateLocalCount);
+    const name = document.createElement('span');
+    name.className = 'local-name';
+    name.textContent = item.name;
+    const meta = document.createElement('span');
+    meta.className = 'local-meta';
+    meta.textContent = formatBackupMeta(item);
+    row.append(box, name, meta);
+    ui.localRows.appendChild(row);
+  });
+  updateLocalCount();
+}
+
+async function refreshLocalBackups({ expand = false } = {}) {
+  let data;
+  try {
+    data = await (await fetch('/local/list.json', { cache: 'no-store' })).json();
+  } catch {
+    return false;
+  }
+  localBackups = Array.isArray(data?.items) ? data.items : [];
+  if (!localBackups.length) {
+    ui.listBackups.hidden = true;
+    ui.localList.hidden = true;
+    return false;
+  }
+  ui.listBackups.hidden = false;
+  ui.listCount.textContent = String(localBackups.length);
+  renderLocalRows();
+  if (expand) ui.localList.hidden = false;
+  return true;
+}
+
+// 把勾中的几份取回来，走和「选文件」完全一样的导入与合并路径
+async function loadCheckedBackups() {
+  const picked = [...ui.localRows.querySelectorAll('input[type="checkbox"]:checked')]
+    .map(box => localBackups[Number(box.value)])
+    .filter(Boolean);
+  if (!picked.length) { toast('先勾上至少一份备份再用这个按钮'); return; }
+  ui.localLoad.disabled = true;
+  showStatus(`正在读取 ${picked.length} 份本机备份…`);
+  const files = [];
+  for (const item of picked) {
+    try {
+      const response = await fetch(`/local/backup?path=${encodeURIComponent(item.file)}`, { cache: 'no-store' });
+      if (!response.ok) continue;
+      const blob = await response.blob();
+      const name = decodeURIComponent(response.headers.get('X-Backup-Name') || item.name);
+      files.push(new File([blob], name, { type: 'application/json', lastModified: Math.round(item.mtimeMs) }));
+    } catch {
+      /* 单份读失败就跳过，其余继续 */
+    }
+  }
+  if (!files.length) { showStatus('这几份备份都读不出来，可以改用「选文件」手动挑', true); updateLocalCount(); return; }
+  loadFiles(files, { replace: true });
+  updateLocalCount();
+  toast(files.length === 1 ? `已读入：${files[0].name}` : `已读入并合并 ${files.length} 份本机备份`);
+}
+
+ui.listBackups?.addEventListener('click', async () => {
+  if (!localBackups.length) await refreshLocalBackups();
+  if (!localBackups.length) { toast('还没扫到备份文件'); return; }
+  ui.localList.hidden = !ui.localList.hidden;
+});
+ui.localAll?.addEventListener('click', () => {
+  ui.localRows.querySelectorAll('input[type="checkbox"]').forEach(box => { box.checked = true; });
+  updateLocalCount();
+});
+ui.localNone?.addEventListener('click', () => {
+  ui.localRows.querySelectorAll('input[type="checkbox"]').forEach(box => { box.checked = false; });
+  updateLocalCount();
+});
+ui.localLoad?.addEventListener('click', () => loadCheckedBackups());
+// 点已导入文件的徽标，也能展开这张表，看看本机还有哪几份没勾上
+ui.fileBadge?.addEventListener('click', async () => {
+  const has = localBackups.length ? true : await refreshLocalBackups();
+  if (!has) { toast('这台机器上没扫到别的备份'); return; }
+  ui.localList.hidden = false;
+});
+
 // 直接双击 html（file://）时，读备份 / 指定目录 / 导出都依赖本地服务，先把入口说清楚，别点了才报错。
 const offlineMode = location.protocol === 'file:';
 if (offlineMode) {
   const note = $('#offline-note');
   if (note) note.hidden = false;
-  for (const id of ['load-latest', 'pick-dir', 'export-poster', 'print-report']) {
+  for (const id of ['load-latest', 'pick-dir', 'list-backups', 'export-poster', 'print-report']) {
     const el = $('#' + id);
     if (!el) continue;
     el.disabled = true;
     el.title = '离线打开：需要本地服务，请用桌面「观看报告」快捷方式';
   }
 }
+// 一进页面就把本机扫到的备份数标出来，多份的时候用户一眼能看到还能挑
+if (!offlineMode) refreshLocalBackups();
 ui.analyze.addEventListener('click', generate);
 $('#export-poster').addEventListener('click', () => requestExport('png'));
 $('#print-report').addEventListener('click', () => requestExport('pdf'));
