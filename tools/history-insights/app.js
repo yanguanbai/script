@@ -8,6 +8,7 @@ const ui = {
   fileLabel: $('#file-label'), fileBadge: $('#file-badge'), fileMeta: $('#file-meta'), loadLatest: $('#load-latest'), pickDir: $('#pick-dir'),
   listBackups: $('#list-backups'), listCount: $('#list-count'), localList: $('#local-list'), localRows: $('#local-rows'),
   localTitle: $('#local-title'), localScanned: $('#local-scanned'), localTest: $('#local-test-toggle'),
+  seriesGrid: $('#series-grid'), seriesCount: $('#series-count'), clearSeries: $('#clear-series'),
   localAll: $('#local-all'), localNone: $('#local-none'), localLoad: $('#local-load'),
   status: $('#status'), progress: $('#load-progress'),
   range: $('#range-control'), start: $('#date-start'), end: $('#date-end'), analyze: $('#analyze'),
@@ -28,6 +29,8 @@ let activeKeyword = '';
 let searchQuery = '';
 // 从「常看 UP 主」点进去的筛选记在这里，用来做「再点一次退出」和按下态
 let activeCreator = '';
+// 番剧 / 电视剧按整部筛选，和 UP 主一样点一下进、再点一下出
+let activeSeries = '';
 let sessionFiles = [];
 let printing = false;
 // 服务端导出 PDF 时以 ?print=1 打开本页，首轮分析完成后要按纸张宽度重画一次图表。
@@ -316,10 +319,11 @@ function renderNebula(terms) {
 
 function setKeywordStatus() {
   const parts = [];
+  if (activeSeries) parts.push(`整部「${activeSeries}」`);
   if (activeCreator) parts.push(`UP 主「${activeCreator}」`);
   if (activeKeyword) parts.push(`关键词 #${activeKeyword}`);
   ui.keywordStatus.textContent = parts.length ? `已锁定 ${parts.join(' + ')}` : '当前：全部关键词';
-  ui.clearKeyword.hidden = !activeKeyword && !activeCreator;
+  ui.clearKeyword.hidden = !activeKeyword && !activeCreator && !activeSeries;
 }
 function toggleKeyword(word) {
   activeKeyword = activeKeyword === word ? '' : word;
@@ -421,8 +425,84 @@ function toggleCreator(name) {
   toast(next ? `已只看「${next}」，再点一次退出` : '已退出 UP 主筛选');
 }
 
+/* ---------------------------------------------------------------- 番剧 / 电视剧 */
+function renderSeries(result) {
+  const items = Array.isArray(result.series) ? result.series : [];
+  ui.seriesGrid.replaceChildren();
+  const dramas = items.filter(item => item.kind === 'series').length;
+  const collections = items.length - dramas;
+  ui.seriesCount.textContent = items.length
+    ? [dramas ? `剧 ${dramas}` : '', collections ? `合集 ${collections}` : ''].filter(Boolean).join(' · ')
+    : '';
+  if (!items.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty-state';
+    empty.textContent = '这个时间范围内没有番剧、电视剧或合集记录';
+    ui.seriesGrid.append(empty);
+    return;
+  }
+  const max = Math.max(...items.map(item => item.watches), 1);
+  items.forEach(item => {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'series-card';
+    card.dataset.series = item.name;
+    card.setAttribute('aria-pressed', activeSeries === item.name ? 'true' : 'false');
+    card.title = activeSeries === item.name ? `取消对「${item.name}」的筛选` : `只看「${item.name}」的每一集`;
+
+    const head = document.createElement('div');
+    head.className = 'series-head';
+    const name = document.createElement('strong');
+    name.className = 'series-name';
+    name.textContent = item.name;
+    const type = document.createElement('span');
+    type.className = 'series-type';
+    type.textContent = item.kind === 'collection' ? '合集' : (item.type || '剧集');
+    head.append(name, type);
+
+    const meta = document.createElement('div');
+    meta.className = 'series-meta';
+    const progressText = item.kind === 'collection'
+      ? `合集里看了 ${item.parts} 条`
+      : item.type === '电影' ? '' : item.partTotal > item.parts ? `看了 ${item.parts} / ${item.partTotal} 集` : `看了 ${item.parts} 集`;
+    meta.textContent = [progressText, item.lastTs ? `最近 ${dayInput(item.lastTs)}` : ''].filter(Boolean).join(' · ');
+
+    const bar = document.createElement('div');
+    bar.className = 'series-meter';
+    const fill = document.createElement('i');
+    fill.style.width = `${Math.max(6, Math.round(item.watches / max * 100))}%`;
+    bar.append(fill);
+
+    const value = document.createElement('div');
+    value.className = 'series-value';
+    const total = document.createElement('strong');
+    total.textContent = `${numberFormat.format(item.watches)} 次`;
+    const label = document.createElement('small');
+    label.textContent = '整部累计';
+    value.append(total, label);
+
+    card.append(head, meta, bar, value);
+    card.addEventListener('click', () => toggleSeries(item.name));
+    ui.seriesGrid.append(card);
+  });
+}
+
+function toggleSeries(name) {
+  activeSeries = activeSeries === name ? '' : name;
+  document.querySelectorAll('#series-grid .series-card').forEach(card => {
+    const pressed = card.dataset.series === activeSeries;
+    card.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+    card.title = pressed ? `取消对「${card.dataset.series}」的筛选` : `只看「${card.dataset.series}」的每一集`;
+  });
+  ui.clearSeries.hidden = !activeSeries;
+  setKeywordStatus();
+  if (latestResult) renderRecords(latestResult.records);
+  toast(activeSeries ? `已只看《${activeSeries}》，再点一次退出` : '已退出整部筛选');
+}
+
 /* ---------------------------------------------------------------- 视频明细 */
 function recordMatches(item) {
+  if (activeSeries && item.series !== activeSeries) return false;
   if (activeKeyword && !(item.keywords || []).includes(activeKeyword)) return false;
   if (!searchQuery) return true;
   const haystack = [item.title, item.author, item.domainName, item.mediaType, item.collectionTitle, item.subtitle, ...(item.keywords || []), ...(item.tags || [])].join(' ').toLocaleLowerCase();
@@ -470,6 +550,8 @@ function renderRecords(items) {
     const meta = document.createElement('div');
     meta.className = 'record-meta';
     const chips = [];
+    // 分集单独出现时，先说明它属于哪部剧，否则一列「第 3 话」看不出是谁
+    if (item.series && item.series !== item.title) chips.push(['chip-series', `《${item.series}》`]);
     if (item.author) chips.push(['chip-author', item.author]);
     if (item.domainName) chips.push(['chip-domain', item.domainName]);
     for (const keyword of (item.keywords || []).slice(0, 2)) chips.push(['chip-keyword', `#${keyword}`]);
@@ -614,6 +696,7 @@ function render(result) {
   renderNebula(result.terms);
   renderSparklines(result);
   renderCreators(result);
+  renderSeries(result);
   renderRecords(result.records);
   renderMilestones(result);
   renderPersona(result);
@@ -672,8 +755,9 @@ function loadFiles(fileList, options = {}) {
   refreshLocalBackups();
 
   hasData = false; latestResult = null;
-  activeKeyword = ''; searchQuery = ''; activeCreator = ''; ui.search.value = '';
+  activeKeyword = ''; searchQuery = ''; activeCreator = ''; activeSeries = ''; ui.search.value = '';
   ui.clearKeyword.hidden = true;
+  ui.clearSeries.hidden = true;
   ui.dashboard.classList.remove('dashboard-ready');
   ui.dashboard.hidden = true;
   ui.analyze.disabled = true;
@@ -934,6 +1018,14 @@ ui.localNone?.addEventListener('click', () => {
   updateLocalCount();
 });
 ui.localLoad?.addEventListener('click', () => loadCheckedBackups());
+ui.clearSeries?.addEventListener('click', () => {
+  activeSeries = '';
+  document.querySelectorAll('#series-grid .series-card').forEach(card => card.setAttribute('aria-pressed', 'false'));
+  ui.clearSeries.hidden = true;
+  setKeywordStatus();
+  if (latestResult) renderRecords(latestResult.records);
+  toast('已退出整部筛选');
+});
 ui.localTest?.addEventListener('click', () => {
   showTestFiles = !showTestFiles;
   updateTestToggle();
@@ -979,12 +1071,14 @@ ui.search.addEventListener('input', () => {
   }
   if (latestResult) renderRecords(latestResult.records);
 });
-ui.clearKeyword.addEventListener('click', () => {
-  activeKeyword = '';
+ui.clearKeyword.addEventListener('click', () => {  activeKeyword = '';
   activeCreator = '';
+  activeSeries = '';
   ui.search.value = '';
   searchQuery = '';
   document.querySelectorAll('#creator-list .creator-row').forEach(li => markCreatorPressed(li, false));
+  document.querySelectorAll('#series-grid .series-card').forEach(card => card.setAttribute('aria-pressed', 'false'));
+  ui.clearSeries.hidden = true;
   setKeywordStatus();
   if (latestResult) { renderNebula(latestResult.terms); renderRecords(latestResult.records); }
   toast('已重置关键词筛选');

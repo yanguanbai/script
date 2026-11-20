@@ -19,6 +19,10 @@ const TOPIC_WORDS = [
 const POS_KEEP = 1048576 | 8 | 64 | 4096 | 1073741824 | 16;
 const POS_DROP = 65536 | 8192 | 134217728 | 268435456 | 4194304;
 
+// 这些类型是「一整部作品」按集拆开记录的，统计时要回到整部去看。
+// 国创 / 少儿这些同样是番剧式的连载，不能只认「番剧」两个字。
+const SERIES_TYPES = new Set(['番剧', '国创', '电视剧', '电影', '纪录片', '综艺', '动画', '少儿', '影视']);
+
 let dictionary = null;
 function segmenter() {
   if (!dictionary) dictionary = useDefault(new Segment());
@@ -96,20 +100,33 @@ function normalizeRecord(raw, key, parent = {}) {
     progress: String(first(snapshot, ['progress', 'lastProgress'], ''))
   })).filter(snapshot => snapshot.ts) : [];
   if (!normalizedSnapshots.length && lastTs && (record.view_at || record.timestamp || record.lastTs || record.last_ts)) normalizedSnapshots.push({ ts: lastTs, pos: 0, progress: String(first(record, ['progress', 'lastProgress', 'last_progress'], '')) });
-  const rawMediaType = String(first(record, ['mediaType', 'media_type', 'typeName', 'category'], '视频'));
+  // 分集自己不一定带 mediaType，缺省时沿用合集（父级）的类型，否则番剧的分集会被当成普通视频
+  const ownType = String(first(record, ['mediaType', 'media_type', 'typeName', 'category'], ''));
+  const parentType = String(first(parent, ['mediaType', 'media_type'], ''));
+  const rawMediaType = ownType || parentType || '视频';
   const liveRecord = /^live/i.test(stableId) || ['未开播', '直播中'].includes(rawMediaType);
   const mediaType = rawMediaType === 'collection'
-    ? String(first(parent, ['mediaType', 'media_type'], '番剧'))
+    ? (parentType || '番剧')
     : ['已收藏', '未开播', '直播中'].includes(rawMediaType) ? (liveRecord ? '直播' : '视频') : liveRecord ? '直播' : rawMediaType;
   const statusTags = new Set(['已收藏', '未开播', '直播中']);
+  const title = String(first(record, ['title', 'name', 'videoTitle'], first(parent, ['title', 'name'], '')));
+  const collectionTitle = String(first(record, ['collectionTitle', 'seasonTitle'], first(parent, ['title'], '')));
+  // 番剧 / 电视剧 / 电影这些合集条目本来就没有 UP 主，作者栏是空的。
+  // 直接拿合集名（没有合集名就用标题）当作者，排行和明细里才不会出现一片「未填写」。
+  const seriesLike = SERIES_TYPES.has(mediaType);
+  const authorName = String(author || '').trim();
+  const seriesName = cleanSeriesName(collectionTitle || (seriesLike ? title : ''));
+  const fallbackAuthor = seriesName;
   return {
     key: id,
-    title: String(first(record, ['title', 'name', 'videoTitle'], first(parent, ['title', 'name'], ''))),
-    author: String(author || ''),
+    title,
+    author: authorName || fallbackAuthor,
     mediaType,
     tags: (Array.isArray(tags) ? tags.map(String) : String(tags || '').split(/[、,，]/).filter(Boolean)).filter(tag => !statusTags.has(tag)),
     subtitle: String(first(record, ['mediaSubtitle', 'subtitle', 'partTitle'], '')),
-    collectionTitle: String(first(record, ['collectionTitle', 'seasonTitle'], first(parent, ['title'], ''))),
+    collectionTitle,
+    // 合集条目按「整部剧」聚合：有合集名就用合集名，单集的番剧 / 电视剧就用标题
+    series: seriesName,
     partNumber: page,
     partTotal: number(first(record, ['partTotal', 'part_total'], 0)),
     count: number(first(record, ['watchCount', 'watch_count', 'viewCount', 'playCount', 'views', 'count'], 0)),
@@ -166,7 +183,10 @@ function csvRecords(text) {
     const key = row.bv_key || `${row.title || 'record'}:${row.author_name || ''}`;
     let item = records.get(key);
     if (!item) {
-      item = { key, title: row.title || '', author: row.author_name || '', mediaType: row.media_type || '视频', tags: String(row.media_tags || '').split(/[、,，]/).filter(Boolean), subtitle: row.media_subtitle || row.small_collection_title || '', collectionTitle: row.collection_title || '', partNumber: number(row.part_number), partTotal: number(row.part_total), count: number(row.watch_count), lastTs: timestamp(row.last_ts), lastProgress: row.last_progress || '0%', snapshots: [] };
+      const mediaType = row.media_type || '视频';
+      const collectionTitle = row.collection_title || '';
+      const series = collectionTitle || (SERIES_TYPES.has(mediaType) ? (row.title || '') : '');
+      item = { key, title: row.title || '', author: row.author_name || series, mediaType, tags: String(row.media_tags || '').split(/[、,，]/).filter(Boolean), subtitle: row.media_subtitle || row.small_collection_title || '', collectionTitle, series, partNumber: number(row.part_number), partTotal: number(row.part_total), count: number(row.watch_count), lastTs: timestamp(row.last_ts), lastProgress: row.last_progress || '0%', snapshots: [] };
       records.set(key, item);
     }
     const snapTs = timestamp(row.snapshot_ts);
@@ -179,6 +199,13 @@ const TITLE_SUFFIX = /\s*[_\-|·]\s*哔哩哔哩[^\s]*|\s*bilibili\s*$/gi;
 
 function cleanTitle(title) {
   return String(title || '').replace(TITLE_SUFFIX, '').replace(/\s+/g, ' ').trim();
+}
+
+// 有的番剧 / 电视剧条目把整段网页标题当合集名带了进来
+// （「良医 第七季第9集-电视剧-全集-高清正版在线观看-bilibili-哔哩哔哩」），
+// 这里只截掉「-电视剧-全集…」这截尾巴，让同一部剧能并到一行。
+function cleanSeriesName(title) {
+  return cleanTitle(title).replace(/[-_|·]\s*(?:电视剧|剧集|番剧|国创|电影|综艺|纪录片|全集|高清|正版)[-－].*$/, '').trim();
 }
 
 function flagsOf(segment) {
@@ -347,6 +374,47 @@ export function analyze(records, start = 0, end = Infinity) {
   }
 
   const rankedTerms = [...terms.values()].sort((a, b) => b.watches - a.watches || b.videos - a.videos).slice(0, 16);
+  // 番剧 / 电视剧 / 合集要按「整部」看：把同一部剧的分集并成一行，播放数相加，
+  // 不然榜单会被某一集的第 3 集压住，看不出你到底追了多少部。
+  // 区分两类：连载剧集（有集数）和 UP 主的视频合集（并列的视频，不分集）。
+  const seriesRows = new Map();
+  for (const record of filtered) {
+    if (!record.series) continue;
+    const kind = SERIES_TYPES.has(record.mediaType) ? 'series' : 'collection';
+    let row = seriesRows.get(record.series);
+    if (!row) {
+      row = { name: record.series, kind, type: record.mediaType, parts: 0, partTotal: 0, watches: 0, lastTs: 0, topTitle: '' };
+      seriesRows.set(record.series, row);
+    }
+    if (kind === 'series' && row.kind !== 'series') { row.kind = 'series'; row.type = record.mediaType; }
+    row.parts += 1;
+    row.watches += Math.max(0, record.count);
+    row.partTotal = Math.max(row.partTotal, record.partTotal || 0);
+    if (record.lastTs > row.lastTs) { row.lastTs = record.lastTs; }
+    if (record.count > (row.topCount || 0)) { row.topCount = record.count; row.topTitle = record.title; }
+  }
+  // 有的条目把分集名当合集名（「良医 第七季第9集」），如果它所属的那一部已经在榜里，就并回去
+  for (const [name, row] of [...seriesRows]) {
+    if (!/第\s*\d+\s*[集话期回]/.test(name)) continue;
+    const base = name.replace(/第\s*\d+\s*[集话期回].*$/, '').trim();
+    const target = base && base !== name ? seriesRows.get(base) : null;
+    if (!target) continue;
+    target.parts += row.parts;
+    target.watches += row.watches;
+    target.partTotal = Math.max(target.partTotal, row.partTotal);
+    target.lastTs = Math.max(target.lastTs, row.lastTs);
+    if ((row.topCount || 0) > (target.topCount || 0)) { target.topCount = row.topCount; target.topTitle = row.topTitle; }
+    seriesRows.delete(name);
+  }
+  const cleaned = [...seriesRows.values()]
+    .filter(row => row.kind === 'series' || row.parts >= 2)
+    .map(({ topCount, ...row }) => row)
+    .sort((a, b) => b.watches - a.watches || b.parts - a.parts);
+  // 榜单给剧集留位置：最多 5 部剧 + 3 个合集，免得一堆 UP 合集把番剧顶下去
+  const series = [
+    ...cleaned.filter(row => row.kind === 'series').slice(0, 5),
+    ...cleaned.filter(row => row.kind === 'collection').slice(0, 3)
+  ];
   const peakDay = [...calendarDays].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] || null;
   const domains = [...domainRows.values()];
   const topDomain = domains.slice().sort((a, b) => b.watches - a.watches || b.videos - a.videos)[0] || null;
@@ -361,6 +429,7 @@ export function analyze(records, start = 0, end = Infinity) {
     },
     creators,
     types,
+    series,
     terms: rankedTerms,
     domains,
     coverage: {

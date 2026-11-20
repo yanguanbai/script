@@ -144,3 +144,34 @@ test('keeps two snapshots with the same timestamp but different progress', () =>
   const merged = mergeHistories([loadHistory(JSON.stringify(make('30%')), 'a.json'), loadHistory(JSON.stringify(make('70%')), 'b.json')]);
   assert.equal(merged.records[0].snapshots.length, 2, '同秒不同进度不是同一条快照');
 });
+
+test('uses the collection name as the author when a season has no uploader', () => {
+  const fixture = { records: {
+    season: { data: { type: 'collection', title: '孤独摇滚', mediaType: '番剧', parts: [
+      { epKey: 'EP1', p: 1, title: '第1话', watchCount: 3, lastTs: 1700000100, snapshots: [{ ts: 1700000100 }] },
+      { epKey: 'EP2', p: 2, title: '第2话', watchCount: 5, lastTs: 1700000200, snapshots: [{ ts: 1700000200 }] }
+    ] } },
+    movie: { data: { key: 'EP9', title: '某部电影', mediaType: '电影', watchCount: 4, lastTs: 1700000300, snapshots: [{ ts: 1700000300 }] } }
+  } };
+  const { records } = loadHistory(JSON.stringify(fixture), 'season.json');
+  assert.deepEqual(records.map(item => item.author), ['孤独摇滚', '孤独摇滚', '某部电影'], '番剧作者栏不该是空的');
+  assert.deepEqual(records.map(item => item.mediaType), ['番剧', '番剧', '电影'], '分集要继承合集的类型');
+  assert.deepEqual(records.map(item => item.series), ['孤独摇滚', '孤独摇滚', '某部电影']);
+});
+
+test('aggregates a season as one work instead of ranking single episodes', () => {
+  const fixture = { records: {
+    season: { data: { type: 'collection', title: '孤独摇滚', mediaType: '番剧', parts: [
+      { epKey: 'EP1', p: 1, title: '第1话', watchCount: 12, lastTs: 1700000100, snapshots: [{ ts: 1700000100 }] },
+      { epKey: 'EP2', p: 2, title: '第2话', watchCount: 8, lastTs: 1700000200, snapshots: [{ ts: 1700000200 }] }
+    ] } },
+    video: { data: { key: 'BV1', title: '单条视频', authorName: 'UP', mediaType: '视频', watchCount: 15, lastTs: 1700000300, snapshots: [{ ts: 1700000300 }] } }
+  } };
+  const result = analyze(loadHistory(JSON.stringify(fixture), 'season.json').records);
+  assert.equal(result.series.length, 1, '单集不单独进榜单');
+  const row = result.series[0];
+  assert.equal(row.name, '孤独摇滚');
+  assert.equal(row.watches, 20, '播放数是整部累计（12+8），不是单集');
+  assert.equal(row.parts, 2);
+  assert.equal(row.partTotal, 2);
+});
