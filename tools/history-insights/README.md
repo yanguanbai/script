@@ -40,6 +40,8 @@ History Insights 是一个本地运行的观看历史分析页面。它把导出
 
 **备份放在哪，由你决定**：菜单里的「指定备份文件夹」会弹一个系统文件夹选择框，选完把路径记在用户配置 `%APPDATA%\HistoryInsights\config.json` 里，以后每次启动只认这个目录（优先于默认位置）。所以不必把备份塞进固定的某个盘，也不用改代码里的路径。
 
+没指定之前，「读最新备份」会依次扫这些地方：`HISTORY_DIR` 环境变量、`下载`、`桌面`、`文档`、OneDrive 的下载和桌面，**以及浏览器自己设的下载目录**——程序会读 Chrome / Edge / Brave / Vivaldi / Chromium / 360 极速的 `User Data\<Profile>\Preferences` 里 `download.default_directory`，和 Firefox 各配置文件 `prefs.js` 里的 `browser.download.dir`。所以只要你把备份存在浏览器默认下载的位置（哪怕下到了 D 盘某个文件夹），也能直接被找到。读这些配置是只读、不联网的；浏览器下载目录里只有严格命名为 `bvh_history_backup*.json` 的才认，避免把无关的 json 当备份。
+
 两种装法都不需要 `npm install`（依赖已经放进 `vendor/`）。
 
 **发行与更新（维护者用）**：安装包不在仓库里，而是挂在 GitHub Releases 上，`release/dist/` 已在 `.gitignore` 里。发新版本三步：

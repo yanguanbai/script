@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile, rm, stat } from 'node:fs/promises';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -12,12 +13,87 @@ const root = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const exportDir = join(root, '.export-tmp');
 const execFileAsync = promisify(execFile);
 
-// 找备份的目录：用户指定过就优先用它（长期记住，存在用户配置里），没指定就扫这台机器默认会放文件的位置。
-// 不写死任何人的私人路径：默认只认 Downloads / Desktop / Documents / OneDrive。
 const configDir = process.env.APPDATA ? join(process.env.APPDATA, 'HistoryInsights') : join(root, '.config');
 const configFile = join(configDir, 'config.json');
 const backupPatterns = [/^bvh_history_backup.*\.json$/i, /^.*history.*\.json$/i];
 
+// 浏览器自己设的下载目录：Chromium 系记在 User Data\<Profile>\Preferences 的 download.default_directory，
+// Firefox 记在 prefs.js 的 browser.download.dir。只读配置文件，读不到就安静跳过。
+// 结果缓存一次，findLatestBackup 每次调用时不必重复读这些大文件。
+let browserDirsCache = null;
+function browserDownloadDirs() {
+  if (browserDirsCache) return browserDirsCache;
+  if (process.platform !== 'win32') { browserDirsCache = []; return browserDirsCache; }
+  const local = process.env.LOCALAPPDATA || '';
+  const roaming = process.env.APPDATA || '';
+  const found = [];
+
+  const chromiumPrefs = [];
+  const userDataRoots = [
+    join(local, 'Google', 'Chrome', 'User Data'),
+    join(local, 'Microsoft', 'Edge', 'User Data'),
+    join(local, 'BraveSoftware', 'Brave-Browser', 'User Data'),
+    join(local, 'Vivaldi', 'User Data'),
+    join(local, 'Chromium', 'User Data'),
+    join(local, '360Chrome', 'Chrome', 'User Data'),
+  ];
+  for (const userData of userDataRoots) {
+    if (!existsSync(userData)) continue;
+    let profiles = [];
+    try {
+      profiles = readdirSync(userData, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .filter((n) => n === 'Default' || /^Profile \d+$/.test(n));
+    } catch { continue; }
+    for (const profile of profiles) chromiumPrefs.push(join(userData, profile, 'Preferences'));
+  }
+  // Opera 的 Preferences 直接放在 Opera Stable 目录里，没有 Default 这一层
+  const operaPrefs = join(roaming, 'Opera Software', 'Opera Stable', 'Preferences');
+  if (existsSync(operaPrefs)) chromiumPrefs.push(operaPrefs);
+
+  for (const file of chromiumPrefs) {
+    if (!existsSync(file)) continue;
+    try {
+      const prefs = JSON.parse(readFileSync(file, 'utf8'));
+      for (const key of ['download', 'savefile']) {
+        const dir = prefs?.[key]?.default_directory;
+        if (typeof dir === 'string' && dir.trim()) found.push(dir.trim());
+      }
+    } catch { /* 浏览器正在写这个文件时可能是半截 JSON，忽略 */ }
+  }
+
+  const firefoxRoot = join(roaming, 'Mozilla', 'Firefox', 'Profiles');
+  if (existsSync(firefoxRoot)) {
+    let profiles = [];
+    try { profiles = readdirSync(firefoxRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); } catch { profiles = []; }
+    for (const profile of profiles) {
+      const prefsJs = join(firefoxRoot, profile, 'prefs.js');
+      if (!existsSync(prefsJs)) continue;
+      try {
+        const text = readFileSync(prefsJs, 'utf8');
+        const m = text.match(/user_pref\("browser\.download\.dir",\s*("(?:[^"\\]|\\.)*")\)/);
+        if (m) {
+          const dir = JSON.parse(m[1]);
+          if (typeof dir === 'string' && dir.trim()) found.push(dir.trim());
+        }
+      } catch { /* prefs.js 里出现异常行时忽略 */ }
+    }
+  }
+
+  browserDirsCache = found.filter((dir) => {
+    try { return existsSync(dir); } catch { return false; }
+  });
+  return browserDirsCache;
+}
+
+// 浏览器下载目录里可能混着别的 json，只有严格命名的备份才认（宽松的 *history*.json 只用于标准目录）
+function isBrowserDir(dir) {
+  return browserDownloadDirs().includes(dir);
+}
+
+// 找备份的目录：用户指定过就优先用它（长期记住，存在用户配置里），没指定就扫这台机器默认会放文件的位置。
+// 不写死任何人的私人路径：默认认 Downloads / Desktop / Documents / OneDrive，再加浏览器自己设的下载目录。
 function defaultBackupDirs() {
   const home = homedir();
   return [
@@ -26,7 +102,8 @@ function defaultBackupDirs() {
     join(home, 'Desktop'),
     join(home, 'Documents'),
     join(home, 'OneDrive', 'Downloads'),
-    join(home, 'OneDrive', 'Desktop')
+    join(home, 'OneDrive', 'Desktop'),
+    ...browserDownloadDirs()
   ].filter(Boolean);
 }
 
@@ -84,9 +161,14 @@ async function pickBackupDir() {
 
 async function findLatestBackup() {
   const dirs = await backupDirs();
-  for (const pattern of backupPatterns) {
+  // 第一轮按严格命名找（bvh_history_backup*.json），第二轮才用宽松的 *history*.json，
+  // 且宽松匹配跳过浏览器下载目录，免得把那里无关的 json 当成备份。
+  for (let i = 0; i < backupPatterns.length; i += 1) {
+    const pattern = backupPatterns[i];
+    const loose = i > 0;
     let best = null;
     for (const dir of dirs) {
+      if (loose && isBrowserDir(dir)) continue;
       let entries;
       try { entries = await readdir(dir, { withFileTypes: true }); } catch { continue; }
       for (const entry of entries) {

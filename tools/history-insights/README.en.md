@@ -25,6 +25,8 @@ The installed shortcut launches the local server first (silently, in the backgro
 
 You can also drop a file onto the import area. Date controls include **All**, **Last 30 days**, **Last 7 days**, and custom start/end dates. The page ships two independent design languages (paper / observatory); see the sample gallery at [docs/展示.md](docs/展示.md).
 
+**Where it looks for backups**: until you pick a folder yourself, *read newest backup* scans `HISTORY_DIR`, `Downloads`, `Desktop`, `Documents`, the OneDrive copies of the last two, **and the download folder your browser is configured to use** - it reads `download.default_directory` from the `Preferences` file of Chrome / Edge / Brave / Vivaldi / Chromium / 360Chrome profiles, and `browser.download.dir` from each Firefox profile's `prefs.js`. So a backup that landed in your browser's usual download folder (even on another drive) is found without any setup. Those preference files are only read, never written, and nothing leaves the machine. In browser folders only strictly named `bvh_history_backup*.json` files are accepted, so unrelated JSON there is not mistaken for a backup.
+
 **Export image** and **Print / PDF** never re-layout the current page: the page posts the raw backup to the local server, which launches a separate clean Chrome (temporary profile, no extensions), renders it, and returns a PNG or PDF. The page therefore never jumps, extension overlays never appear in the output, and a dark theme exports as a dark PDF.
 
 ## Dashboard
