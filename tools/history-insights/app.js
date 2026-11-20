@@ -7,7 +7,7 @@ const ui = {
   file: $('#history-file'), pick: $('#pick-file'), drop: $('#drop-zone'),
   fileLabel: $('#file-label'), fileBadge: $('#file-badge'), fileMeta: $('#file-meta'), loadLatest: $('#load-latest'), pickDir: $('#pick-dir'),
   listBackups: $('#list-backups'), listCount: $('#list-count'), localList: $('#local-list'), localRows: $('#local-rows'),
-  localTitle: $('#local-title'), localScanned: $('#local-scanned'),
+  localTitle: $('#local-title'), localScanned: $('#local-scanned'), localTest: $('#local-test-toggle'),
   localAll: $('#local-all'), localNone: $('#local-none'), localLoad: $('#local-load'),
   status: $('#status'), progress: $('#load-progress'),
   range: $('#range-control'), start: $('#date-start'), end: $('#date-end'), analyze: $('#analyze'),
@@ -26,6 +26,8 @@ let requestId = 0;
 let trendMode = 'days';
 let activeKeyword = '';
 let searchQuery = '';
+// 从「常看 UP 主」点进去的筛选记在这里，用来做「再点一次退出」和按下态
+let activeCreator = '';
 let sessionFiles = [];
 let printing = false;
 // 服务端导出 PDF 时以 ?print=1 打开本页，首轮分析完成后要按纸张宽度重画一次图表。
@@ -313,8 +315,11 @@ function renderNebula(terms) {
 }
 
 function setKeywordStatus() {
-  ui.keywordStatus.textContent = activeKeyword ? `已锁定关键词：#${activeKeyword}` : '当前：全部关键词';
-  ui.clearKeyword.hidden = !activeKeyword;
+  const parts = [];
+  if (activeCreator) parts.push(`UP 主「${activeCreator}」`);
+  if (activeKeyword) parts.push(`关键词 #${activeKeyword}`);
+  ui.keywordStatus.textContent = parts.length ? `已锁定 ${parts.join(' + ')}` : '当前：全部关键词';
+  ui.clearKeyword.hidden = !activeKeyword && !activeCreator;
 }
 function toggleKeyword(word) {
   activeKeyword = activeKeyword === word ? '' : word;
@@ -362,6 +367,8 @@ function renderCreators(result) {
   items.slice(0, 7).forEach(item => {
     const li = document.createElement('li');
     li.className = 'creator-row';
+    li.setAttribute('role', 'button');
+    li.tabIndex = 0;
     li.title = `筛选「${item.name}」的视频`;
     const avatar = document.createElement('span');
     avatar.className = 'creator-avatar';
@@ -386,9 +393,32 @@ function renderCreators(result) {
     val.className = 'creator-value';
     val.textContent = `${numberFormat.format(item.videos)} 条`;
     li.append(avatar, main, val);
-    li.addEventListener('click', () => { searchQuery = item.name; ui.search.value = item.name; renderRecords(latestResult.records); toast(`已定位「${item.name}」的观看记录`); });
+    li.dataset.creator = item.name;
+    markCreatorPressed(li, activeCreator === item.name);
+    const activate = () => toggleCreator(item.name);
+    li.addEventListener('click', activate);
+    li.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); }
+    });
     list.append(li);
   });
+}
+
+// 和关键词气泡同一套手感：点一下选进筛选，再点一下退出。
+function markCreatorPressed(li, pressed) {
+  li.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+  li.title = pressed ? `取消对「${li.dataset.creator}」的筛选` : `只看「${li.dataset.creator}」的视频`;
+}
+
+function toggleCreator(name) {
+  const next = activeCreator === name ? '' : name;
+  activeCreator = next;
+  ui.search.value = next;
+  searchQuery = next;
+  document.querySelectorAll('#creator-list .creator-row').forEach(li => markCreatorPressed(li, li.dataset.creator === next));
+  setKeywordStatus();
+  if (latestResult) renderRecords(latestResult.records);
+  toast(next ? `已只看「${next}」，再点一次退出` : '已退出 UP 主筛选');
 }
 
 /* ---------------------------------------------------------------- 视频明细 */
@@ -642,7 +672,7 @@ function loadFiles(fileList, options = {}) {
   refreshLocalBackups();
 
   hasData = false; latestResult = null;
-  activeKeyword = ''; searchQuery = ''; ui.search.value = '';
+  activeKeyword = ''; searchQuery = ''; activeCreator = ''; ui.search.value = '';
   ui.clearKeyword.hidden = true;
   ui.dashboard.classList.remove('dashboard-ready');
   ui.dashboard.hidden = true;
@@ -752,14 +782,26 @@ async function pickBackupDir() {
 ui.loadLatest?.addEventListener('click', () => loadLatestBackup());
 ui.pickDir?.addEventListener('click', () => pickBackupDir());
 
-// ---- 本机备份勾选表：扫到多份时默认只勾最新那份，想合并就多勾几份 ----
+// ---- 本机备份勾选表：按目录分组，测试目录默认收起来，想合并就多勾几份 ----
 let localBackups = [];
+let renderedBackups = [];
+let showTestFiles = false;
+// 只按「目录名」判定测试目录，不按文件名——叫「测试」的人可能是认真的备份
+const TEST_DIR = /(测试|test|temp|tmp|临时|sample|demo)/i;
+
+function isTestItem(item) {
+  return TEST_DIR.test(item.dir.split(/[\\/]/).pop() || '');
+}
+
+function visibleBackups() {
+  return showTestFiles ? localBackups : localBackups.filter(item => !isTestItem(item));
+}
 
 function formatBackupMeta(item) {
   const date = new Date(item.mtimeMs);
   const stamp = Number.isNaN(date.getTime()) ? '' : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   const size = item.size >= 1024 * 1024 ? `${(item.size / 1024 / 1024).toFixed(1)} MB` : `${Math.round(item.size / 1024)} KB`;
-  return [stamp, size, item.dir].filter(Boolean).join(' · ');
+  return [stamp, size].filter(Boolean).join(' · ');
 }
 
 function updateLocalCount() {
@@ -770,26 +812,53 @@ function updateLocalCount() {
 
 function renderLocalRows() {
   ui.localRows.textContent = '';
+  renderedBackups = visibleBackups();
   // 报告里已经有的那几份直接勾上；一份都没导入时才退回「只勾最新」
   const loadedNames = new Set(sessionFiles.map(file => file.name));
-  localBackups.forEach((item, index) => {
-    const row = document.createElement('label');
-    row.className = 'local-row';
-    const box = document.createElement('input');
-    box.type = 'checkbox';
-    box.value = String(index);
-    box.checked = loadedNames.size ? loadedNames.has(item.name) : index === 0;
-    box.addEventListener('change', updateLocalCount);
-    const name = document.createElement('span');
-    name.className = 'local-name';
-    name.textContent = item.name;
-    const meta = document.createElement('span');
-    meta.className = 'local-meta';
-    meta.textContent = formatBackupMeta(item);
-    row.append(box, name, meta);
-    ui.localRows.appendChild(row);
+  const groups = new Map();
+  renderedBackups.forEach(item => {
+    if (!groups.has(item.dir)) groups.set(item.dir, []);
+    groups.get(item.dir).push(item);
   });
+  for (const [dir, items] of groups) {
+    const head = document.createElement('div');
+    head.className = 'local-group-head';
+    head.title = dir;
+    const label = document.createElement('span');
+    label.className = 'local-group-dir';
+    label.textContent = dir;
+    const count = document.createElement('span');
+    count.className = 'local-group-count';
+    count.textContent = `${items.length} 份`;
+    head.append(label, count);
+    ui.localRows.appendChild(head);
+    for (const item of items) {
+      const index = renderedBackups.indexOf(item);
+      const row = document.createElement('label');
+      row.className = 'local-row';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.value = String(index);
+      box.checked = loadedNames.size ? loadedNames.has(item.name) : index === 0;
+      box.addEventListener('change', updateLocalCount);
+      const name = document.createElement('span');
+      name.className = 'local-name';
+      name.textContent = item.name;
+      const meta = document.createElement('span');
+      meta.className = 'local-meta';
+      meta.textContent = formatBackupMeta(item);
+      row.append(box, name, meta);
+      ui.localRows.appendChild(row);
+    }
+  }
   updateLocalCount();
+}
+
+function updateTestToggle() {
+  const hidden = localBackups.filter(isTestItem).length;
+  if (!hidden) { ui.localTest.hidden = true; return; }
+  ui.localTest.hidden = false;
+  ui.localTest.textContent = showTestFiles ? `隐藏测试目录（${hidden}）` : `显示测试目录（${hidden}）`;
 }
 
 async function refreshLocalBackups({ expand = false } = {}) {
@@ -815,7 +884,11 @@ async function refreshLocalBackups({ expand = false } = {}) {
   }
   ui.listBackups.hidden = false;
   ui.listCount.textContent = String(localBackups.length);
-  ui.localTitle.textContent = `本机找到 ${localBackups.length} 份备份`;
+  const visible = visibleBackups().length;
+  ui.localTitle.textContent = visible === localBackups.length
+    ? `本机找到 ${localBackups.length} 份备份`
+    : `本机找到 ${localBackups.length} 份备份 · 当前显示 ${visible} 份`;
+  updateTestToggle();
   renderLocalRows();
   if (expand) ui.localList.hidden = false;
   return true;
@@ -824,7 +897,7 @@ async function refreshLocalBackups({ expand = false } = {}) {
 // 把勾中的几份取回来，走和「选文件」完全一样的导入与合并路径
 async function loadCheckedBackups() {
   const picked = [...ui.localRows.querySelectorAll('input[type="checkbox"]:checked')]
-    .map(box => localBackups[Number(box.value)])
+    .map(box => renderedBackups[Number(box.value)])
     .filter(Boolean);
   if (!picked.length) { toast('先勾上至少一份备份再用这个按钮'); return; }
   ui.localLoad.disabled = true;
@@ -861,6 +934,16 @@ ui.localNone?.addEventListener('click', () => {
   updateLocalCount();
 });
 ui.localLoad?.addEventListener('click', () => loadCheckedBackups());
+ui.localTest?.addEventListener('click', () => {
+  showTestFiles = !showTestFiles;
+  updateTestToggle();
+  const visible = visibleBackups().length;
+  const total = localBackups.length;
+  ui.localTitle.textContent = visible === total
+    ? `本机找到 ${total} 份备份`
+    : `本机找到 ${total} 份备份 · 当前显示 ${visible} 份`;
+  renderLocalRows();
+});
 // 点已导入文件的徽标，也能展开这张表，看看本机还有哪几份没勾上
 ui.fileBadge?.addEventListener('click', async () => {
   const has = localBackups.length ? true : await refreshLocalBackups();
@@ -886,11 +969,22 @@ ui.analyze.addEventListener('click', generate);
 $('#export-poster').addEventListener('click', () => requestExport('png'));
 $('#print-report').addEventListener('click', () => requestExport('pdf'));
 
-ui.search.addEventListener('input', () => { searchQuery = ui.search.value.trim(); if (latestResult) renderRecords(latestResult.records); });
+ui.search.addEventListener('input', () => {
+  searchQuery = ui.search.value.trim();
+  // 手动改了搜索词，就不再算「按 UP 主筛选」，按下态跟着退掉
+  if (activeCreator && searchQuery !== activeCreator) {
+    activeCreator = '';
+    document.querySelectorAll('#creator-list .creator-row').forEach(li => markCreatorPressed(li, false));
+    setKeywordStatus();
+  }
+  if (latestResult) renderRecords(latestResult.records);
+});
 ui.clearKeyword.addEventListener('click', () => {
   activeKeyword = '';
+  activeCreator = '';
   ui.search.value = '';
   searchQuery = '';
+  document.querySelectorAll('#creator-list .creator-row').forEach(li => markCreatorPressed(li, false));
   setKeywordStatus();
   if (latestResult) { renderNebula(latestResult.terms); renderRecords(latestResult.records); }
   toast('已重置关键词筛选');

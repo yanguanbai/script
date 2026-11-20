@@ -354,6 +354,18 @@ html[data-palette="paper"] .tile-tag { background: var(--ink-strong, #2f2d25); c
   font-family: var(--font-mono); font-size: 11px; color: var(--muted);
   overflow-wrap: anywhere;
 }
+.local-test-toggle { align-self: flex-start; font-size: 11.5px; }
+.local-group-head {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 9px 8px 4px; margin-top: 2px;
+  border-bottom: 1px dashed var(--line);
+}
+.local-group-head:not(:first-child) { margin-top: 8px; }
+.local-group-dir {
+  font-family: var(--font-mono); font-size: 11.5px; font-weight: 700; color: var(--accent-bright);
+  min-width: 0; overflow-wrap: anywhere;
+}
+.local-group-count { font-size: 10.5px; color: var(--faint); white-space: nowrap; }
 .local-rows { display: flex; flex-direction: column; gap: 2px; max-height: 210px; overflow: auto; }
 .local-row {
   display: flex; align-items: center; gap: 10px;
@@ -603,6 +615,15 @@ html[data-palette="paper"] .tone-3 { color: #92400e; }
   cursor: pointer; transition: border-color .18s, background .18s;
 }
 .creator-row:hover { border-color: var(--line-hover); background: var(--accent-soft); }
+/* 选中的 UP 主和关键词气泡用同一种「按下」语言：实底 + 亮边框 + 外发光 */
+.creator-row[aria-pressed="true"] {
+  color: var(--text-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent-bright);
+  box-shadow: 0 0 0 1px var(--accent-bright), 0 0 18px rgba(16, 185, 129, .28);
+}
+.creator-row[aria-pressed="true"] .creator-tag { color: var(--accent-bright); border-color: var(--accent-bright); }
+.creator-row:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 2px; }
 
 .creator-avatar {
   width: 26px; height: 26px; border-radius: 8px;
@@ -986,6 +1007,11 @@ html[data-palette="paper"] .record-row:hover { background: rgba(22, 112, 90, .05
 html[data-palette="paper"] .loyalty { border-radius: 0; background: transparent; border-left: 2px solid var(--accent); }
 html[data-palette="paper"] .topic-row,
 html[data-palette="paper"] .creator-row { border-radius: 0; }
+html[data-palette="paper"] .creator-row[aria-pressed="true"] {
+  background: rgba(22, 112, 90, .1);
+  box-shadow: none;
+  border-color: var(--accent);
+}
 
 /* ---------------------------------------------------------------- 打印 */
 .print-head { display: none; }
