@@ -8,6 +8,8 @@ English version: [README.en.md](README.en.md)
 
 ## 脚本
 
+还没装过油猴？先装 [Tampermonkey](https://www.tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/get-it/)，装完刷新一下浏览器，再点下表里的「安装」。
+
 | 脚本 | 用途 | 版本 | 安装 |
 |---|---|---:|---|
 | [观看历史可回溯](src/bilibili-history/README.md) | 本地记录观看时间、进度和历史快照，支持搜索、备份与恢复 | 5.10.20 | [中文文档](src/bilibili-history/README.md) · [English](src/bilibili-history/README.en.md) · [安装](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js) |

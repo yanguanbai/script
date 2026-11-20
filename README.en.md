@@ -8,6 +8,8 @@ Small browser userscripts for Bilibili. Each public script has its own source fi
 
 ## Public Scripts
 
+No userscript manager yet? Install [Tampermonkey](https://www.tampermonkey.net/) or [Violentmonkey](https://violentmonkey.github.io/get-it/), refresh the browser, then use the Install links in the table below.
+
 | Script | What it does | Version | Documentation | Install |
 |---|---|---:|---|---|
 | Watch History | Stores local watch times, progress, snapshots, search results, backups, and restores | 5.10.20 | [中文](src/bilibili-history/README.md) · [English](src/bilibili-history/README.en.md) | [Install](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js) |
