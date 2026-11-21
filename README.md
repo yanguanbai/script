@@ -21,6 +21,8 @@ English version: [README.en.md](README.en.md)
 | [浏览足迹](src/bilibili-footprint/README.md) | 记录列表页出现过的视频并支持搜索回溯 | 10.3.1 | [中文文档](src/bilibili-footprint/README.md) · [English](src/bilibili-footprint/README.en.md) · [安装](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-footprint/bilibili-footprint.user.js) · [更新记录](https://github.com/yanguanbai/script/commits/main/src/bilibili-footprint/bilibili-footprint.user.js) |
 | [干净链接](src/bilibili-clean-link/README.md) | 清理 Bilibili 链接中的追踪参数 | 3.3.0 | [中文文档](src/bilibili-clean-link/README.md) · [English](src/bilibili-clean-link/README.en.md) · [安装](https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-clean-link/bilibili-clean-link.user.js) · [更新记录](https://github.com/yanguanbai/script/commits/main/src/bilibili-clean-link/bilibili-clean-link.user.js) |
 
+代码分层、CSS 样式族与「片段 → 创建者」对照见 [docs/STRUCTURE.md](docs/STRUCTURE.md)。
+
 ## 本地分析工具
 
 [History Insights](tools/history-insights/README.md)（[English](tools/history-insights/README.en.md)）把「观看历史可回溯」导出的 JSON 备份在**本机**解析成一份可交互的观看报告：按日/按月波形、24 小时 × 7 天作息热力图、六维内容域雷达与占比环形、高频关键词星云、常看 UP 主与最常看的视频。不登录、不联网、不上传文件。

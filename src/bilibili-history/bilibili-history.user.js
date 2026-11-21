@@ -130,7 +130,26 @@
     // HistoryViewIndex 提供排序与搜索；最近快照使用独立小缓存优先显示。
     // ============================================================================
 
-    // 【模块：记录变更通知与索引标识】
+    // ============================================================================
+    // 代码地图（按功能层编号；Ctrl+F 搜「模块 M」可直接跳到任意一段）
+    //   M01–M03    常量层   内部键名 / 运行参数 / CSV 字段
+    //   M04–M05    工具层   时间换算 / 存储用量统计
+    //   M06, M08–M09 身份层 记录键识别 / 旧格式兼容 / 数据规范化
+    //   M10–M11, M14 存储层 容器合并 / 容器查找 / 原始记录读写
+    //   M12–M13    索引层   视图索引 / 已开列表刷新
+    //   M15, M32–M36 运维层 清理导入导出 / 设置读取 / 启动修复
+    //   M16, M18   渲染层   展示状态 / 列表 HTML
+    //   M17        查询层   搜索语法与条件匹配
+    //   M19–M22, M31 采集层 播放页 / 直播 / 官方历史 / 卡片标记
+    //   M23–M25    交互层   拖动 / 尺寸记忆 / 停靠吸附
+    //   M26        样式层   全部内嵌 CSS（14 个片段，按族 A–I 分块注释）
+    //   M27–M30, M34 界面层 播放浮窗 / 历史面板 / 设置窗口
+    //   M37        入口层   mainInit
+    // 样式族：A 玻璃面板 / B 数值滑轨 / C 开关 / D 列表 / E 卡片角标 /
+    //        F 菜单与对话框 / G 主题变量 / H 状态修饰 / I 字号
+    // ============================================================================
+
+    // 【模块 M01 · 常量层：记录变更通知与索引标识】
     // 页面内的列表、播放悬浮窗和存储层需要共享同一份记录状态。这里定义内部变更事件、
     // 跨脚本管理器标签页广播用的信号键，以及各类索引、设置和缓存的持久化键名。
     // 这些键名属于存储协议的一部分；修改它们会影响旧数据读取或跨页面同步，因此这里只作说明，不改键值。
@@ -142,8 +161,8 @@
     const LOCAL_DATA_REPAIR_VERSION_KEY = 'bvh_local_data_repair_version_v1';
     // 独立保存少量最近快照，避免首次打开面板时为了显示顶部 N 条而先读取整个大索引。
     const RECENT_SNAPSHOT_CACHE_KEY = 'bvh_recent_snapshot_cache_v1';
-    // 最近快照按来源配额选取，并用全局时间顺序补足空缺；同一观看的跨来源快照按时间窗口去重。
-    //      两轮取数，面板 N 个名额里 player 至少占 ceil(N*quota)；(b) source 缺失/非法的快照判为
+    // 最近快照按来源配额选取：同一观看的跨来源快照按时间窗口去重，再按全局观看时间排序展示。
+    // 取数分两轮：面板 N 个名额里 player 至少占 ceil(N * quota)；source 缺失或非法的快照按 official 处理。
     const HISTORY_VIEW_INDEX_VERSION = 14;
 
     const EXPIRE_SETTINGS_KEY = 'bvh_expire_settings_v1';
@@ -164,7 +183,7 @@
     const COLD_PRIMARY_DB_KEY = 'bvh_cold_primary_database_v1';
     const COLD_WRITE_QUEUE_KEY = 'bvh_cold_cross_origin_write_queue_v1';
 
-    // 【模块：统一运行参数】
+    // 【模块 M02 · 常量层：统一运行参数】
     // 集中管理记录过期、最近快照数量与来源配额、存储容量、采集间隔、搜索防抖、
     // 官方历史同步页数、短观看过滤和连续观看合并阈值。脚本内设置窗口按对应配置项读写参数。
     // 配额、缓存上限和时间阈值之间存在配套关系，调整时应同时检查相关注释及使用位置。
@@ -320,7 +339,7 @@
         return timeMatch && progressMatch;
     }
 
-    // 【模块：CSV 导入/导出字段定义】
+    // 【模块 M03 · 常量层：CSV 导入/导出字段定义】
     // 将内部记录字段映射为稳定的 CSV 列名与中文表头，供导出文件和导入解析共用。
     // 该列表是文件交换格式的一部分；字段名需要与导入、导出代码保持一致。
     const CSV_COLUMNS = [
@@ -352,7 +371,7 @@
     ];
 
     // ── 时间工具：时间戳格式化 + 把 B 站相对时间文本解析成时间戳 ──
-    // 【模块：时间解析与格式化】
+    // 【模块 M04 · 工具层：时间解析与格式化】
     // 统一处理本地时间显示、B 站官方历史卡片的相对日期文本，以及跨来源快照使用的时间值。
     // 官方页面可能显示“今天/昨天/前天”、月日或完整年月日等不同格式；无法可靠解析时保留无效标记，
     // 避免把无法识别的文本静默当成有效观看时间。
@@ -407,7 +426,7 @@
     };
 
     // ── 存储体积工具：估算 GM 存储占用（结果缓存 1.5 秒，避免频繁全量序列化） ──
-    // 【模块：油猴存储用量统计】
+    // 【模块 M05 · 工具层：油猴存储用量统计】
     // 汇总 GM 存储中的键和值，估算当前占用空间和记录条数，并提供界面展示所需的单位格式。
     // 统计结果带短时缓存，避免搜索、列表刷新等高频操作反复序列化全部数据。
     const ByteTool = {
@@ -490,7 +509,7 @@
 
     // ── 记录键工具：识别视频/番剧/直播及合集容器的存储键 ──
     // 5.3.0 容器结构：同BV多P容器 key=BV号；跨BV合集容器 key=合集标题；单视频=BV；番剧=ss/ep；直播=live。
-    // 【模块：记录键识别与规范化】
+    // 【模块 M06 · 身份层：记录键识别与规范化】
     // 负责识别普通 BV、BV 分 P、番剧季 ss、番剧集 ep、直播 live 等身份形式，
     // 并提供容器键转换、分组键计算、URL 解析和播放链接构建。
     // 这里决定“某条记录属于哪个视频/分集/整季”，是存储、同步、迁移和悬浮窗读取共同依赖的身份规则。
@@ -585,7 +604,7 @@
     };
 
     // ── 页面数据：在 __INITIAL_STATE__ 等全局对象里深度搜索 seasonId（限深防循环） ──
-    // 【模块：从当前播放页解析番剧身份】
+    // 【模块 M07 · 采集层：从当前播放页解析番剧身份】
     // 结合页面 URL、页面数据和可用的 DOM 信息，尽可能确定番剧季 ID、媒体 ID 与内容类型。
     // 页面结构会随 B 站版本变化；无法取得某项信息时应允许后续逻辑使用已有记录或其他识别路径。
     const PageData = {
@@ -858,7 +877,7 @@
     };
 
     // ── 旧格式迁移：把 4.x 早期的数组格式 / 简单对象格式升级成当前快照结构 ──
-    // 【模块：旧格式记录兼容】
+    // 【模块 M08 · 身份层：旧格式记录兼容】
     // 把旧版本可能使用的数组、普通对象等记录形态转换为当前记录处理流程可接受的数据。
     // 这是兼容入口，不负责决定最终容器归属；规范化后的数据仍需交给统一的记录规范化/迁移逻辑。
     const LegacyMigration = {
@@ -921,7 +940,7 @@
     };
 
     // ── 记录归一化：所有记录读写的统一入口（字段补全、按分钟去重、快照裁剪） ──
-    // 【模块：记录数据规范化】
+    // 【模块 M09 · 身份层：记录数据规范化】
     // 将历史版本或外部导入的数据整理成当前统一字段结构，处理时间、快照数量、容器及分集字段，
     // 并把容器记录展开为索引可使用的条目。规范化用于兼容不同来源的数据，不应凭空制造观看事实。
     const RecordNormalizer = {
@@ -1317,7 +1336,7 @@
     // 分集优先按真实身份合并：番剧按 ep；非番剧保持原有按 p 合并行为。
     // 只要任一分集带有 ep 身份，就必须双方 ep 相同才合并，避免同 p 的不同番剧分集被吞并。
     // 快照按签名去重，观看次数取大、最近时间取新；非空元信息保留，不丢弃不同身份的分集。
-    // 【模块：合并两个容器记录】
+    // 【模块 M10 · 存储层：合并两个容器记录】
     function mergeLegacyAggregates(...values) {
         const aggregates = values.filter(value => value && typeof value === 'object' && !Array.isArray(value));
         if (!aggregates.length) return null;
@@ -1456,7 +1475,7 @@
     //  1) 去掉 ?p= 后 BV 相同 → 必为同一合集；
     //  2) 标题相同且作者相同 → 必为同一合集；
     // 都不满足返回 null（先当独立/扁平，等播放页读到合集信息再归并）。
-    // 【模块：为待合并记录寻找本地容器】
+    // 【模块 M11 · 存储层：为待合并记录寻找本地容器】
     // 根据 incoming 的身份信息，在本地已有记录中寻找可能承载该记录的容器。
     // 此处用于迁移/修复阶段的归属判断；不能仅凭标题相似就把不同视频或不同番剧季合并。
     function findLocalContainerToMerge(incoming, incomingKey = '') {
@@ -1489,7 +1508,7 @@
     }
 
     // ── 历史视图索引：全量记录的有序镜像，后台分批构建 + 防抖落盘，供面板快速渲染 ──
-    // 【模块：历史视图索引与最近快照缓存】
+    // 【模块 M12 · 索引层：历史视图索引与最近快照缓存】
     // 原始记录存储是观看数据的事实来源；本模块维护可重建的排序/搜索索引，并另存容量受限的最近快照缓存。
     // 列表首屏可优先读取小缓存，完整索引则在需要时重建或刷新。索引与缓存都属于派生数据，
     // 即使丢失也应能从原始记录重新生成，不应反过来覆盖原始观看记录。
@@ -2125,7 +2144,7 @@
     };
 
     // 只刷新当前已经打开的历史列表，并保留用户正在输入的搜索条件。
-    // 【模块：刷新已打开的历史列表】
+    // 【模块 M13 · 索引层：刷新已打开的历史列表】
     // 当存储记录发生增删改或跨标签页同步时，通知当前页面中已打开的列表重新读取数据并渲染。
     // 根据参数决定是否尽量保留当前滚动位置，避免同步更新打断用户正在浏览的位置。
     function refreshOpenHistoryLists(preserveScroll = false) {
@@ -2155,7 +2174,7 @@
         }
     }
     // ── 记录存取：GM_setValue/GM_getValue 的统一封装，负责索引维护与跨标签页广播 ──
-    // 【模块：原始记录存储与一致性维护】
+    // 【模块 M14 · 存储层：原始记录存储与一致性维护】
     // 封装记录的读、写、删除、容器/分集合并、快速键索引维护，以及本地与其他标签页之间的变更通知。
     // 本地原始记录是唯一事实来源；键索引和视图索引只用于加速查找，必须能在必要时重建。
     // 涉及番剧 ep→ss、合集 parts[]、旧扁平记录兼容的操作，均应通过这里的统一入口保持一致。
@@ -2996,6 +3015,7 @@
         }
     };
 
+    // ── 子模块 S1 · 事务与发布（StorageOperations）：跨标签页锁、提交广播、回读核验 ──
     // 锁顺序固定：维护锁 → 排序后的记录锁。底层事务不加锁，避免重入死锁。
     const StorageOperations = {
         _tail: Promise.resolve(),
@@ -3032,6 +3052,7 @@
         }
     };
 
+    // ── 子模块 S2 · 冷库读写（ColdArchiveStore）：库发现、单条读写、合并与失效标记 ──
     // IndexedDB 冷层：自动发现已有库；不支持数据库枚举时使用 GM 目录。
     const ColdArchiveStore = {
         DB_PREFIX: 'bvh_cold_',
@@ -3712,6 +3733,7 @@
         },
     };
 
+    // ── 子模块 S3 · 冷热路由（StorageRouter）：同步读取、主存模式、队列回放 ──
     // 记录存储路由：GM 热层与冷库合并；DB 主存模式用内存索引适配同步调用。
     const StorageRouter = {
         _cache: new Map(),
@@ -4333,6 +4355,7 @@
         }
     };
 
+    // ── 子模块 S4 · 冷库目录管理（ColdArchiveApi）：扫描、登记、归档那些按钮的实现 ──
     // 冷库目录的管理与迁移操作只在 history 页面提供。
     const ColdArchiveApi = {
         _ensurePromise: null,
@@ -4415,12 +4438,13 @@
     }
 
     // ── 存储业务 API：清理 / 导出 / 导入 / 归并 / 次数重置等按钮背后的具体实现 ──
-    // 【模块：面向界面的记录管理操作】
+    // 【模块 M15 · 运维层：面向界面的记录管理操作】
     // 提供清理短观看记录、清理过期记录、调整观看次数、删除记录、导入/导出、
     // 番剧身份修复、旧结构迁移和存储容量提醒等管理功能。
     // 这些操作会调用 RecordStore 维护原始数据，并让索引/列表跟随更新；此处注释不代表额外改变行为。
     const StorageApi = {
         // 按油猴设置清理未达到观看阈值且满足保留期限的短观看记录。
+        // ── 清理：短观看 / 过期记录 ──
         cleanShortWatchRecords() {
             const keepMs = CONFIG.SHORT_WATCH_EXPIRE_DAY * 24 * 3600 * 1000;
             const nowTs = TimeTool.now();
@@ -4572,6 +4596,7 @@
         },
 
         // 将单条记录的观看次数调低，保留快照、标题、作者和进度等信息。
+        // ── 单条编辑：观看次数、删除单条 ──
         async setWatchCount(key, targetCount, collectionContext = null) {
             if (!RecordKey.isRecordKey(key)) return false;
             const nextCount = Number(targetCount);
@@ -4640,6 +4665,7 @@
             }
         },
 
+        // ── 导出：完整备份 / 全量导出 / CSV ──
         async buildFullBackupPayload() {
             const allRecords = await StorageRouter.readAllRecordsForBackup();
             const exportedAt = Date.now();
@@ -4954,6 +4980,7 @@
         },
 
         // 读取 JSON 备份，校验并归一化数据，再按记录键合并或写入本地存储。
+        // ── 导入：JSON 导入与同键合并 ──
         importRecords() {
             if (!confirm('导入番剧时会按 ss 季和 ep 分集身份合并；无法确认归属的分集会跳过。建议先导出当前数据作为备份，确认继续导入？')) return;
 
@@ -5404,6 +5431,7 @@
         // 5.4.9：只根据本地已有的 ep 记录修复旧 ss 容器，不依赖当前页面或 DOM。
         // 旧数据 bv=ssNNNNN、p=N 时，从其他本地记录中寻找同系列、同 p 的明确 ep 身份。
         // 只有唯一候选才改写；p=1 的疑似整季聚合行、候选冲突、没有映射的行全部保留。
+        // ── 迁移与修复：番剧身份、容器结构 ──
         async repairBangumiIdentityFromLocalData() {
             const keys = GM_listValues().filter(key => RecordKey.isRecordKey(key));
             const records = new Map();
@@ -5833,6 +5861,7 @@
         },
 
         // 检查油猴存储是否接近容量上限，超过警戒线时提示用户。
+        // ── 容量提醒 ──
         checkStorageWarn() {
             const used = ByteTool.calcStorageSize();
             if (used > CONFIG.STORAGE_WARN_THRESHOLD) {
@@ -5846,7 +5875,7 @@
     // 给一条记录或快照补上备份、过期状态。
     // 只在【真正要渲染出来的那几条】上调用：不再为全部记录预先复制一份带状态的中间数组，
     // 也不再在每次搜索输入时把整份历史重新整理一遍。
-    // 【模块：为列表条目补充展示状态】
+    // 【模块 M16 · 渲染层：为列表条目补充展示状态】
     // 根据原始条目、已导出标记和当前时间计算界面所需的附加状态，例如是否已导出或是否过期。
     // 该步骤只服务于展示，不应改变原始记录内容。
     function decorateEntry(entry, exportedMap, nowTs) {
@@ -5878,7 +5907,7 @@
     //   "次数>=3 进度>50"        → 看过至少 3 次、且进度超过 50% 的
     //   "2024-05 老番茄"         → 2024 年 5 月看过、标题/作者含"老番茄"
     //   "快照:100%"              → 任何带"已看完"快照的记录
-    // 【模块：历史记录搜索语法与条件匹配】
+    // 【模块 M17 · 查询层：历史记录搜索语法与条件匹配】
     // 解析用户输入中的普通关键词和结构化条件，再分别匹配观看次数、进度、时间及快照内容。
     // 普通关键词用于标题、作者、合集等可搜索文本；条件查询用于精确筛选记录。
     // 多个条件如何组合由各匹配函数明确规定，避免把搜索语法的含义散落在渲染代码中。
@@ -5972,7 +6001,7 @@
         }
     };
 
-    // 【模块：历史列表查询与渲染】
+    // 【模块 M18 · 渲染层：历史列表查询与渲染】
     // 负责把索引/原始记录转成历史列表 UI，包括搜索过滤、合集分组、分集显示、快照条目、
     // 状态标记、右键菜单和存储信息展示。播放悬浮窗与历史记录页面可复用同一套记录展示逻辑，
     // 通过 variant/options 区分具体场景，而不是各自维护一套互不一致的匹配规则。
@@ -6839,7 +6868,7 @@
         }
     };
 
-    // 【模块：B 站视频卡片 DOM 识别】
+    // 【模块 M19 · 采集层：B 站视频卡片 DOM 识别】
     // 从首页、搜索、动态、个人空间等页面的卡片中提取标签、链接、BV/分集身份和作者信息，
     // 并把可识别的卡片与本地观看记录对应起来。优先依据稳定的链接/数据标记判断身份，
     // 不应仅依赖容易变化的标题文本或页面样式类名。
@@ -6957,7 +6986,7 @@
     };
 
     // ── 官方历史同步：读取 /history 页面卡片，与本地记录对账（同分钟 / 连续播放判定） ──
-    // 【模块：B 站官方历史记录同步】
+    // 【模块 M20 · 采集层：B 站官方历史记录同步】
     // 读取官方历史页面中的视频条目和观看时间/进度，将其合并进本地记录，并维护同步设置与去重规则。
     // 官方历史时间通常只有分钟精度，而播放页采集精确到秒；因此同步需要与本地快照规则协作，
     // 防止同一次持续播放被重复计数，同时保留真正再次观看时的快照。
@@ -7400,7 +7429,7 @@
     } catch (e) { /* 忽略 */ }
 
     // ── 播放记录器：播放器事件 + MutationObserver + 5 秒轮询，持续写入当前观看快照 ──
-    // 【模块：普通视频与番剧播放页自动采集】
+    // 【模块 M21 · 采集层：普通视频与番剧播放页自动采集】
     // 在播放页面识别当前视频/分集，按配置间隔采集播放位置、进度和观看时间，并在完成播放时记录完成快照。
     // 采集结果写入统一记录存储；页面切换、播放器重建及番剧身份变化时，需要避免把旧播放器状态写给新视频。
     const Router = (() => {
@@ -8896,7 +8925,7 @@
     }
 
     // ── 卡片角标：IntersectionObserver 给已看过的视频卡片盖『已观看 ×N』章 ──
-    // 【模块：视频卡片观看记录标记】
+    // 【模块 M22 · 采集层：视频卡片观看记录标记】
     // 扫描已适配页面中的视频卡片，匹配本地记录并在卡片上显示相应标记/信息。
     // 页面内容常由前端动态加载，因此需要处理后续新增的卡片；标记操作只改变展示层，不改观看记录。
     function startCardBadgeRenderer() {
@@ -9167,7 +9196,7 @@
     //       - onStart(callback)  pointerdown 且未命中按钮时触发
     //       - onEnd(didMove, target, el) pointerup/pointercancel 时触发
     //     返回 { isDragging, getDidMove }
-    // 【模块：通用拖动交互】
+    // 【模块 M23 · 交互层：通用拖动交互】
     // 让指定浮层通过 handle 拖动，并按 options 处理边界、移动状态等交互细节。
     // 拖动起点与点击/跳转行为需要区分，避免用户只是点击悬浮窗时被误判为拖拽。
     function makeDraggable(el, handle, options = {}) {
@@ -9327,7 +9356,7 @@
     }
 
     // 为指定卡片提供原生尺寸调整，并把用户最后一次调整的宽高保存到脚本本地设置。
-    // 【模块：浮窗尺寸记忆】
+    // 【模块 M24 · 交互层：浮窗尺寸记忆】
     // 小入口卡片与两个历史搜索面板分别保存尺寸，避免不同页面相互覆盖。
     // 仅在用户拖动右下角调整尺寸后写入设置，普通内容变化不会覆盖用户偏好。
     function setupPersistentResize(el, storageKey, options = {}) {
@@ -9483,7 +9512,7 @@
     }
 
     // 让状态浮窗能够拖动、靠边停靠，并在鼠标移入时暂时展开。
-    // 【模块：悬浮窗停靠与边缘吸附】
+    // 【模块 M25 · 交互层：悬浮窗停靠与边缘吸附】
     // 在拖动完成后处理浮窗的位置与边缘停靠效果，让悬浮窗既能自由移动，也能保持在可访问的位置。
     // 该模块只负责位置/交互，不负责判断当前视频是否有本地观看记录。
     function makeDockableFloat(dom) {
@@ -9573,13 +9602,14 @@
     }, { capture: true, passive: false });
 
     // 一次性注入脚本使用的样式，避免把样式散落在各个 DOM 创建函数中。
-    // 【模块：注入脚本界面样式】
+    // 【模块 M26 · 样式层：注入脚本界面样式】
     // 统一添加历史列表、卡片标记、播放页悬浮窗和相关控件的 CSS。
     // 样式与功能逻辑分离；调整视觉效果时应避免改变 DOM 身份识别或记录读写流程。
     function injectStyle() {
         // 片段按原始 CSS 顺序声明；主题覆盖仍在基础规则之后。
         const styleFragments = {
             cardBadges: `
+            /* [族 E · 卡片角标] 视频卡片左上角来源标签与底部进度条；由 startCardBadgeRenderer 注入。 */
             .bvh-tag {
                 position: absolute; top: 8px; left: 8px; padding: 2px 6px;
                 background: rgba(0,0,0,.75); color: #fff; font-size: 11px;
@@ -9593,6 +9623,7 @@
             .bvh-progress-bar { height: 100%; background: #fb7299; box-shadow: 0 0 5px #fb7299; }
             `,
             playbackFloat: `
+            /* [族 A · 玻璃面板] 播放页左下角悬浮卡：毛玻璃外壳、拖拽与缩放过渡、停靠态。 */
             #bvh-status-float {
                 position: fixed; bottom: 20px; left: 20px; box-sizing: border-box;
                 background: rgba(255,255,255,.76); color: #30323a;
@@ -9635,6 +9666,7 @@
 
             `,
             playbackMenu: `
+            /* [族 A/F · 面板与菜单] 播放悬浮窗的展开菜单与拖动把手。 */
             #bvh-menu-panel {
                 position:fixed; bottom:80px; left:20px; width:246px; box-sizing:border-box;
                 padding:13px; z-index:10001; display:none; overflow:hidden;
@@ -9663,6 +9695,7 @@
 
             `,
             settingsBase: `
+            /* [族 A · 玻璃面板] 设置窗口骨架与表单：行、说明块、数值滑轨、开关、冷库块；由 createSettingsWindow 生成。 */
             /* 设置窗口：浅色磨砂玻璃面板，B站粉色液体滑轨与数值输入共用同一数值。 */
             #bvh-settings-overlay { position:fixed; inset:0; z-index:10050; display:none; align-items:center; justify-content:center; padding:16px; background:rgba(35,25,40,.25); backdrop-filter:blur(8px) saturate(1.2); -webkit-backdrop-filter:blur(8px) saturate(1.2); }
             .bvh-settings-dialog { width:min(680px,calc(100vw - 24px)); max-height:min(86vh,820px); display:flex; flex-direction:column; overflow:hidden; border:1px solid rgba(255,255,255,.82); border-radius:20px; background:rgba(255,255,255,.82); color:#30323a; box-shadow:0 18px 55px rgba(35,25,40,.22),inset 0 1px 0 rgba(255,255,255,.92); backdrop-filter:blur(24px) saturate(1.4); -webkit-backdrop-filter:blur(24px) saturate(1.4); }
@@ -9683,6 +9716,7 @@
             .bvh-setting-row small:hover { color:#a94c70; }
             .bvh-setting-row b { margin-left:auto; color:#c75e83; white-space:nowrap; font-variant-numeric:tabular-nums; }
             .bvh-setting-control { display:grid; grid-template-columns:minmax(0,1fr) 78px; align-items:center; gap:13px; min-width:0; }
+            /* ── 数值滑轨本体（族 B） ── */
             .bvh-liquid-slider { position:relative; height:46px; display:flex; align-items:center; min-width:0; isolation:isolate; padding:0 2px; touch-action:none; }
             .bvh-liquid-track { position:absolute; left:2px; right:2px; top:15px; height:12px; transform:translateY(-50%); overflow:hidden; border-radius:99px; background:linear-gradient(180deg,rgba(120,112,130,.19),rgba(150,140,155,.12)); border:1px solid rgba(120,112,135,.13); box-shadow:inset 0 2px 4px rgba(65,55,75,.12),0 1px 0 rgba(255,255,255,.85); }
             .bvh-liquid-fill { position:absolute; inset:0 auto 0 0; width:50%; border-radius:99px; background:linear-gradient(90deg,#fb7299 0%,#ff8eaa 58%,#f7a4bd 100%); box-shadow:0 0 10px rgba(251,114,153,.30); transition:width .12s cubic-bezier(.22,.8,.24,1),filter .2s ease; }
@@ -9708,6 +9742,7 @@
             .bvh-settings-footer { justify-content:flex-end; gap:9px; border-top:1px solid rgba(80,75,95,.10); border-bottom:0; background:rgba(255,255,255,.22); }
             .bvh-settings-footer button { padding:9px 17px; border:1px solid rgba(120,105,130,.16); border-radius:10px; background:rgba(255,255,255,.58); cursor:pointer; color:#655d68; transition:.2s ease; }
             .bvh-settings-footer button:hover { background:rgba(255,255,255,.92); color:#38313b; }
+            /* ── 开关行（族 C） ── */
             .bvh-setting-row:has(> .bvh-toggle-input) { position:relative; cursor:pointer; }
             .bvh-setting-row > .bvh-toggle-input { position:absolute; right:0; width:48px; height:28px; opacity:0; cursor:pointer; z-index:1; }
             .bvh-setting-row > .bvh-toggle-track { justify-self:end; width:48px; height:28px; border-radius:20px; border:1px solid var(--bvh-theme-border,#eadfe5); background:var(--bvh-theme-card,#fff); transition:background .2s,border-color .2s; box-sizing:border-box; }
@@ -9715,6 +9750,7 @@
             .bvh-toggle-input:checked + .bvh-toggle-track { background:var(--bvh-theme-accent,#fb7299); border-color:var(--bvh-theme-accent,#fb7299); }
             .bvh-toggle-input:checked + .bvh-toggle-track::after { transform:translateX(20px); background:#fff; }
             .bvh-toggle-input:focus-visible + .bvh-toggle-track { outline:2px solid var(--bvh-theme-accent,#fb7299); outline-offset:2px; }
+            /* ── 冷库管理块 ── */
             .bvh-cold-management { display:flex; flex-wrap:wrap; align-items:center; gap:9px; }
             .bvh-cold-management button { padding:9px 17px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:10px; background:var(--bvh-theme-card,#fff); color:var(--bvh-theme-settings-text,#624b54); cursor:pointer; transition:transform .2s,background .2s; }
             .bvh-cold-management button:hover { transform:translateY(-1px); background:color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 12%,var(--bvh-theme-card,#fff)); }
@@ -9732,6 +9768,7 @@
 
             `,
             settingsLayoutOverrides: `
+            /* [族 A/B · 覆盖层] 设置窗口放大版排版，覆盖上方骨架尺寸与滑轨比例；依赖行序，勿移动。 */
             /* 5.7.19：整体放大设置排版；粗滑轨作为主体，节点刻度浮在轨道上方，点击后由弹性过渡缓慢归位。 */
             .bvh-settings-dialog { width:min(820px,calc(100vw - 28px)); max-height:min(90vh,920px); border-radius:24px; }
             .bvh-settings-header,.bvh-settings-footer { padding:21px 27px; }
@@ -9790,6 +9827,7 @@
 
             `,
             historyPanelAndSearch: `
+            /* [族 A/D · 面板与列表] 播放页历史面板、搜索行与帮助卡、列表容器、加载态。 */
             .bvh-storage-info {
                 font-size: 12px; color: #555; margin-bottom: 6px;
                 border-bottom: 1px solid #eee; padding-bottom: 4px;
@@ -9827,6 +9865,7 @@
                 to { opacity: 1; transform: none; }
             }
 
+            /* ── 搜索行与帮助卡 ── */
             .bvh-search-row { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; margin-bottom: 8px; flex: 0 0 auto; }
             #bvh-history-search, #bvh-hp-search {
                 flex: 1 1 auto; min-width: 0; width: 0; box-sizing: border-box; padding: 9px 11px; margin-bottom: 0;
@@ -9854,6 +9893,7 @@
             }
             #bvh-history-list { flex: 1 1 auto; min-height: 0; height: auto; }
 
+            /* ── 加载态与转圈 ── */
             .bvh-history-loading {
                 display: flex; flex-direction: column; align-items: center; justify-content: center;
                 gap: 9px; min-height: 112px; padding: 18px 12px; color: #777; list-style: none;
@@ -9871,6 +9911,7 @@
 
             `,
             recordMenusAndDialogs: `
+            /* [族 F · 菜单与对话框] 右键记录菜单与「调整观看次数」对话框。 */
             .bvh-record-context-menu {
                 position: fixed; z-index: 2147483647; min-width: 188px; padding: 7px;
                 box-sizing: border-box; border: 1px solid rgba(255,255,255,.78);
@@ -9897,6 +9938,7 @@
             .bvh-record-context-action.is-danger:hover {
                 background: rgba(255,235,238,.95); border-color: rgba(244,170,180,.75);
             }
+            /* ── 调整次数对话框 ── */
             .bvh-record-dialog-overlay {
                 position: fixed; inset: 0; z-index: 2147483647; display: flex; align-items: flex-start;
                 justify-content: center; padding: 20px; box-sizing: border-box;
@@ -9937,6 +9979,7 @@
 
             `,
             historyRecordsAndGroups: `
+            /* [族 D · 列表] 单条记录、合集分组卡、分集子列表与快照条目。 */
             .bvh-history-item {
                 font-size: calc(var(--bvh-ui-font-size, 16px) * .75); padding: 7px 5px; border-radius: 10px;
                 line-height: 1.5; cursor: pointer; list-style: none;
@@ -9955,6 +9998,7 @@
                 box-shadow: 0 7px 16px rgba(52,39,58,.09), 0 2px 4px rgba(52,39,58,.035);
                 transform: translateY(-2px); z-index: 1;
             }
+            /* ── 合集分组头 ── */
             .bvh-group-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px 8px; cursor: pointer; transition: background-color .22s ease; }
             .bvh-group-head:hover { background: rgba(251,239,249,.72); }
             .bvh-group-main { min-width: 0; flex: 1 1 auto; }
@@ -9966,6 +10010,7 @@
             .bvh-group-toggle:hover { background: #f0eaf3; border-color: #d6c8dc; transform: translateY(-1px); }
             .bvh-group-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
             .bvh-part-label { display: inline-flex; align-items: center; padding: 2px 7px; border: 1px solid rgba(220,207,223,.9); border-radius: 6px; background: rgba(247,242,249,.95); color: #806d88; font-size: 10px; line-height: 1.45; white-space: nowrap; }
+            /* ── 分集子列表 ── */
             .bvh-group-children { padding: 0 10px 10px 15px; }
             .bvh-group-children[hidden] { display: none !important; }
             .bvh-small-collection-box {
@@ -10026,6 +10071,7 @@
 
             `,
             historyPagePanel: `
+            /* [族 A · 面板] 历史记录页左下角入口卡与主面板。 */
             #bvh-history-page-entry { position: fixed; left: 24px; bottom: 24px; z-index: 9999; }
             /* 历史页入口卡片只增加高度，不开放尺寸拖拽，保持与视频页相同的收起/展开逻辑。 */
             #bvh-history-page-entry #bvh-status-float {
@@ -10048,6 +10094,7 @@
             }
             `,
             panelDragAndResize: `
+            /* [族 H · 状态修饰] 拖动 / 调整尺寸时的降级绘制与预览提示。 */
             /* 调整尺寸时暂停昂贵的毛玻璃与子树绘制；半透明遮罩只负责遮住内容，不再执行 backdrop-filter。 */
             #bvh-history-panel.bvh-resizing,
             #bvh-history-page-panel.bvh-resizing {
@@ -10127,6 +10174,7 @@
             }
             `,
             historyPageControls: `
+            /* [族 D · 控件] 历史页顶栏、操作按钮、存储信息与列表渲染遮罩。 */
             #bvh-hp-drag-bar {
                 display: flex; align-items: center; justify-content: space-between;
                 padding: 10px 14px;
@@ -10174,6 +10222,7 @@
             }
             `,
             themeVariablesAndOverrides: `
+            /* [族 G · 主题变量] 主题 token 定义 + 各组件对 token 的映射；默认 B 站粉。 */
             :root {
                 --bvh-theme-accent:#fb7299; --bvh-theme-accent-2:#f6a0b9;
                 --bvh-theme-panel:#fffafd; --bvh-theme-card:#fff; --bvh-theme-text:#624b54;
@@ -10185,6 +10234,7 @@
                 --bvh-theme-slider-dot:#d65b80;
                 --bvh-theme-accent-text:#fff; --bvh-theme-watch-count-text:#27ae60;
             }
+            /* ── 面板壳统一映射到主题 token ── */
             #bvh-history-page-panel, #bvh-history-panel, #bvh-menu-panel, .bvh-settings-dialog {
                 background-color:var(--bvh-theme-panel) !important; color:var(--bvh-theme-text);
                 border-color:var(--bvh-theme-border) !important;
@@ -10251,6 +10301,7 @@
             .bvh-record-context-title, .bvh-record-dialog-title, .bvh-settings-header button:hover,
             .bvh-setting-row b { color:var(--bvh-theme-accent) !important; }
             #bvh-history-close, #bvh-history-close:hover { background:color-mix(in srgb,var(--bvh-theme-accent) 18%,transparent); color:var(--bvh-theme-accent); }
+            /* ── 列表与条目映射 ── */
             #bvh-history-list, #bvh-hp-list { background:color-mix(in srgb,var(--bvh-theme-card) 62%,transparent); border-color:var(--bvh-theme-border); }
             .bvh-history-item:not(.bvh-history-header):not(.bvh-history-group-item), .bvh-history-group-item,
             .bvh-part-row { background:var(--bvh-theme-card); color:var(--bvh-theme-record-text); border-color:var(--bvh-theme-border); }
@@ -10283,6 +10334,7 @@
             .bvh-loading-spinner { border-color:color-mix(in srgb,var(--bvh-theme-accent) 22%,transparent); border-top-color:var(--bvh-theme-accent) !important; border-right-color:var(--bvh-theme-accent) !important; }
             `,
             darkThemeOverrides: `
+            /* [族 G · 主题变量] 黑金主题的 token 覆盖。 */
             :root[data-bvh-theme="dark"] #bvh-history-page-panel,
             :root[data-bvh-theme="dark"] #bvh-history-panel,
             :root[data-bvh-theme="dark"] #bvh-menu-panel { background:color-mix(in srgb,var(--bvh-theme-panel) 94%,transparent) !important; }
@@ -10347,6 +10399,7 @@
             :root[data-bvh-theme="dark"] .bvh-resize-handle { background:linear-gradient(135deg,transparent 0 42%,color-mix(in srgb,var(--bvh-theme-accent) 30%,transparent) 43% 49%,transparent 50% 61%,color-mix(in srgb,var(--bvh-theme-accent) 44%,transparent) 62% 68%,transparent 69%) !important; }
             `,
             themeEditorAndPreview: `
+            /* [族 G · 主题变量] 预设主题卡、高级取色与配色预览卡。 */
             .bvh-theme-presets { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:4px 0 12px; }
             .bvh-theme-option { display:flex; min-width:0; flex-direction:column; gap:5px; }
             .bvh-theme-presets button[data-theme-preset] { display:flex; align-items:center; gap:9px; min-width:0; padding:9px 11px; border:1px solid var(--bvh-theme-border); border-radius:11px; background:var(--bvh-theme-card); color:var(--bvh-theme-text); cursor:pointer; }
@@ -10384,7 +10437,7 @@
     }
 
     // 播放页浮窗内容：existingFloat 分支和新建分支共用同一份 HTML 生成
-    // 【模块：构建播放页悬浮窗内容】
+    // 【模块 M27 · 界面层：构建播放页悬浮窗内容】
     // 根据传入的历史信息生成悬浮窗的展示结构，包括记录状态和可供用户操作的内容。
     // 这里负责生成界面，不单独决定记录是否存在；记录判断应由统一的解析/读取逻辑提供。
     function buildPlaybackFloatHtml(history) {
@@ -10409,7 +10462,7 @@
     }
 
     // 根据当前真实播放地址解析悬浮窗记录。番剧必须以 ep 为单集身份，不能把 ss 的第 1 个 part 当成当前集。
-    // 【模块：解析当前播放视频对应的本地历史】
+    // 【模块 M28 · 界面层：解析当前播放视频对应的本地历史】
     // 根据当前 URL 解析结果，从统一存储中找到普通视频、合集分集或番剧分集的正确记录。
     // 重点是让悬浮窗读取身份与写入身份保持一致，避免因 ep/ss、BV 分 P 或合集键格式不同而误报无记录。
     function resolvePlaybackHistory(parsed) {
@@ -10590,7 +10643,7 @@
     }
 
     // ── 播放页 UI：左下角悬浮窗（单击续播 / 右键菜单 / 历史面板） ──
-    // 【模块：播放页面悬浮窗 UI】
+    // 【模块 M29 · 界面层：播放页面悬浮窗 UI】
     // 负责在播放页面初始化、更新和显示历史悬浮窗，并把当前视频的历史查询结果交给内容构建函数。
     // UI 的显示状态与数据是否存在必须分开判断，不能用某次 DOM 文本状态替代存储查询结果。
     const PlaybackUI = {
@@ -10880,7 +10933,7 @@
     };
 
     // ── 官方历史页 UI：左下角入口 + 可拖拽大面板（同步/导出/导入/清理/重置按钮） ──
-    // 【模块：历史记录页面 UI】
+    // 【模块 M30 · 界面层：历史记录页面 UI】
     // 初始化历史记录页面的脚本面板，连接列表渲染、搜索、记录管理和最近快照展示。
     // 具体记录筛选与分组复用 HistoryListRenderer，存储变化时通过统一刷新机制更新视图。
     const HistoryPageUI = {
@@ -11005,7 +11058,7 @@
     };
 
     // 在官方历史页监听卡片变化，延迟合并同步，避免每次 DOM 更新都立即扫描。
-    // 【模块：官方历史自动同步调度】
+    // 【模块 M31 · 采集层：官方历史自动同步调度】
     // 在适当的页面条件下触发官方历史同步，并使用防抖/状态保护避免短时间重复启动。
     // 自动同步与手动同步共用同步核心逻辑，避免两套路径产生不同的去重和写入结果。
     function startHistoryAutoSync() {
@@ -11053,7 +11106,7 @@
     }
 
     // ── 加载用户设置：启动时把 GM 里持久化的配置覆盖到 CONFIG ──
-    // 【模块：读取并应用用户设置】
+    // 【模块 M32 · 运维层：读取并应用用户设置】
     // 从 GM 存储读取过期天数、同步页数、最近快照数量/来源配额、短观看阈值和连续观看间隔等设置，
     // 对缺失或不合法的值回退到配置默认值，保证后续功能使用一致的参数。
     function loadSettings() {
@@ -11131,7 +11184,7 @@
     }
 
     // ── 油猴菜单：仅保留数据维护操作；普通参数统一由脚本内设置窗口管理 ──
-    // 【模块：注册油猴菜单命令】
+    // 【模块 M33 · 运维层：注册油猴菜单命令】
     // 油猴菜单只保留重置次数、归并分集和数据结构迁移等维护操作；可调参数由 openSettingsWindow 统一保存。
     function registerMenus() {
         if (typeof GM_registerMenuCommand !== 'function') return;
@@ -11192,10 +11245,14 @@
         }
     };
 
+    // ── 界面构造与表单同步：菜单只负责数据维护，窗口参数统一在这里生成 ──
+    // 【模块 M34 · 界面层：脚本内设置窗口 UI】
+    // 职责：createSettingsWindow 只构造 DOM；openSettingsWindow 负责显隐；refreshSettingsWindow
+    // 把当前 CONFIG 灌入表单并绑定交互。参数如何生效由 loadSettings / StorageApi 决定，这里不写存储。
     function createSettingsWindow() {
-            const overlay = document.createElement('div');
-            overlay.id = 'bvh-settings-overlay';
-            overlay.innerHTML = `
+        const overlay = document.createElement('div');
+        overlay.id = 'bvh-settings-overlay';
+        overlay.innerHTML = `
                 <section class="bvh-settings-dialog" role="dialog" aria-modal="true" aria-label="观看历史设置">
                     <header class="bvh-settings-header"><div class="bvh-settings-heading"><strong>观看历史设置</strong></div><button type="button" data-close title="关闭">×</button></header>
                     <div class="bvh-settings-body">
@@ -11285,90 +11342,90 @@
                     </div>
                     <footer class="bvh-settings-footer"><button type="button" data-cancel>取消</button><button type="button" data-save>保存设置</button></footer>
                 </section>`;
-            document.body.appendChild(overlay);
-            overlay.addEventListener('click', e => {
-                if (e.target === overlay || e.target.closest('[data-close], [data-cancel]')) {
-                    if (overlay._bvhTask === 'save') return;
-                    applyColorTheme(readColorTheme());
-                    overlay.style.display = 'none';
-                    const tooltip = document.getElementById('bvh-setting-tooltip');
-                    if (tooltip) tooltip.hidden = true;
-                }
-            });
-            overlay.querySelector('[data-save]').addEventListener('click', () => SettingsOperations.run(overlay, 'save', async function saveSettings() {
-                const get = id => Number(overlay.querySelector(`#${id}`).value);
-                const requestedColdAge = StorageRouter.isPrimaryMode() ? 0 : get('bvh-setting-cold-age');
-                if (requestedColdAge === 0 && !CONFIG.COLD_PRIMARY_MODE) {
-                    if (!confirm('不可逆操作：这会把现有记录迁入 IndexedDB，并在核验成功后删除 GM 中的记录副本。完成后不能切回 GM 存储。迁移失败时原数据会保留。确定开始吗？')) return;
-                    const saveButton = overlay.querySelector('[data-save]');
-                    const status = overlay.querySelector('[data-cold-status]');
-                    saveButton.disabled = true;
-                    if (status) status.textContent = '正在迁移并核验记录；完成前请勿关闭此页面。';
-                    try {
-                        const result = await StorageRouter.enablePrimaryMode();
-                        if (status) status.textContent = `DB 主存模式已永久启用：${result.count} 条记录已迁移并核验。`;
-                        const ageControl = overlay.querySelector('#bvh-setting-cold-age');
-                        if (ageControl) ageControl.disabled = true;
-                        const intervalControl = overlay.querySelector('#bvh-setting-cold-interval');
-                        if (intervalControl) intervalControl.disabled = true;
-                        const autoArchiveControl = overlay.querySelector('[data-cold-auto]');
-                        if (autoArchiveControl) autoArchiveControl.disabled = true;
-                    } catch (error) {
-                        if (status) status.textContent = `迁移未完成，原存储模式与源记录保留：${error.message}`;
-                        alert(`DB 主存迁移失败，GM 中的原记录已保留：${error.message}`);
-                        return;
-                    }
-                }
-                CONFIG.CONTINUOUS_DEDUP_MODE = overlay.querySelector('#bvh-setting-dedup-mode').value;
-                CONFIG.CONTINUOUS_GAP_MIN = Math.max(1, Math.min(180, Math.round(get('bvh-setting-gap'))));
-                CONFIG.CONTINUOUS_PROGRESS_DELTA = get('bvh-setting-progress');
-                CONFIG.EXPIRE_DAY = get('bvh-setting-expire');
-                CONFIG.EXPIRE_MS = CONFIG.EXPIRE_DAY * 86400000;
-                CONFIG.HISTORY_SYNC_PAGES = get('bvh-setting-pages');
-                CONFIG.RECENT_SNAPSHOT_COUNT = get('bvh-setting-recent');
-                CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA = get('bvh-setting-quota') / 100;
-                CONFIG.SHORT_WATCH_MAX_POS_SEC = get('bvh-setting-short');
-                CONFIG.SHORT_WATCH_EXPIRE_DAY = get('bvh-setting-retention');
-                CONFIG.COLD_ARCHIVE_AGE_DAY = StorageRouter.isPrimaryMode() ? 0 : Math.max(1, requestedColdAge);
-                CONFIG.COLD_ARCHIVE_INTERVAL_DAY = Math.max(1, Math.min(90, get('bvh-setting-cold-interval')));
-                CONFIG.COLD_ARCHIVE_ENABLED = overlay.querySelector('[data-cold-auto]')?.checked === true;
-                CONFIG.COLD_SEARCH_AUTO = overlay.querySelector('[data-cold-search-auto]')?.checked === true;
-                CONFIG.UI_FONT_SIZE = Number(overlay.querySelector('#bvh-setting-font-size').value);
-                const themeState = readColorThemeState();
-                const drafts = overlay._bvhThemeDrafts || themeState.themes;
-                const activePreset = THEME_PRESETS.includes(overlay._bvhThemeActivePreset) ? overlay._bvhThemeActivePreset : themeState.activePreset;
-                const savedThemes = Object.fromEntries(THEME_PRESETS.map(preset => [preset, cloneColorTheme(drafts[preset] || themeState.themes[preset])]));
-                GM_setValue(COLOR_THEME_SETTINGS_KEY, { version: 3, activePreset, themes: savedThemes });
-                const chosenTheme = { ...COLOR_THEMES[activePreset], ...savedThemes[activePreset], preset: activePreset, basePreset: activePreset, mode: activePreset === 'dark' ? 'dark' : 'light' };
-                applyColorTheme(chosenTheme);
-                document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
-                overlay.querySelector('.bvh-settings-dialog').style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
-                const now = Date.now();
-                RecordStore.set(CONTINUOUS_GAP_SETTINGS_KEY, { minutes: CONFIG.CONTINUOUS_GAP_MIN, updatedAt: now });
-                RecordStore.set(CONTINUOUS_PROGRESS_SETTINGS_KEY, { delta: CONFIG.CONTINUOUS_PROGRESS_DELTA, updatedAt: now });
-                RecordStore.set(CONTINUOUS_MODE_SETTINGS_KEY, { mode: CONFIG.CONTINUOUS_DEDUP_MODE, updatedAt: now });
-                RecordStore.set(EXPIRE_SETTINGS_KEY, { days: CONFIG.EXPIRE_DAY, updatedAt: now });
-                RecordStore.set(HISTORY_SYNC_SETTINGS_KEY, { pages: CONFIG.HISTORY_SYNC_PAGES, updatedAt: now });
-                RecordStore.set(RECENT_SNAPSHOT_SETTINGS_KEY, { count: CONFIG.RECENT_SNAPSHOT_COUNT, updatedAt: now });
-                RecordStore.set(RECENT_SNAPSHOT_QUOTA_SETTINGS_KEY, { quota: CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA, updatedAt: now });
-                RecordStore.set(SHORT_WATCH_SETTINGS_KEY, { seconds: CONFIG.SHORT_WATCH_MAX_POS_SEC, days: CONFIG.SHORT_WATCH_EXPIRE_DAY, updatedAt: now });
-                GM_setValue(COLD_ARCHIVE_SETTINGS_KEY, {
-                    ...(GM_getValue(COLD_ARCHIVE_SETTINGS_KEY, {}) || {}),
-                    ageDays: CONFIG.COLD_ARCHIVE_AGE_DAY,
-                    intervalDays: CONFIG.COLD_ARCHIVE_INTERVAL_DAY,
-                    enabled: CONFIG.COLD_ARCHIVE_ENABLED,
-                    searchAuto: CONFIG.COLD_SEARCH_AUTO,
-                    updatedAt: now
-                });
-                if (HistoryViewIndex._index) HistoryViewIndex._rebuild(HistoryViewIndex._index.itemsByKey, true);
-                updateCleanupButtonLabels();
-                refreshOpenHistoryLists();
-                StorageApi.cleanShortWatchRecords();
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay || e.target.closest('[data-close], [data-cancel]')) {
+                if (overlay._bvhTask === 'save') return;
+                applyColorTheme(readColorTheme());
                 overlay.style.display = 'none';
                 const tooltip = document.getElementById('bvh-setting-tooltip');
                 if (tooltip) tooltip.hidden = true;
-            }).catch(error => alert(`保存设置失败：${error.message}`)));
-            return overlay;
+            }
+        });
+        overlay.querySelector('[data-save]').addEventListener('click', () => SettingsOperations.run(overlay, 'save', async function saveSettings() {
+            const get = id => Number(overlay.querySelector(`#${id}`).value);
+            const requestedColdAge = StorageRouter.isPrimaryMode() ? 0 : get('bvh-setting-cold-age');
+            if (requestedColdAge === 0 && !CONFIG.COLD_PRIMARY_MODE) {
+                if (!confirm('不可逆操作：这会把现有记录迁入 IndexedDB，并在核验成功后删除 GM 中的记录副本。完成后不能切回 GM 存储。迁移失败时原数据会保留。确定开始吗？')) return;
+                const saveButton = overlay.querySelector('[data-save]');
+                const status = overlay.querySelector('[data-cold-status]');
+                saveButton.disabled = true;
+                if (status) status.textContent = '正在迁移并核验记录；完成前请勿关闭此页面。';
+                try {
+                    const result = await StorageRouter.enablePrimaryMode();
+                    if (status) status.textContent = `DB 主存模式已永久启用：${result.count} 条记录已迁移并核验。`;
+                    const ageControl = overlay.querySelector('#bvh-setting-cold-age');
+                    if (ageControl) ageControl.disabled = true;
+                    const intervalControl = overlay.querySelector('#bvh-setting-cold-interval');
+                    if (intervalControl) intervalControl.disabled = true;
+                    const autoArchiveControl = overlay.querySelector('[data-cold-auto]');
+                    if (autoArchiveControl) autoArchiveControl.disabled = true;
+                } catch (error) {
+                    if (status) status.textContent = `迁移未完成，原存储模式与源记录保留：${error.message}`;
+                    alert(`DB 主存迁移失败，GM 中的原记录已保留：${error.message}`);
+                    return;
+                }
+            }
+            CONFIG.CONTINUOUS_DEDUP_MODE = overlay.querySelector('#bvh-setting-dedup-mode').value;
+            CONFIG.CONTINUOUS_GAP_MIN = Math.max(1, Math.min(180, Math.round(get('bvh-setting-gap'))));
+            CONFIG.CONTINUOUS_PROGRESS_DELTA = get('bvh-setting-progress');
+            CONFIG.EXPIRE_DAY = get('bvh-setting-expire');
+            CONFIG.EXPIRE_MS = CONFIG.EXPIRE_DAY * 86400000;
+            CONFIG.HISTORY_SYNC_PAGES = get('bvh-setting-pages');
+            CONFIG.RECENT_SNAPSHOT_COUNT = get('bvh-setting-recent');
+            CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA = get('bvh-setting-quota') / 100;
+            CONFIG.SHORT_WATCH_MAX_POS_SEC = get('bvh-setting-short');
+            CONFIG.SHORT_WATCH_EXPIRE_DAY = get('bvh-setting-retention');
+            CONFIG.COLD_ARCHIVE_AGE_DAY = StorageRouter.isPrimaryMode() ? 0 : Math.max(1, requestedColdAge);
+            CONFIG.COLD_ARCHIVE_INTERVAL_DAY = Math.max(1, Math.min(90, get('bvh-setting-cold-interval')));
+            CONFIG.COLD_ARCHIVE_ENABLED = overlay.querySelector('[data-cold-auto]')?.checked === true;
+            CONFIG.COLD_SEARCH_AUTO = overlay.querySelector('[data-cold-search-auto]')?.checked === true;
+            CONFIG.UI_FONT_SIZE = Number(overlay.querySelector('#bvh-setting-font-size').value);
+            const themeState = readColorThemeState();
+            const drafts = overlay._bvhThemeDrafts || themeState.themes;
+            const activePreset = THEME_PRESETS.includes(overlay._bvhThemeActivePreset) ? overlay._bvhThemeActivePreset : themeState.activePreset;
+            const savedThemes = Object.fromEntries(THEME_PRESETS.map(preset => [preset, cloneColorTheme(drafts[preset] || themeState.themes[preset])]));
+            GM_setValue(COLOR_THEME_SETTINGS_KEY, { version: 3, activePreset, themes: savedThemes });
+            const chosenTheme = { ...COLOR_THEMES[activePreset], ...savedThemes[activePreset], preset: activePreset, basePreset: activePreset, mode: activePreset === 'dark' ? 'dark' : 'light' };
+            applyColorTheme(chosenTheme);
+            document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+            overlay.querySelector('.bvh-settings-dialog').style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+            const now = Date.now();
+            RecordStore.set(CONTINUOUS_GAP_SETTINGS_KEY, { minutes: CONFIG.CONTINUOUS_GAP_MIN, updatedAt: now });
+            RecordStore.set(CONTINUOUS_PROGRESS_SETTINGS_KEY, { delta: CONFIG.CONTINUOUS_PROGRESS_DELTA, updatedAt: now });
+            RecordStore.set(CONTINUOUS_MODE_SETTINGS_KEY, { mode: CONFIG.CONTINUOUS_DEDUP_MODE, updatedAt: now });
+            RecordStore.set(EXPIRE_SETTINGS_KEY, { days: CONFIG.EXPIRE_DAY, updatedAt: now });
+            RecordStore.set(HISTORY_SYNC_SETTINGS_KEY, { pages: CONFIG.HISTORY_SYNC_PAGES, updatedAt: now });
+            RecordStore.set(RECENT_SNAPSHOT_SETTINGS_KEY, { count: CONFIG.RECENT_SNAPSHOT_COUNT, updatedAt: now });
+            RecordStore.set(RECENT_SNAPSHOT_QUOTA_SETTINGS_KEY, { quota: CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA, updatedAt: now });
+            RecordStore.set(SHORT_WATCH_SETTINGS_KEY, { seconds: CONFIG.SHORT_WATCH_MAX_POS_SEC, days: CONFIG.SHORT_WATCH_EXPIRE_DAY, updatedAt: now });
+            GM_setValue(COLD_ARCHIVE_SETTINGS_KEY, {
+                ...(GM_getValue(COLD_ARCHIVE_SETTINGS_KEY, {}) || {}),
+                ageDays: CONFIG.COLD_ARCHIVE_AGE_DAY,
+                intervalDays: CONFIG.COLD_ARCHIVE_INTERVAL_DAY,
+                enabled: CONFIG.COLD_ARCHIVE_ENABLED,
+                searchAuto: CONFIG.COLD_SEARCH_AUTO,
+                updatedAt: now
+            });
+            if (HistoryViewIndex._index) HistoryViewIndex._rebuild(HistoryViewIndex._index.itemsByKey, true);
+            updateCleanupButtonLabels();
+            refreshOpenHistoryLists();
+            StorageApi.cleanShortWatchRecords();
+            overlay.style.display = 'none';
+            const tooltip = document.getElementById('bvh-setting-tooltip');
+            if (tooltip) tooltip.hidden = true;
+        }).catch(error => alert(`保存设置失败：${error.message}`)));
+        return overlay;
     }
 
     function openSettingsWindow() {
@@ -11840,7 +11897,7 @@
     }
 
     // 启动时检查本地记录格式，只在归一化结果确有变化时写回。
-    // 【模块：批量规范化本地记录】
+    // 【模块 M35 · 运维层：批量规范化本地记录】
     // 遍历现有本地记录并使用统一规范化规则修整旧字段、快照结构和容器/分集形态。
     // 该过程服务于兼容性维护，不能把索引缓存当作原始记录来源。
     function normalizeAllLocalRecords() {
@@ -11860,7 +11917,7 @@
     // 启动时自动整理本地记录，但绝不自动删除记录。
     // 没有观看事实的记录只标记 emptyRecord=true，保留原始键、标题、作者和合集信息，
     // 供后续合集扫描与本地分集匹配使用。是否删除必须由用户在设置/清理操作中主动决定。
-    // 【模块：启动阶段的本地数据修复与清理】
+    // 【模块 M36 · 运维层：启动阶段的本地数据修复与清理】
     // 执行有版本标记保护的一次性修复，以及必要的无效/过期数据整理，避免每次启动重复执行同一迁移。
     // 清理条件应与长期记录、短观看记录各自的保留规则一致。
     function repairAndCleanLocalRecords() {
@@ -11896,7 +11953,7 @@
     }
 
     // ── 入口：注入样式 → 加载设置 → 注册菜单 → 归一化存量记录 → 启动各子系统 ──
-    // 【模块：脚本启动入口】
+    // 【模块 M37 · 入口层：脚本启动入口】
     // 在页面 DOM 可用后按顺序加载设置、注入样式、初始化存储/索引、执行必要的数据修复，
     // 再根据当前页面类型启动播放采集、卡片标记、悬浮窗或历史页面 UI。
     // 页面专属功能由这里统一调度，避免在不相关页面重复安装监听器或渲染界面。
