@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.26
+// @version      5.10.27
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.27：备份“待确认”三个按钮改名并写清各自含义；环境无保存对话框时“另存”置灰且不再重复下载。
 // 5.10.26：设置页长任务加全程遮罩（转圈 + 说明当前在做什么），期间锁定全部控件防重复点击；导出备份加重入锁。
 // 5.10.25：CSV 导出一分为二——热层 CSV 与全部 CSV（热层 + 全部冷库合并后展开），共用同一套列与格式。
 // 5.10.24：DB 主存模式（归档年龄=0）下把归档、自动查冷库、“只导出油猴存储”等失效控件统一置灰并写明原因；迁移成功后立即生效。
@@ -11954,10 +11955,11 @@
                                 <p class="bvh-setting-note">保存方式按浏览器能力自动选择：①系统保存对话框（写入完成才返回成功）；②GM_download（下载完成回调才算成功，首次会问是否允许下载）；③普通下载（脚本拿不到结果，只能由你点“我已确认文件已保存”）。前两种成功即自动登记。</p>
                                 <p class="bvh-setting-note" data-backup-state-text>还没有已确认保存的备份。清理过期记录前需要先完成一次。</p>
                                 <div class="bvh-cold-management" data-backup-pending hidden>
-                                    <button type="button" data-backup-picker>保存到磁盘并确认</button>
-                                    <button type="button" data-backup-confirm>我已确认文件已保存</button>
+                                    <button type="button" data-backup-picker>用系统对话框另存（成功后自动登记）</button>
+                                    <button type="button" data-backup-confirm>我已在下载列表确认过文件</button>
                                     <button type="button" data-backup-cancel>取消这次备份</button>
                                 </div>
+                                <p class="bvh-setting-note" data-backup-pending-buttons hidden>三个按钮的区别：①“用系统对话框另存”＝重新弹一次保存对话框把这份备份写到指定位置，写入完成即自动登记，适合第一次被浏览器拦下的情况；②“我已在下载列表确认过文件”＝仅表示你亲眼确认过文件已落盘，由你为这次保存背书，脚本不会去写盘；③“取消这次备份”＝丢弃这份待确认内容，什么都不登记。</p>
                                 <p class="bvh-setting-note" data-backup-pending-hint hidden></p>
                             </div>
                         </div>
@@ -12375,6 +12377,8 @@
         const backupStateText = overlay.querySelector('[data-backup-state-text]');
         const pendingActions = overlay.querySelector('[data-backup-pending]');
         const pendingHint = overlay.querySelector('[data-backup-pending-hint]');
+        const pendingButtonHelp = overlay.querySelector('[data-backup-pending-buttons]');
+        const pickerButton = overlay.querySelector('[data-backup-picker]');
 
         // 三种保存方式对用户的含义不同，统一在这里翻译成人话，避免只显示内部标识。
         const backupMethodLabel = method => ({
@@ -12386,13 +12390,22 @@
         const renderBackupState = () => {
             const prep = StorageApi._pendingBackup;
             const meta = StorageApi.readConfirmedBackup();
+            // 系统里根本没有可用的保存对话框时，“另存”这个按钮点了只会再降级一次下载，直接置灰更诚实。
+            const canPick = !!StorageApi._nativeSaveFilePicker();
+            if (pickerButton) {
+                pickerButton.disabled = !canPick;
+                pickerButton.title = canPick
+                    ? '重新弹一次系统保存对话框，把这份备份写到指定位置；写入完成即自动登记为已备份。'
+                    : '当前环境没有可用的系统保存对话框：请用浏览器下载后，在下载列表确认文件，再点“我已在下载列表确认过文件”。';
+            }
+            if (pendingButtonHelp) pendingButtonHelp.hidden = !prep;
             if (prep) {
                 if (pendingActions) pendingActions.hidden = false;
                 if (pendingHint) {
                     pendingHint.hidden = false;
                     pendingHint.textContent = `已生成 ${prep.filename}（${ByteTool.format(prep.bytes)}，${prep.count} 条），等待确认保存。确认前不会登记为已备份，清理也不会删除任何记录。`;
                 }
-                if (backupStateText) backupStateText.textContent = '待确认的备份：请在浏览器下载列表里确认文件确实已保存，然后点“我已确认文件已保存”；也可以点“保存到磁盘并确认”直接写入并校验。';
+                if (backupStateText) backupStateText.textContent = '待确认的备份：请在浏览器下载列表里确认文件确实已保存，然后点“我已在下载列表确认过文件”；也可以点“用系统对话框另存”重新写盘并自动登记。';
             } else {
                 if (pendingActions) pendingActions.hidden = true;
                 if (pendingHint) { pendingHint.hidden = true; pendingHint.textContent = ''; }
@@ -12454,10 +12467,19 @@
         }));
 
         // 系统保存对话框需要新的用户手势，所以单独一个按钮触发，避免生成过程耗尽激活窗口。
-        SettingsOperations.bind(overlay.querySelector('[data-backup-picker]'), 'click', () => SettingsOperations.run(overlay, 'export-save', async () => {
+        SettingsOperations.bind(pickerButton, 'click', () => SettingsOperations.run(overlay, 'export-save', async () => {
             const prep = StorageApi._pendingBackup;
-            if (!prep) { renderBackupState(); return; }
-            finishBackupFlow(prep, await StorageApi.saveBackupVerified(prep));
+            if (!prep) {
+                renderBackupState();
+                if (backupStateText) backupStateText.textContent = '本次没有待保存的备份：请先点上方的“导出完整备份”生成一份，再来另存。';
+                return;
+            }
+            if (!StorageApi._nativeSaveFilePicker()) {
+                renderBackupState();
+                if (backupStateText) backupStateText.textContent = '当前环境没有可用的系统保存对话框，这次不会重复下载；请在浏览器下载列表确认文件后，点“我已在下载列表确认过文件”。';
+                return;
+            }
+            finishBackupFlow(prep, await StorageApi.saveBackupVerified(prep, null, { pickerTried: false }));
         }));
 
         SettingsOperations.bind(overlay.querySelector('[data-backup-confirm]'), 'click', () => SettingsOperations.run(overlay, 'export-confirm', async () => {

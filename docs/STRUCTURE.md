@@ -97,6 +97,16 @@
 2. **登记前逐键比对当前值**。`prepare` 到 `confirm` 之间被改过的记录从标记中剔除，避免新值被误标为已备份。
 3. **`cleanExpireRecords` 只认已确认备份**。范围导出后，范围外的过期记录会保留，并在确认文案里给出数量。
 
+待确认状态下只有三个按钮，含义必须固定，不要合并：
+
+| 按钮 | 实际动作 | 何时使用 |
+|---|---|---|
+| 用系统对话框另存（成功后自动登记） | 重新 `showSaveFilePicker` → 写入 → `close()` → 自动 `confirmBackup` | 第一次导出被浏览器拦下、或降级成了普通下载 |
+| 我已在下载列表确认过文件 | 只调 `confirmBackup(prep, 'download')`，不写盘 | 普通下载已落盘，由用户背书 |
+| 取消这次备份 | 清 `_pendingBackup`，不登记 | 放弃这份内容 |
+
+环境里没有可用保存对话框时，“另存”按钮置 `disabled` 并写清原因——否则它会再降级一次下载，凭空多出一份文件。
+
 `migrateToContainerStructure` 不再隐式导出，改为前置条件 `hasConfirmedBackup()`；未确认直接中止（E2004）。
 
 范围参数只作用于最终合并集，payload 的 `format`/`version` 不变，`importRecords` 无需改动：
