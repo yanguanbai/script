@@ -106,6 +106,15 @@ scope = { kind: 'all' | 'video' | 'bangumi' | 'live' | 'collection' | 'gm', sinc
 
 `kind='gm'` 只取仍在油猴存储里的记录（`GM_getValue(key)` 存在），冷库里的记录不导出、也不会因这份备份被放行为可清理。
 
+CSV 有两条出口，共用 `_exportCSV(entries, label, fileSuffix)`：
+
+| 入口 | 数据来源 | 用途 |
+|---|---|---|
+| `exportCSVRecords()`（导出热层 CSV） | `GM_listValues()` + `GM_getValue`，主存模式下即当前库 | 快速核对热层 |
+| `exportAllCSVRecords()`（导出全部 CSV） | `StorageRouter.readAllRecordsForBackup()`，与完整备份同源 | 已归档记录也一起看 |
+
+两者都只读，不写 `EXPORTED_RECORDS_KEY`，因此不会放行清理。
+
 ---
 
 ## 错误码
@@ -135,7 +144,7 @@ scope = { kind: 'all' | 'video' | 'bangumi' | 'live' | 'collection' | 'gm', sinc
 | 观看去重 | `bvh-group-dedup` | 判定方式、时间差上限、进度差上限 |
 | 记录与保留 | `bvh-group-retain` | 过期天数、同步页数、快照条数、来源配额、短观看阈值 / 保留天数 |
 | 冷库与存储 | `bvh-group-cold` | 归档年龄 / 周期 / 开关、无结果查冷库、删空白库、立即归档、冷库清单、导入到冷库 |
-| 数据导入导出 | `bvh-group-transfer` | 导出完整备份（含范围与时间筛选）、导出 CSV、导入到当前存储、同步官方历史、备份确认闸门 |
+| 数据导入导出 | `bvh-group-transfer` | 导出完整备份（含范围与时间筛选）、导出热层 CSV、导出全部 CSV、导入到当前存储、同步官方历史、备份确认闸门 |
 | 维护工具 | `bvh-group-maint` | 重置次数、归并单集、修复身份、迁移到合集容器、清理过期、清理短观看、清空全部 |
 | 运行日志 | `bvh-group-log` | 错误码归类、复制全部、清空日志 |
 

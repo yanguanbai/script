@@ -217,5 +217,14 @@ const record = (title, watchCount = 2, when = Date.now() - 100 * dayMs) => ({
   delete ctx.window.showSaveFilePicker;
   console.log('an unusable save picker degrades silently');
 
+  // 12) 热层 CSV 仍只读热层，并且不写任何“已备份”标记；导出全部 CSV 另有入口。
+  records.clear();
+  records.set('BVGATE00008', record('CSV 导出', 2));
+  StorageApi.exportCSVRecords();
+  assert.match(lastMessage, /来源：油猴热层记录/, 'hot CSV states which storage it covers');
+  assert.match(lastMessage, /视频记录：1 条/, 'hot CSV expands the hot records');
+  assert.equal(records.has(EXPORTED_KEY), false, 'CSV export never registers a backup');
+  console.log('hot CSV export stays read-only');
+
   console.log('backup confirmation gate checks passed');
 })().catch(error => { console.error(error); process.exit(1); });

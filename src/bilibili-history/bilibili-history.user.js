@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.24
+// @version      5.10.25
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.25：CSV 导出一分为二——热层 CSV 与全部 CSV（热层 + 全部冷库合并后展开），共用同一套列与格式。
 // 5.10.24：DB 主存模式（归档年龄=0）下把归档、自动查冷库、“只导出油猴存储”等失效控件统一置灰并写明原因；迁移成功后立即生效。
 // 5.10.23：修复沙箱内调用系统保存对话框报 Illegal invocation（改用真实窗口调用，失败静默降级）；导出新增“只导出油猴存储”；设置页把界面配色移到最前、运行日志移到末尾。
 // 5.10.22：保存备份新增 GM_download 档，以下载完成回调判定保存成功并自动登记；失败或超时退回普通下载并给错误码。
@@ -5274,8 +5275,8 @@
         },
 
         // 把记录及其快照整理成 CSV 行，格式化时间和播放位置后触发下载。
-        exportCSVRecords() {
-            const allKeys = [...new Set(GM_listValues().filter(k => RecordKey.isRecordKey(k)))];
+        // 热层 CSV 与“全部记录”CSV 共用这一套列与格式，差别只在传入的记录集。
+        _exportCSV(entries, label, fileSuffix = '') {
             const nowTs = TimeTool.now();
             const exportedAt = new Date().toLocaleString('sv-SE');
 
@@ -5310,11 +5311,7 @@
             let recordCount = 0;
 
             const records = [];
-            const seenKeys = new Set();
-            allKeys.forEach(key => {
-                if (seenKeys.has(key)) return;
-                seenKeys.add(key);
-                const normalized = RecordNormalizer.normalize(GM_getValue(key));
+            entries.forEach((normalized, key) => {
                 if (!normalized) return;
                 if (normalized.type === 'collection' && Array.isArray(normalized.parts)) {
                     // 可读 CSV 按分集展开合集容器；不能把容器本身当成普通视频，否则 watchCount/snapshots 会变成 0/空。
@@ -5402,12 +5399,35 @@
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `bvh_history_readable_${new Date().toISOString().slice(0, 10)}.csv`;
+            a.download = `bvh_history_readable${fileSuffix}_${new Date().toISOString().slice(0, 10)}.csv`;
             document.body.appendChild(a);
             a.click();
             a.remove();
             setTimeout(() => URL.revokeObjectURL(url), 1000);
-            alert(`CSV 导出完成。\n视频记录：${recordCount} 条\n导出行数（按快照展开）：${rows.length - 1} 行\n此 CSV 仅用于查看和分析，不会被登记为可清理的 JSON 备份。`);
+            alert(`CSV 导出完成。\n来源：${label}\n视频记录：${recordCount} 条\n导出行数（按快照展开）：${rows.length - 1} 行\n此 CSV 仅用于查看和分析，不会被登记为可清理的 JSON 备份。`);
+        },
+
+        // 只导出热层（油猴存储）里的记录；DB 主存模式下热层即当前库，结果等价全量。
+        exportCSVRecords() {
+            const hot = new Map();
+            GM_listValues().filter(RecordKey.isRecordKey).forEach(key => {
+                const normalized = RecordNormalizer.normalize(GM_getValue(key));
+                if (normalized) hot.set(key, normalized);
+            });
+            return this._exportCSV(hot, '油猴热层记录', '');
+        },
+
+        // 导出全部记录：热层与所有冷库合并后再展开，已归档的记录也会出现在 CSV 里。
+        // 与完整备份同源（readAllRecordsForBackup），但不登记任何“已备份”标记。
+        async exportAllCSVRecords() {
+            let entries;
+            try {
+                entries = await StorageRouter.readAllRecordsForBackup();
+            } catch (error) {
+                throw new Error(reportError('E2001', error.message || String(error), { where: 'exportAllCSVRecords' }));
+            }
+            if (!entries || !entries.size) throw new Error(reportError('E1003', '当前没有任何记录可导出', { where: 'exportAllCSVRecords' }));
+            return this._exportCSV(entries, '全部记录（热层 + 冷库）', '_all');
         },
 
         // 读取 JSON 备份，校验并归一化数据，再按记录键合并或写入本地存储。
@@ -11862,12 +11882,13 @@
                             <p class="bvh-setting-note">导出的 JSON 是唯一能登记为“已备份”的格式；只有确认文件确实保存之后，清理才会删除对应记录。CSV 供分析查看，不参与备份判定。两条导入路径语义不同，下面的说明写清了区别。</p>
                             <div class="bvh-cold-management">
                                 <button type="button" data-cold-export-all data-backup-export>导出完整备份</button>
-                                <button type="button" data-backup-csv>导出 CSV</button>
+                                <button type="button" data-backup-csv>导出热层 CSV</button>
+                                <button type="button" data-backup-csv-all>导出全部 CSV</button>
                                 <button type="button" data-backup-import>导入到当前存储</button>
                                 <button type="button" data-backup-sync>同步官方历史</button>
                             </div>
                             <p class="bvh-setting-note" data-backup-sync-note hidden></p>
-                            <p class="bvh-setting-note">导出完整备份：把热层与全部冷库合并成一份 JSON，可登记为“已备份”，也是唯一能让清理生效的导出。范围选“只导出油猴存储”时只包含热层记录，冷库里的记录不会被导出、也不会被放行为可清理。<br>导出 CSV：按快照展开成表格，仅用于查看和分析，不会登记为备份。<br>导入到当前存储：按同键取较新的规则合并进当前记录，不覆盖更新的本地记录；无法确认归属的番剧分集会被跳过。<br>导入到冷库（在“冷库与存储”组）：只写进一个冷库，不合并到当前记录，用来单独保存一份外部备份。<br>同步官方历史：按“记录与保留”里的同步页数读取官方历史页并合并到本地，不会删除本地已有记录；离开历史页时该操作无效。</p>
+                            <p class="bvh-setting-note">导出完整备份：把热层与全部冷库合并成一份 JSON，可登记为“已备份”，也是唯一能让清理生效的导出。范围选“只导出油猴存储”时只包含热层记录，冷库里的记录不会被导出、也不会被放行为可清理。<br>导出热层 CSV：只展开油猴热层里的记录（DB 主存模式下热层即当前库）。<br>导出全部 CSV：把热层与所有冷库合并后展开，已归档的记录也会出现在表里，用于整体核对。<br>两者都只读不写，不会登记为备份，也不会放行清理。</p>导入到当前存储：按同键取较新的规则合并进当前记录，不覆盖更新的本地记录；无法确认归属的番剧分集会被跳过。<br>导入到冷库（在“冷库与存储”组）：只写进一个冷库，不合并到当前记录，用来单独保存一份外部备份。<br>同步官方历史：按“记录与保留”里的同步页数读取官方历史页并合并到本地，不会删除本地已有记录；离开历史页时该操作无效。</p>
                             <label class="bvh-setting-row"><span>导出范围 <small title="只导出所选类型的记录。只导出油猴存储：跳过已归档进冷库的记录，适合只想备份热层的情况。范围外的记录不会被登记为已备份，清理时也不会被删除。">ⓘ</small></span><select data-backup-scope><option value="all">全部记录</option><option value="video">只要视频</option><option value="bangumi">只要番剧</option><option value="live">只要直播</option><option value="collection">只要合集</option><option value="gm">只导出油猴存储</option></select></label>
                             <label class="bvh-setting-row"><span>时间范围 <small title="留空表示不限。只导出在该时间段内有观看记录的条目；合集按分集的最早/最晚时间判断。">ⓘ</small></span><span class="bvh-setting-date-range"><input type="date" data-backup-since aria-label="导出起始日期"><input type="date" data-backup-until aria-label="导出结束日期"></span></label>
                             <div class="bvh-backup-state">
@@ -12394,6 +12415,15 @@
         SettingsOperations.bind(overlay.querySelector('[data-backup-csv]'), 'click', () => SettingsOperations.run(overlay, 'csv', async () => {
             try { StorageApi.exportCSVRecords(); }
             catch (error) { if (backupStateText) backupStateText.textContent = reportError('E2006', error.message, { where: 'exportCSVRecords' }); }
+        }));
+
+        SettingsOperations.bind(overlay.querySelector('[data-backup-csv-all]'), 'click', () => SettingsOperations.run(overlay, 'csv-all', async () => {
+            try { await StorageApi.exportAllCSVRecords(); }
+            catch (error) {
+                const text = error.message || String(error);
+                if (backupStateText) backupStateText.textContent = text;
+                alert(`导出全部 CSV 失败：\n${text}`);
+            }
         }));
 
         SettingsOperations.bind(overlay.querySelector('[data-backup-import]'), 'click', () => { if (!overlay._bvhTask) StorageApi.importRecords(); });
