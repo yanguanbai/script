@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.28
+// @version      5.10.29
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.29：DB 主存模式下“导出热层 CSV”与“导出全部 CSV”内容相同，热层入口置灰并指向全部 CSV。
 // 5.10.28：让忙碌遮罩真的可见——同步型任务先让出一帧再干活，遮罩加深一层暗色，按钮禁用状态不再一闪而过。
 // 5.10.27：备份“待确认”三个按钮改名并写清各自含义；环境无保存对话框时“另存”置灰且不再重复下载。
 // 5.10.26：设置页长任务加全程遮罩（转圈 + 说明当前在做什么），期间锁定全部控件防重复点击；导出备份加重入锁。
@@ -11788,7 +11789,7 @@
             if (primaryNote) {
                 primaryNote.hidden = !primary;
                 primaryNote.textContent = primary
-                    ? '当前为 DB 主存模式（归档年龄 = 0）：记录直接写入当前冷库，因此归档年龄、归档周期、自动归档、立即归档、无结果自动查冷库 都已停用；“只导出油猴存储”也不可选。冷库清单、导入 JSON 到冷库、导出与清理仍可正常使用。'
+                    ? '当前为 DB 主存模式（归档年龄 = 0）：记录直接写入当前冷库，因此归档年龄、归档周期、自动归档、立即归档、无结果自动查冷库 都已停用；“只导出油猴存储”不可选，“导出热层 CSV”与“导出全部 CSV”内容相同故置灰。冷库清单、导入 JSON 到冷库、导出与清理仍可正常使用。'
                     : '';
             }
             overlay.querySelectorAll('.bvh-setting-row:has(input:disabled)').forEach(row => row.setAttribute('aria-disabled', 'true'));
@@ -11808,6 +11809,14 @@
             }
             const ageInput = overlay.querySelector('#bvh-setting-cold-age');
             if (primary && ageInput) ageInput.title = 'DB 主存模式固定为 0：记录直接写 IndexedDB，不再从热层归档。';
+            // 主存模式下热层就是当前库：热层 CSV 与“全部 CSV”内容完全一致，属于重复入口，置灰留一个。
+            const hotCsvButton = overlay.querySelector('[data-backup-csv]');
+            if (hotCsvButton) {
+                hotCsvButton.disabled = primary || busy;
+                hotCsvButton.title = primary
+                    ? 'DB 主存模式下热层就是当前库，“导出热层 CSV”与“导出全部 CSV”内容完全一致，请用后者。'
+                    : '';
+            }
             // “只导出油猴存储”在主存模式下等价于全量（记录都在库里），因此禁用并回退到“全部记录”。
             const scopeSelect = overlay.querySelector('[data-backup-scope]');
             if (scopeSelect) {
@@ -11957,7 +11966,7 @@
                                 <button type="button" data-backup-sync>同步官方历史</button>
                             </div>
                             <p class="bvh-setting-note" data-backup-sync-note hidden></p>
-                            <p class="bvh-setting-note">导出完整备份：把热层与全部冷库合并成一份 JSON，可登记为“已备份”，也是唯一能让清理生效的导出。范围选“只导出油猴存储”时只包含热层记录，冷库里的记录不会被导出、也不会被放行为可清理。<br>导出热层 CSV：只展开油猴热层里的记录（DB 主存模式下热层即当前库）。<br>导出全部 CSV：把热层与所有冷库合并后展开，已归档的记录也会出现在表里，用于整体核对。<br>两者都只读不写，不会登记为备份，也不会放行清理。</p>导入到当前存储：按同键取较新的规则合并进当前记录，不覆盖更新的本地记录；无法确认归属的番剧分集会被跳过。<br>导入到冷库（在“冷库与存储”组）：只写进一个冷库，不合并到当前记录，用来单独保存一份外部备份。<br>同步官方历史：按“记录与保留”里的同步页数读取官方历史页并合并到本地，不会删除本地已有记录；离开历史页时该操作无效。</p>
+                            <p class="bvh-setting-note">导出完整备份：把热层与全部冷库合并成一份 JSON，可登记为“已备份”，也是唯一能让清理生效的导出。范围选“只导出油猴存储”时只包含热层记录，冷库里的记录不会被导出、也不会被放行为可清理。<br>导出热层 CSV：只展开油猴热层里的记录。DB 主存模式下热层就是当前库，内容与“导出全部 CSV”完全相同，因此该按钮会置灰，请直接用“导出全部 CSV”。<br>导出全部 CSV：把热层与所有冷库合并后展开，已归档的记录也会出现在表里，用于整体核对。<br>两者都只读不写，不会登记为备份，也不会放行清理。</p>导入到当前存储：按同键取较新的规则合并进当前记录，不覆盖更新的本地记录；无法确认归属的番剧分集会被跳过。<br>导入到冷库（在“冷库与存储”组）：只写进一个冷库，不合并到当前记录，用来单独保存一份外部备份。<br>同步官方历史：按“记录与保留”里的同步页数读取官方历史页并合并到本地，不会删除本地已有记录；离开历史页时该操作无效。</p>
                             <label class="bvh-setting-row"><span>导出范围 <small title="只导出所选类型的记录。只导出油猴存储：跳过已归档进冷库的记录，适合只想备份热层的情况。范围外的记录不会被登记为已备份，清理时也不会被删除。">ⓘ</small></span><select data-backup-scope><option value="all">全部记录</option><option value="video">只要视频</option><option value="bangumi">只要番剧</option><option value="live">只要直播</option><option value="collection">只要合集</option><option value="gm">只导出油猴存储</option></select></label>
                             <label class="bvh-setting-row"><span>时间范围 <small title="留空表示不限。只导出在该时间段内有观看记录的条目；合集按分集的最早/最晚时间判断。">ⓘ</small></span><span class="bvh-setting-date-range"><input type="date" data-backup-since aria-label="导出起始日期"><input type="date" data-backup-until aria-label="导出结束日期"></span></label>
                             <div class="bvh-backup-state">

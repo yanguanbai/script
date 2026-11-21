@@ -125,6 +125,7 @@ CSV 有两条出口，共用 `_exportCSV(entries, label, fileSuffix)`：
 | `exportAllCSVRecords()`（导出全部 CSV） | `StorageRouter.readAllRecordsForBackup()`，与完整备份同源 | 已归档记录也一起看 |
 
 两者都只读，不写 `EXPORTED_RECORDS_KEY`，因此不会放行清理。
+DB 主存模式下热层就是当前库，两条出口内容一致，`data-backup-csv` 会被置灰，只留“导出全部 CSV”。
 
 ---
 
