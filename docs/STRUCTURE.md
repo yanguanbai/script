@@ -203,6 +203,32 @@ DB 主存模式下热层就是当前库，两条出口内容一致，`data-backu
 
 当前标记为 `bvh-danger` 的按钮：`data-maint="reset-counts" / "merge-ep" / "migrate" / "clean-expire" / "delete-all"`、`data-cold-delete-empty`、`data-cold-exit-primary`。`clean-short`（只删快照）与 `repair-identity`（不改记录内容）保持普通样式。
 
+### 危险操作一律先过三步面板（5.10.33 起）
+
+上表里 7 个红色按钮全部接了 `openTripleConfirm`，不再只靠一次原生 `confirm`：
+
+| 按钮 | 面板入口 | 面板里的数字来源 | 执行时怎么跳过内部确认 |
+|---|---|---|---|
+| 重置所有观看次数 | `DANGER_MAINT_PANELS['reset-counts']` | `GM_listValues()` 里的记录键数 | `resetAllWatchCounts({ confirmed: true })` |
+| 归并单集到整季 | `DANGER_MAINT_PANELS['merge-ep']` | `RecordKey.isEpisodeKey` 的键数 | `mergeEpIntoSeason({ silent: true })`（原有能力） |
+| 迁移到合集容器 | `DANGER_MAINT_PANELS['migrate']` | 记录键总数；缺备份时直接不弹面板 | `migrateToContainerStructure({ confirmed: true })` |
+| 清理已备份过期记录 | `DANGER_MAINT_PANELS['clean-expire']` | `StorageApi._collectExpireCandidates()` | `cleanExpireRecords({ plan, confirmed: true, includeUnknownTime })` |
+| 清空全部记录 | `DANGER_MAINT_PANELS['delete-all']` | 记录键数；主存模式下键为 0 则不弹面板 | `deleteAllRecords({ confirmed: true })` |
+| 删除空白冷库 | 冷库组绑定内联 | 无预估数字（以实际 `count()` 为准） | `deleteEmptyDatabases()` 本身无确认 |
+| 退出主存模式 | 冷库组绑定 | `preparePrimaryExit()` | `disablePrimaryMode()` |
+
+两条关键约束：
+
+- **面板必须在 `SettingsOperations.run` 之前打开**：`run` 会挂全屏忙碌遮罩并禁用所有控件，面板就点不动了。因此这些绑定改成 `async` click 处理器，先 `await openTripleConfirm(...)`，拿到结果后再进 `run`。
+- **面板里显示的数字和执行用的是同一份数据**：`clean-expire` 把 `_collectExpireCandidates()` 的结果当 `plan` 传进 `cleanExpireRecords`，避免“面板写 12 条、实际删 15 条”。
+- 互斥：进入面板前置 `overlay._bvhConfirming = true`，配合 `run` 的 `_bvhTask` 重入锁，双击或连点不会开出第二个面板。
+
+`openTripleConfirm` 的第 3 步支持 `extra: [{ label, value }]`，渲染成一组红色附加按钮，返回 `value`（默认 `next` 返回 `true`、`cancel` 返回 `false`）。用于“同一操作有两种口径”的场景——目前只有清理过期记录用它区分“时间不明的记录要不要一起清”。
+
+### 历史页面板不再放破坏性按钮（5.10.33 起）
+
+历史页 `#bvh-hp-actions` 里的 `hp-clean`（清理已备份过期记录）与 `hp-clearall`（清空全部）已删除：面板随手就能打开，误触代价不可恢复。两个操作只在设置页的“维护工具”组保留，并且都要走三步面板。`updateCleanupButtonLabels()` 仍在（只同步可能存在的旧面板同名入口文案），`cleanExpireRecords` / `deleteAllRecords` 也仍保留原生确认路径，供油猴菜单与旧入口调用。
+
 
 置灰同时给 `title` 写明原因，并在冷库组顶部显示一条 `bvh-primary-note` 说明，避免“看着能点其实不生效”。
 

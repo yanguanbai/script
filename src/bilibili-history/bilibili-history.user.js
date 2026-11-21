@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.32
+// @version      5.10.33
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,9 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.33：设置页其余危险操作补齐三步确认面板（重置次数、归并单集、迁移容器、清理过期、清空全部、删空白冷库），
+//          面板里现算真实条数、写清后果，清理过期可在最后一步选择“连时间不明的记录一起清”；
+//          历史页面板移除“清理已备份过期记录”与“清空全部”两个按钮，避免随手误触，这两个操作只在设置页保留。
 // 5.10.32：危险操作统一加红色警示——三重确认面板顶部红色横幅、标题与风险行带 ⚠、步骤数标红、最终按钮红色；
 //          设置页“清空/重置/迁移/清理/退出主存/删空白库”改为红色按钮，各处原生确认框补 ⚠ 高风险前缀。
 // 5.10.31：新增“退出主存模式”——当前主库整份转为归档库、油猴热层从零开始记录，不复制也不合并任何记录；
@@ -4716,7 +4719,8 @@
 
     // 根据当前过期天数设置更新清理按钮文字。
     function updateCleanupButtonLabels() {
-        // 按钮文案统一由这里生成：强调“已确认备份”，因为只有登记过的备份才会被清理。
+        // 历史页面板上的清理/清空按钮已移除（这两个操作只在设置页保留），
+        // 这里只同步仍可能存在的同名入口（例如旧面板遗留的 bvh-clean-expire）的文案。
         const label = `清理已确认备份的过期记录（${CONFIG.EXPIRE_DAY}天）`;
         ['hp-clean', 'bvh-clean-expire'].forEach(id => {
             const button = document.getElementById(id);
@@ -4799,7 +4803,10 @@
         },
 
         // 只处理已导出备份且符合过期条件的记录，并在删除前向用户确认。
-        cleanExpireRecords() {
+        // 扫描当前可清理的“已确认备份”记录，分三类：
+        // expiredExported（明确超过过期天数）、unknownTimeExported（缺少有效时间戳）、unconfirmedExpired（已过期但不在备份里，不动）。
+        // 单独抽出来是为了让设置页的确认面板能先拿到真实条数，再把同一份结果交给 cleanExpireRecords 执行。
+        _collectExpireCandidates() {
             const exportedMap = RecordStore._exportedMap();
             const nowTs = TimeTool.now();
             const expiredExported = [];
@@ -4844,9 +4851,18 @@
                 addCandidate(key, '', rec);
             });
 
-            const expiredCount = expiredExported.length;
-            const unknownCount = unknownTimeExported.length;
-            const backupNote = StorageApi.hasConfirmedBackup()
+            return { expiredExported, unknownTimeExported, unconfirmedExpired };
+        },
+
+        // 清理过期记录。默认走“先问时间不明 → 再问一次”的原生确认；设置页已经走过三步面板时，
+        // 传 { confirmed: true, includeUnknownTime } 就跳过这两次确认，避免同一件事问两遍。
+        // 返回值：{ cleared: 删除条数, cancelled?: 用户取消 }，供设置页状态行显示真实结果。
+        cleanExpireRecords(options = {}) {
+            const plan = options.plan || this._collectExpireCandidates();
+            const expiredCount = plan.expiredExported.length;
+            const unknownCount = plan.unknownTimeExported.length;
+            const unconfirmedExpired = plan.unconfirmedExpired;
+            const backupNote = this.hasConfirmedBackup()
                 ? ''
                 : '\n当前还没有“已确认保存”的备份，因此不会删除任何记录；请先导出并在设置页确认保存。';
 
@@ -4856,31 +4872,35 @@
                     (unconfirmedExpired > 0 ? `\n\n另有 ${unconfirmedExpired} 条已过期但不在已确认备份内，不会删除。` : '') +
                     backupNote
                 );
-                return;
+                return { cleared: 0 };
             }
 
             let includeUnknownTime = false;
-            if (unknownCount > 0) {
+            if (options.confirmed) {
+                includeUnknownTime = options.includeUnknownTime === true;
+            } else if (unknownCount > 0) {
                 includeUnknownTime = confirm(
                     `⚠ 注意：另发现 ${unknownCount} 条已备份但时间不确定的记录/分集（缺少有效时间戳，无法判断是否超过 ${CONFIG.EXPIRE_DAY} 天）。\n\n` +
                     `点击"确定"：也清理这些时间不明的记录。\n点击"取消"：保留时间不明的记录，只清理明确过期的记录。`
                 );
             }
-            const selected = includeUnknownTime ? [...expiredExported, ...unknownTimeExported] : expiredExported;
+            const selected = includeUnknownTime ? [...plan.expiredExported, ...plan.unknownTimeExported] : plan.expiredExported;
             if (selected.length === 0) {
                 alert('没有选择要删除的记录，时间不明的记录已保留。');
-                return;
+                return { cleared: 0 };
             }
 
-            const confirmDelete = confirm(
+            const confirmDelete = options.confirmed ? true : confirm(
                 `⚠ 高风险：即将清理 ${selected.length} 条记录/分集（删除后无法恢复）：\n` +
                 `- 明确超过 ${CONFIG.EXPIRE_DAY} 天且已确认备份：${expiredCount} 条\n` +
                 `- 时间不明且已确认备份：${includeUnknownTime ? unknownCount : 0} 条\n\n` +
                 `番剧只删除符合条件的分集；清掉某季最后一集时，该季的旧累计数据也会删除。` +
                 `未在已确认备份内的记录不会删除${unconfirmedExpired > 0 ? `（当前有 ${unconfirmedExpired} 条已过期但未备份，将保留）` : ''}。确认继续？`
             );
-            if (!confirmDelete) return;
+            if (!confirmDelete) return { cleared: 0, cancelled: true };
 
+            // 执行前重新读一次备份登记：面板停留期间可能有别的页面更新过它。
+            const exportedMap = RecordStore._exportedMap();
             const touchedSeasons = new Set();
             selected.forEach(candidate => {
                 if (candidate.episodeKey) {
@@ -4903,6 +4923,7 @@
             alert(`清理完成，共处理 ${selected.length} 条记录/分集。`);
             refreshOpenHistoryLists(true);
             updateCleanupButtonLabels();
+            return { cleared: selected.length };
         },
 
         // 将单条记录的观看次数调低，保留快照、标题、作者和进度等信息。
@@ -6132,26 +6153,27 @@
         },
 
         // 清除全部观看记录及备份标记，并重置索引。
-        deleteAllRecords() {
-            if (!confirm('⚠ 高风险：确认删除全部观看历史？该操作不可恢复！\n建议先完成一次“已确认保存”的备份（设置页 → 数据导入导出）。')) return;
+        // options.confirmed：设置页已经走完三步确认面板，这里就不再弹原生确认（避免同一件事问两遍）。
+        deleteAllRecords(options = {}) {
+            if (!options.confirmed && !confirm('⚠ 高风险：确认删除全部观看历史？该操作不可恢复！\n建议先完成一次“已确认保存”的备份（设置页 → 数据导入导出）。')) return false;
             GM_listValues().filter(k => RecordKey.isRecordKey(k)).forEach(k => RecordStore.delete(k));
             GM_setValue(EXPORTED_RECORDS_KEY, {});
             HistoryViewIndex.reset();
             RecordStore.clearIndex();
             alert('全部记录清除完成');
             location.reload();
+            return true;
         },
-
         // 把所有记录的观看次数重置为 1。
         // 适用场景：旧版本误判导致次数虚高、或只想保留"看过/没看过"信息时一键纠正。
         // 只改 watchCount，快照、标题、作者、进度等信息全部保留。
-        resetAllWatchCounts() {
+        resetAllWatchCounts(options = {}) {
             const keys = GM_listValues().filter(k => RecordKey.isRecordKey(k));
             if (!keys.length) {
                 alert('当前没有任何观看记录。');
-                return;
+                return { count: 0 };
             }
-            if (!confirm(`⚠ 高风险：将把 ${keys.length} 条记录的观看次数全部重置为 1（快照、标题、作者等信息保留）。\n确认继续？`)) return;
+            if (!options.confirmed && !confirm(`⚠ 高风险：将把 ${keys.length} 条记录的观看次数全部重置为 1（快照、标题、作者等信息保留）。\n确认继续？`)) return { count: 0, cancelled: true };
             keys.forEach(key => {
                 const rec = RecordNormalizer.normalize(GM_getValue(key));
                 if (!rec) return;
@@ -6173,6 +6195,7 @@
             RecordStore.clearIndex();
             HistoryViewIndex.ensure();
             alert(`重置完成，共处理 ${keys.length} 条记录，观看次数已全部变为 1。`);
+            return { count: keys.length };
         },
 
         // 5.4.9：只根据本地已有的 ep 记录修复旧 ss 容器，不依赖当前页面或 DOM。
@@ -6443,11 +6466,13 @@
         //   - 跨BV合集（旧数据无 collectionKey）先按单视频保留，播放页扫描后并入；
         //   - 分集标题：从记录 partTitle 取，取不到留空，等播放页选集列表回填；
         //   - 删除旧键前逐条确认；开始前必须已有一份“已确认保存”的备份，不做隐式导出。
-        async migrateToContainerStructure() {
+        async migrateToContainerStructure(options = {}) {
             const allKeys = GM_listValues().filter(k => RecordKey.isRecordKey(k));
             if (!allKeys.length) { alert('当前没有任何记录。'); return; }
 
-            if (!confirm(
+            // options.confirmed：设置页三步面板已经解释过这次迁移，这里跳过第一道确认。
+            // 扫描完成后“列出待删旧键”的那次确认仍然保留——那一步给的是真实键名，属于执行前最后一次核对。
+            if (!options.confirmed && !confirm(
                 '⚠ 高风险：即将把本地历史迁移到「合集容器」结构：\n' +
                 '- 同BV多P（BV?p=N）归并成合集容器，分集进 parts[]\n' +
                 '- 删除旧的分P键（删除前会逐条确认）\n' +
@@ -10552,10 +10577,13 @@
             .bvh-triple-body p { margin:0 0 9px; line-height:1.65; }
             .bvh-triple-body p.bvh-triple-lead { font-weight:800; color:var(--bvh-theme-record-text,#39343a); }
             .bvh-triple-body p.bvh-triple-warn { padding:9px 11px; border-left:4px solid #e0324b; border-radius:0 8px 8px 0; background:color-mix(in srgb,#e0324b 12%,transparent); color:#8f1026; font-weight:700; }
-            .bvh-triple-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+            .bvh-triple-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:10px; margin-top:18px; }
             .bvh-triple-panel button { padding:8px 14px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:9px; background:var(--bvh-theme-card,#fff); color:inherit; font:inherit; cursor:pointer; }
             .bvh-triple-panel button.bvh-triple-next, .bvh-triple-panel button.is-danger { background:linear-gradient(100deg,#d81b38,#ef5b6f); border-color:#b3122c; color:#fff; font-weight:800; }
             .bvh-triple-panel button.is-danger { box-shadow:0 5px 16px rgba(200,29,51,.32); }
+            /* 最后一步的附加选项：同样是“执行”，但走的是另一种口径（例如连时间不明的记录一起清）。 */
+            .bvh-triple-panel button.bvh-triple-extra { border-color:#e0324b; color:#c81d33; font-weight:800; background:color-mix(in srgb,#e0324b 10%,var(--bvh-theme-card,#fff)); }
+            .bvh-triple-panel button.bvh-triple-extra:hover { background:color-mix(in srgb,#e0324b 18%,var(--bvh-theme-card,#fff)); }
             /* 设置页里的危险按钮（清空、重置、迁移、清空冷库、退出主存）：红字红边，和普通按钮区分。 */
             .bvh-cold-management button.bvh-danger, .bvh-setting-group button.bvh-danger { border-color:#e0324b; color:#c81d33; font-weight:800; background:color-mix(in srgb,#e0324b 8%,var(--bvh-theme-card,#fff)); }
             .bvh-cold-management button.bvh-danger:hover, .bvh-setting-group button.bvh-danger:hover { background:color-mix(in srgb,#e0324b 16%,var(--bvh-theme-card,#fff)); }
@@ -11779,8 +11807,6 @@
                         <button id="hp-export">导出JSON</button>
                         <button id="hp-export-csv">导出CSV</button>
                         <button id="hp-import">导入JSON</button>
-                        <button id="hp-clean">清理已备份过期记录（${escapeHtml(CONFIG.EXPIRE_DAY)}天）</button>
-                        <button id="hp-clearall">清空全部</button>
                     </div>
                     <ul id="bvh-hp-list"></ul>
                 </div>
@@ -11844,8 +11870,8 @@
             document.getElementById('hp-export').onclick = () => StorageApi.exportAllRecords();
             document.getElementById('hp-export-csv').onclick = StorageApi.exportCSVRecords;
             document.getElementById('hp-import').onclick = StorageApi.importRecords;
-            document.getElementById('hp-clean').onclick = StorageApi.cleanExpireRecords;
-            document.getElementById('hp-clearall').onclick = StorageApi.deleteAllRecords;
+            // “清理已备份过期记录”和“清空全部”只在设置页保留：它们不可恢复，
+            // 而历史页面板是随手打开就能点的入口，容易误触，因此这里不再放按钮。
             document.getElementById('hp-sync').onclick = () => OfficialHistorySync.sync(false);
 
             const renderHistoryPageSearch = debounce(value => {
@@ -12163,7 +12189,8 @@
     // 为什么不用连续三个 window.confirm：浏览器在连续弹窗后会给出“阻止此页面创建更多对话框”，
     // 第二步会被静默吞掉，三重确认就形同虚设。这里改成设置窗口内的三步面板：
     // 每步都要用户主动点“继续”，任何一步点“取消”都整体放弃、不改动任何设置或数据。
-    // steps: [{ heading?, lines: string[], confirm? }]；以 ! / ！开头的行按红色风险样式渲染并加 ⚠ 图标。
+    // steps: [{ heading?, lines: string[], confirm?, extra?: [{ label, value }] }]；以 ! / ！开头的行按红色风险样式渲染并加 ⚠ 图标。
+    // 返回 true=走完三步确认；false=任何一步取消；其它值=最后一步点了附加选项按钮，对应 extra[].value。
     function openTripleConfirm(overlay, { title, steps, danger = true }) {
         return new Promise(resolve => {
             const mask = document.createElement('div');
@@ -12202,6 +12229,10 @@
             // 面板挂在设置窗口内部：遮罩跟随窗口层级，关闭窗口时一起消失，不会留在页面上。
             overlay.appendChild(mask);
             let index = 0;
+            // 最后一步可以带“附加选项按钮”（step.extra）：它解决的是“同一个操作有两种处理口径”的情况，
+            // 例如清理过期记录时“时间不明的记录要不要一起清”。用按钮二选一，比再弹一个 confirm 清楚。
+            let extraButtons = [];
+            const finish = value => { mask.remove(); resolve(value); };
             const paint = () => {
                 const step = steps[index] || {};
                 // 步数用 <b> 标红，让“第 3 步 / 共 3 步”在长文案里也一眼可见。
@@ -12226,8 +12257,20 @@
                 next.textContent = step.confirm || '继续';
                 // 最后一步是真正执行的那一下：红色加深并加阴影，和“继续”区分开。
                 next.classList.toggle('is-danger', danger && index === steps.length - 1);
+                extraButtons.forEach(button => button.remove());
+                extraButtons = [];
+                if (index === steps.length - 1 && Array.isArray(step.extra)) {
+                    step.extra.forEach(item => {
+                        const button = document.createElement('button');
+                        button.type = 'button';
+                        button.className = 'bvh-triple-extra';
+                        button.textContent = item.label;
+                        button.addEventListener('click', () => finish(item.value === undefined ? true : item.value));
+                        actions.insertBefore(button, next);
+                        extraButtons.push(button);
+                    });
+                }
             };
-            const finish = value => { mask.remove(); resolve(value); };
             cancel.addEventListener('click', () => finish(false));
             next.addEventListener('click', () => {
                 if (index < steps.length - 1) { index += 1; paint(); next.focus(); return; }
@@ -12816,20 +12859,60 @@
             const status = overlay.querySelector('[data-cold-status]');
             if (status) status.textContent = 'DB 主存模式已启用；新记录直接写入 IndexedDB，需要回到油猴存储请点“退出主存模式”。';
         }
-        SettingsOperations.bind(overlay.querySelector('[data-cold-delete-empty]'), 'click', () => SettingsOperations.run(overlay, 'delete-empty', async () => {
+        // 删除空白冷库：删的是整个数据库，虽然“空”是前提，也要走三步确认，避免误点。
+        SettingsOperations.bind(overlay.querySelector('[data-cold-delete-empty]'), 'click', async () => {
             const status = overlay.querySelector('[data-cold-status]');
+            if (overlay._bvhTask || overlay._bvhConfirming) return;
+            overlay._bvhConfirming = true;
+            let answer;
             try {
-                const result = await ColdArchiveStore.deleteEmptyDatabases();
-                if (status) status.textContent = result.removed.length
-                    ? `已删除 ${result.removed.length} 个空白冷库；保留 ${result.remaining.length} 个有记录的冷库。`
-                    : `没有空白冷库；当前保留 ${result.remaining.length} 个冷库。`;
-            } catch (error) {
-                const text = `删除空白冷库失败：${error.message}`;
-                if (status) status.textContent = reportError('E4003', error.message, { where: 'deleteEmptyDatabases', silent: true }) || text;
-                alert(`${text}\n${reportError('E4003', error.message, { where: 'deleteEmptyDatabases' })}`);
-            }
-            await refreshColdDatabaseInfo(true);
-        }));
+                answer = await openTripleConfirm(overlay, {
+                    title: '删除空白冷库（记录数为 0 的数据库）',
+                    steps: [
+                        {
+                            heading: '第 1 步：这次要做什么',
+                            lines: [
+                                '扫描脚本已登记的全部冷库，把实际记录数为 0 的数据库整个删除，并从油猴里的冷库目录里去掉。',
+                                '判断标准是数据库里真实读取到的条数，不看目录上写的数字。',
+                                '当前主库、正在使用的库、以及打不开（失联）的库会被跳过，不会删。'
+                            ],
+                            confirm: '我看明白了，继续'
+                        },
+                        {
+                            heading: '第 2 步：会失去什么',
+                            lines: [
+                                '!数据库一旦删除就无法恢复，脚本也不会为它保留副本。',
+                                '!如果你以为某个库是空的、其实里面有你后来导进去的记录，这里的“空白”判断以实际条数为准——有条数就不会删。',
+                                '!如果某个库正被其他 B 站页面占用，删除会被浏览器拦下并报 E4003，关掉其它页面再试。'
+                            ],
+                            confirm: '这些后果我接受，继续'
+                        },
+                        {
+                            heading: '第 3 步：最后确认',
+                            lines: [
+                                '即将扫描全部已登记冷库并删除其中的空白库。',
+                                '删除数量与保留数量写在下方冷库状态行，清单会同时刷新。'
+                            ],
+                            confirm: '确认删除空白冷库'
+                        }
+                    ]
+                });
+            } finally { overlay._bvhConfirming = false; }
+            if (!answer) { if (status) status.textContent = '已取消，没有删除任何冷库。'; return; }
+            SettingsOperations.run(overlay, 'delete-empty', async () => {
+                try {
+                    const result = await ColdArchiveStore.deleteEmptyDatabases();
+                    if (status) status.textContent = result.removed.length
+                        ? `已删除 ${result.removed.length} 个空白冷库；保留 ${result.remaining.length} 个有记录的冷库。`
+                        : `没有空白冷库；当前保留 ${result.remaining.length} 个冷库。`;
+                } catch (error) {
+                    const text = `删除空白冷库失败：${error.message}`;
+                    if (status) status.textContent = reportError('E4003', error.message, { where: 'deleteEmptyDatabases', silent: true }) || text;
+                    alert(`${text}\n${reportError('E4003', error.message, { where: 'deleteEmptyDatabases' })}`);
+                }
+                await refreshColdDatabaseInfo(true);
+            });
+        });
         SettingsOperations.bind(overlay.querySelector('[data-cold-archive]'), 'click', () => SettingsOperations.run(overlay, 'archive', async () => {
             const ageDays = Number(overlay.querySelector('#bvh-setting-cold-age').value);
             if (!(ageDays > 0)) { alert('年龄为 0 时请点击“保存设置”，确认后再进入主存模式。'); return; }
@@ -13144,40 +13227,286 @@
             }
         }));
 
-        // ── 维护工具：把原先只在油猴菜单里的四个操作收进设置页 ──
+        // ─── 维护工具：原先只在油猴菜单里的操作，以及清理类操作 ───
         // 每个操作都走 SettingsOperations.run，复用同一把忙碌锁，避免与归档/迁移并发改写记录。
         const maintStatus = overlay.querySelector('[data-maint-status]');
         const setMaintStatus = text => { if (maintStatus) maintStatus.textContent = text; };
+        // 危险操作的三步确认面板：点按钮时按当前真实数字生成文案，走完三步才进入 run（run 会挂忙碌遮罩、锁住面板）。
+        // 返回 null 表示“当场就不能执行”，原因已经写进下方状态行，不再弹面板。
+        const DANGER_MAINT_PANELS = {
+            'reset-counts': () => {
+                const keys = GM_listValues().filter(k => RecordKey.isRecordKey(k));
+                if (!keys.length) { setMaintStatus('当前没有任何观看记录，不需要重置。'); return null; }
+                return {
+                    title: `重置所有观看次数为 1（${keys.length} 条记录）`,
+                    cancelText: '已取消重置，所有观看次数保持原样。',
+                    steps: [
+                        {
+                            heading: '第 1 步：这次要做什么',
+                            lines: [
+                                `把 ${keys.length} 条记录的“观看次数”统一改回 1。`,
+                                '只改次数这一个字段：快照、标题、作者、进度、封面和合集结构都原样保留。',
+                                '合集容器按分集逐个改；整季的旧累计次数也会一起归 1。'
+                            ],
+                            confirm: '我看明白了，继续'
+                        },
+                        {
+                            heading: '第 2 步：会失去什么',
+                            lines: [
+                                '!观看次数的原值不会另存副本，执行后无法恢复成原来的次数。',
+                                '!列表默认按观看次数排序，重置后几乎所有记录都会挤在“1 次”这一档，看起来顺序会变。',
+                                '想保留原次数，请先在“数据导入导出”里导出完整备份并确认保存。'
+                            ],
+                            confirm: '这些后果我接受，继续'
+                        },
+                        {
+                            heading: '第 3 步：最后确认',
+                            lines: [
+                                `即将把 ${keys.length} 条记录的观看次数全部改为 1。`,
+                                '执行后列表与索引立即重建，处理条数写在下方状态行。'
+                            ],
+                            confirm: `确认把 ${keys.length} 条记录的次数改为 1`
+                        }
+                    ]
+                };
+            },
+            'merge-ep': () => {
+                const epCount = GM_listValues().filter(k => RecordKey.isEpisodeKey(k)).length;
+                return {
+                    title: `归并单集到整季（当前 ${epCount} 个分集键）`,
+                    cancelText: '已取消归并，分集记录保持原样。',
+                    steps: [
+                        {
+                            heading: '第 1 步：这次要做什么',
+                            lines: [
+                                epCount ? `油猴存储里当前有 ${epCount} 个分集键（ep）。` : '油猴存储里当前没有分集键（ep），执行后大概率不会改动任何记录。',
+                                '脚本逐个判断每个分集属于哪一季，把它的快照并进那一季的记录，然后删掉这个分集键。',
+                                '无法确定归属的分集不会硬塞进某一季，会跳过并计入结果。'
+                            ],
+                            confirm: '我看明白了，继续'
+                        },
+                        {
+                            heading: '第 2 步：会失去什么',
+                            lines: [
+                                '!并入后分集键消失：之后没法再按分集单独查看或删除，只能看到季记录里的合并结果。',
+                                '!如果某个分集其实属于另一季（旧数据的身份写错了），合并后归属就固定下来，脚本不会自动纠正。',
+                                '!季记录的观看次数按合并规则取较大值，不做累加。',
+                                '想留底请先在“数据导入导出”里导出完整备份并确认保存。'
+                            ],
+                            confirm: '这些后果我接受，继续'
+                        },
+                        {
+                            heading: '第 3 步：最后确认',
+                            lines: [
+                                `即将扫描 ${epCount} 个分集键并归并。`,
+                                '处理条数与跳过条数写在下方状态行，同时记入运行日志。'
+                            ],
+                            confirm: '确认归并单集到整季'
+                        }
+                    ]
+                };
+            },
+            'migrate': () => {
+                // 迁移会删旧键，缺备份时 migrateToContainerStructure 内部也会直接中止（E2004），这里提前说明，别让用户白读三步。
+                if (!StorageApi.hasConfirmedBackup()) {
+                    setMaintStatus('⚠ 还不能迁移：迁移会删除旧的分P键，开始前必须已有一份“已确认保存”的备份。请到“数据导入导出”导出并确认保存后再来。');
+                    return null;
+                }
+                const allKeys = GM_listValues().filter(k => RecordKey.isRecordKey(k)).length;
+                if (!allKeys) { setMaintStatus('当前没有任何记录，不需要迁移。'); return null; }
+                return {
+                    title: `迁移到合集容器结构（共 ${allKeys} 个键）`,
+                    cancelText: '已取消迁移，没有改动任何键。',
+                    steps: [
+                        {
+                            heading: '第 1 步：这次要做什么',
+                            lines: [
+                                `把 ${allKeys} 个键整理成“合集容器”结构：同一个 BV 的多 P（BV?p=N）并成一个容器，分集进 parts[]。`,
+                                '没有任何观看事实、也没有标题/合集信息的空记录按无效记录清掉；有元数据的空记录保留。',
+                                '开始前必需的那份“已确认保存”备份，现在已具备。'
+                            ],
+                            confirm: '我看明白了，继续'
+                        },
+                        {
+                            heading: '第 2 步：会失去什么',
+                            lines: [
+                                '!会删除旧的分P键和无效空记录，删除后无法恢复；删之前脚本会先把受影响的容器与旧键内容写进一份备份键。',
+                                '!键名结构会改变：之后用旧版本脚本或外部工具读这些键会对不上号。',
+                                '!扫描完成后如果确实有要删的键，脚本会把键名（最多列 20 条）再问你一次；那一步点取消就整体中止、不删任何键。'
+                            ],
+                            confirm: '这些后果我接受，继续'
+                        },
+                        {
+                            heading: '第 3 步：最后确认',
+                            lines: [
+                                `即将扫描并迁移 ${allKeys} 个键。`,
+                                '写入容器与删除旧键的条数会写在提示和下方状态行里，同时记入运行日志。'
+                            ],
+                            confirm: '确认迁移到合集容器'
+                        }
+                    ]
+                };
+            },
+            'clean-expire': () => {
+                let plan;
+                try { plan = StorageApi._collectExpireCandidates(); }
+                catch (error) { setMaintStatus(`扫描可清理记录失败：${error?.message || error}`); return null; }
+                const expired = plan.expiredExported.length;
+                const unknown = plan.unknownTimeExported.length;
+                const unconfirmed = plan.unconfirmedExpired;
+                const hasBackup = StorageApi.hasConfirmedBackup();
+                if (!expired && !unknown) {
+                    setMaintStatus(
+                        `没有可清理的已备份过期记录（条件：已确认保存 + 超过 ${CONFIG.EXPIRE_DAY} 天未更新）` +
+                        (unconfirmed ? `；另有 ${unconfirmed} 条已过期但不在已确认备份里，不会删除` : '') + '。'
+                    );
+                    return null;
+                }
+                return {
+                    title: `清理已备份过期记录（${expired}${unknown ? ` + ${unknown} 条时间不明` : ''} 条）`,
+                    cancelText: '已取消清理，没有删除任何记录。',
+                    // 面板里显示的就是 plan 里的条数；执行时把同一份 plan 传下去，保证“说的”和“删的”是同一批。
+                    answer: value => ({ plan, includeUnknownTime: value === 'include-unknown' }),
+                    steps: [
+                        {
+                            heading: '第 1 步：这次会删什么',
+                            lines: [
+                                `已确认备份、且超过 ${CONFIG.EXPIRE_DAY} 天没更新的记录：${expired} 条（番剧按分集算）。`,
+                                unknown ? `另有 ${unknown} 条虽然已备份，但缺少有效时间戳，无法判断是否过期。` : '',
+                                '只有“已确认保存”的备份覆盖到的记录才会被删；范围导出没覆盖到的记录一律保留。',
+                                unconfirmed ? `当前有 ${unconfirmed} 条已经过期，但不在已确认备份里，本次会保留。` : '',
+                                hasBackup ? '' : '!当前还没有“已确认保存”的备份：执行时不会删除任何记录，请先导出并在设置页确认保存。'
+                            ].filter(Boolean),
+                            confirm: '我看明白了，继续'
+                        },
+                        {
+                            heading: '第 2 步：会失去什么',
+                            lines: [
+                                '!删除不可恢复，脚本不保留副本。',
+                                '!清掉某一季的最后一集时，这一季的旧累计数据会一起删除。',
+                                unknown ? `!时间不明的 ${unknown} 条默认保留；要把它们一起清掉，请在第 3 步点第二个按钮。` : ''
+                            ].filter(Boolean),
+                            confirm: '这些后果我接受，继续'
+                        },
+                        {
+                            heading: '第 3 步：最后确认',
+                            lines: [
+                                `即将删除 ${expired} 条已备份且明确过期的记录。`,
+                                unknown ? `时间不明的 ${unknown} 条默认保留。` : '',
+                                '删除完成后下方状态行会写出实际清理的条数。'
+                            ].filter(Boolean),
+                            confirm: `确认删除 ${expired} 条过期记录`,
+                            extra: unknown ? [{
+                                label: `连时间不明的 ${unknown} 条一起清（共 ${expired + unknown} 条）`,
+                                value: 'include-unknown'
+                            }] : undefined
+                        }
+                    ]
+                };
+            },
+            'delete-all': () => {
+                const count = GM_listValues().filter(k => RecordKey.isRecordKey(k)).length;
+                const primary = StorageRouter.isPrimaryMode();
+                if (!count) {
+                    setMaintStatus(primary
+                        ? '当前油猴存储里没有记录：DB 主存模式下记录都在数据库里，这个按钮只清油猴热层；要清数据库请用冷库清单里的入口。'
+                        : '当前没有任何记录，不需要清空。');
+                    return null;
+                }
+                return {
+                    title: `清空全部观看记录（${count} 条，不可恢复）`,
+                    cancelText: '已取消清空，全部记录保持原样。',
+                    steps: [
+                        {
+                            heading: '第 1 步：这次要做什么',
+                            lines: [
+                                `删除油猴存储里的 ${count} 条观看记录，连同快照、标题、作者、观看次数一起删掉。`,
+                                primary
+                                    ? '当前是 DB 主存模式：热层本来就是空的，这个按钮只作用于热层，数据库里的记录不受影响。'
+                                    : '冷库（IndexedDB）里的记录不受这个按钮影响，要清冷库得用冷库清单里的入口。',
+                                '同时会清空“已备份”登记，并重建列表索引。'
+                            ],
+                            confirm: '我看明白了，继续'
+                        },
+                        {
+                            heading: '第 2 步：会失去什么',
+                            lines: [
+                                '!删除后无法恢复，脚本不保留任何副本；想留底请先导出完整备份并确认保存。',
+                                '!“已备份”登记会一起清空：之后清理功能会认为没有任何记录被备份过，需要重新导出并确认一次。',
+                                '!执行完成后这个页面会自动刷新。'
+                            ],
+                            confirm: '这些后果我接受，继续'
+                        },
+                        {
+                            heading: '第 3 步：最后确认',
+                            lines: [
+                                `即将删除 ${count} 条记录 → 清空备份登记 → 重建索引并刷新页面。`
+                            ],
+                            confirm: `确认清空这 ${count} 条记录`
+                        }
+                    ]
+                };
+            }
+        };
         const MAINT_ACTIONS = {
-            'reset-counts': async () => { await StorageApi.resetAllWatchCounts(); return '已把所有观看次数重置为 1。'; },
+            'reset-counts': async () => {
+                const result = await StorageApi.resetAllWatchCounts({ confirmed: true });
+                return result?.cancelled ? '已取消，观看次数保持原样。' : `已把 ${result?.count || 0} 条记录的观看次数重置为 1。`;
+            },
             'merge-ep': async () => {
                 const result = await StorageApi.mergeEpIntoSeason({ silent: true });
                 return `归并完成：处理 ${result.merged?.length || 0} 条单集，跳过 ${result.skipped?.length || 0} 条。`;
             },
             'repair-identity': async () => { await StorageApi.repairBangumiIdentityFromLocalData(); return '分集身份修复已执行。'; },
-            'migrate': async () => { await StorageApi.migrateToContainerStructure(); return '结构迁移已返回，是否完成见提示与运行日志。'; },
-            'clean-expire': async () => { StorageApi.cleanExpireRecords(); return '已进入过期清理确认流程。'; },
+            'migrate': async () => { await StorageApi.migrateToContainerStructure({ confirmed: true }); return '结构迁移已返回，是否完成见提示与运行日志。'; },
+            'clean-expire': async options => {
+                const result = StorageApi.cleanExpireRecords({ plan: options?.plan, confirmed: true, includeUnknownTime: options?.includeUnknownTime === true });
+                return result?.cleared ? `已清理 ${result.cleared} 条已备份过期记录/分集。` : '本次没有删除任何记录。';
+            },
             'clean-short': async () => {
                 const result = StorageApi.cleanShortWatchRecords();
                 return `短观看清理完成：删除 ${result.deletedRecords} 条记录、${result.deletedSnapshots} 个快照。`;
             },
-            'delete-all': async () => { StorageApi.deleteAllRecords(); return '已进入清空全部确认流程。'; }
+            'delete-all': async () => {
+                const changed = StorageApi.deleteAllRecords({ confirmed: true });
+                return changed === false ? '已取消，没有删除任何记录。' : '已清空全部记录，页面即将刷新。';
+            }
         };
+        // 危险按钮：先跑三步确认面板，通过了才进入 run。
+        // 面板必须在 run 之前打开——run 会挂全屏忙碌遮罩并禁用所有控件，面板就点不动了。
         overlay.querySelectorAll('[data-maint]').forEach(button => {
-            SettingsOperations.bind(button, 'click', () => SettingsOperations.run(overlay, `maint-${button.dataset.maint}`, async () => {
-                const action = MAINT_ACTIONS[button.dataset.maint];
+            SettingsOperations.bind(button, 'click', async () => {
+                if (overlay._bvhTask || overlay._bvhConfirming) return;
+                const name = button.dataset.maint;
+                const action = MAINT_ACTIONS[name];
                 if (!action) return;
-                setMaintStatus('正在执行…');
-                try {
-                    const message = await action();
-                    setMaintStatus(message || '执行完成。');
-                } catch (error) {
-                    setMaintStatus(reportError('E5001', error?.message || String(error), { where: `maint:${button.dataset.maint}` }));
-                } finally {
-                    refreshOpenHistoryLists(true);
-                    renderErrorLog();
+                let options = {};
+                const buildPanel = DANGER_MAINT_PANELS[name];
+                if (buildPanel) {
+                    let panel;
+                    try { panel = buildPanel(); }
+                    catch (error) { setMaintStatus(`无法开始：${error?.message || String(error)}`); return; }
+                    if (!panel) return;
+                    overlay._bvhConfirming = true;
+                    let answer;
+                    try { answer = await openTripleConfirm(overlay, { title: panel.title, steps: panel.steps }); }
+                    finally { overlay._bvhConfirming = false; }
+                    if (!answer) { setMaintStatus(panel.cancelText || '已取消，未改动任何记录。'); return; }
+                    options = panel.answer ? panel.answer(answer) : {};
                 }
-            }));
+                SettingsOperations.run(overlay, `maint-${name}`, async () => {
+                    setMaintStatus('正在执行…');
+                    try {
+                        const message = await action(options);
+                        setMaintStatus(message || '执行完成。');
+                    } catch (error) {
+                        setMaintStatus(reportError('E5001', error?.message || String(error), { where: `maint:${name}` }));
+                    } finally {
+                        refreshOpenHistoryLists(true);
+                        renderErrorLog();
+                    }
+                });
+            });
         });
 
         // ── 运行日志：按错误码归类汇总，并提供一键复制 ──
