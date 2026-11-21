@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.25
+// @version      5.10.26
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.26：设置页长任务加全程遮罩（转圈 + 说明当前在做什么），期间锁定全部控件防重复点击；导出备份加重入锁。
 // 5.10.25：CSV 导出一分为二——热层 CSV 与全部 CSV（热层 + 全部冷库合并后展开），共用同一套列与格式。
 // 5.10.24：DB 主存模式（归档年龄=0）下把归档、自动查冷库、“只导出油猴存储”等失效控件统一置灰并写明原因；迁移成功后立即生效。
 // 5.10.23：修复沙箱内调用系统保存对话框报 Illegal invocation（改用真实窗口调用，失败静默降级）；导出新增“只导出油猴存储”；设置页把界面配色移到最前、运行日志移到末尾。
@@ -5115,7 +5116,18 @@
 
         // 本地完整备份读取 GM、全部 IndexedDB 冷库及待处理队列；任何冷库读取失败都不生成部分文件。
         // 一键导出：构建 → 保存 → 仅当确认成功才登记。返回 true 表示“已登记为已备份”。
+        // 历史页与设置页都可能有这个入口：加一道重入锁，按住回车连点也不会生成两份文件。
         async exportAllRecords(scope = null) {
+            if (StorageApi._exportingBackup) return false;
+            StorageApi._exportingBackup = true;
+            try {
+                return await this._exportAllRecordsOnce(scope);
+            } finally {
+                StorageApi._exportingBackup = false;
+            }
+        },
+
+        async _exportAllRecordsOnce(scope = null) {
             // 系统保存对话框必须在点击手势里同步打开；等到构建完再弹，浏览器会判为无手势而拒绝。
             const ask = await this.requestBackupHandle(this._backupFileName(scope));
             if (ask.cancelled) {
@@ -10235,6 +10247,14 @@
             .bvh-setting-row > .bvh-toggle-input:disabled + .bvh-toggle-track { opacity:.5; filter:grayscale(1); }
             .bvh-setting-row > .bvh-toggle-input:disabled { cursor:not-allowed; }
             .bvh-primary-note { padding:10px 12px; border-radius:9px; border:1px dashed color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 40%,transparent); background:color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 7%,var(--bvh-theme-card,#fff)); }
+            /* ── 忙碌遮罩族 ── */
+            /* 长任务期间盖住整个设置窗口：转圈 + 一句“在等什么”，同时拦截全部点击，避免重复触发。 */
+            .bvh-settings-dialog { position:relative; }
+            .bvh-settings-busy { position:absolute; inset:0; z-index:9; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; border-radius:inherit; background:color-mix(in srgb,var(--bvh-theme-card,#fff) 76%,transparent); backdrop-filter:blur(4px) saturate(1.2); -webkit-backdrop-filter:blur(4px); cursor:progress; }
+            .bvh-settings-busy[hidden] { display:none; }
+            .bvh-settings-spinner { width:36px; height:36px; border-radius:50%; border:3px solid color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 22%,transparent); border-top-color:color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 92%,transparent); animation:bvh-busy-spin .85s linear infinite; }
+            .bvh-settings-busy p { margin:0; padding:0 24px; color:var(--bvh-theme-settings-text,#624b54); font-size:13px; line-height:1.7; text-align:center; }
+            @keyframes bvh-busy-spin { to { transform:rotate(360deg); } }
             /* ── 设置页新增族：分组导航 / 备份闸门 / 日期范围 / 运行日志 ── */
             /* 这些元素只为“功能可见、可解释”服务，沿用同一套主题变量，不引入独立配色。 */
             .bvh-settings-nav { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 6px; }
@@ -11686,6 +11706,29 @@
     }
 
     // ── 脚本内设置窗口：普通参数集中调整，不再依赖油猴菜单逐项输入 ──
+    // 忙碌状态的中文说明：遮罩上显示“在等什么”，而不是只给一个转圈让人猜。
+    const BUSY_TEXT = {
+        save: '正在保存设置并核验…',
+        export: '正在生成备份文件…',
+        'export-save': '正在写入备份文件…',
+        'export-confirm': '正在核对并登记备份…',
+        csv: '正在导出热层 CSV…',
+        'csv-all': '正在读取全部冷库并导出 CSV，记录较多时需要等待…',
+        sync: '正在同步官方历史…',
+        import: '正在导入记录并核验…',
+        'delete-empty': '正在清理空白冷库…',
+        archive: '正在把过期记录归档到冷库…',
+        'reset-counts': '正在重置观看次数…',
+        'merge-ep': '正在归并单集到合集…',
+        'repair-identity': '正在修复分集身份…',
+        migrate: '正在迁移记录结构…',
+        'clean-expire': '正在检查可清理的过期记录…',
+        'clean-short': '正在清理短观看记录…',
+        'delete-all': '正在删除全部记录…',
+        scan: '正在扫描并读取冷库信息…'
+    };
+    const BUSY_FALLBACK = '正在处理，完成前请勿重复操作…';
+
     // 设置任务状态放在窗口节点上，关闭、重新打开都不会绕过同一任务的忙碌状态。
     const SettingsOperations = {
         bind(element, event, handler) {
@@ -11706,7 +11749,23 @@
                 delete overlay._bvhSaveDisabledStates;
             }
             const busy = !!overlay._bvhTask || !!overlay._bvhScanning;
+            // 遮罩只用于真正的长任务（_bvhTask）；冷库扫描很快，只锁它自己的刷新按钮，避免每次开窗闪一下。
+            const taskRunning = !!overlay._bvhTask;
             const primary = StorageRouter.isPrimaryMode();
+            const busyLayer = overlay.querySelector('[data-settings-busy]');
+            const busyText = overlay.querySelector('[data-settings-busy-text]');
+            if (busyLayer) busyLayer.hidden = !taskRunning;
+            if (busyText) busyText.textContent = taskRunning ? (BUSY_TEXT[overlay._bvhTask] || BUSY_FALLBACK) : '';
+            overlay.querySelector('.bvh-settings-dialog')?.setAttribute('aria-busy', String(taskRunning));
+            // 任务进行中把可交互元素全部锁住：返回前不允许重复点击，也不允许中途改设置。
+            if (taskRunning) {
+                overlay.querySelectorAll('button, input, select, textarea').forEach(el => { el.disabled = true; });
+                overlay._bvhBusyLocked = true;
+            } else if (overlay._bvhBusyLocked) {
+                // 只解锁上次由忙碌锁禁用的元素，随后由下面的规则重新算出正确状态。
+                overlay.querySelectorAll('button, input, select, textarea').forEach(el => { el.disabled = false; });
+                overlay._bvhBusyLocked = false;
+            }
             overlay.querySelectorAll('[data-save], .bvh-cold-management button, [data-cold-file]').forEach(el => {
                 el.disabled = busy || (primary && el.hasAttribute('data-cold-archive'));
             });
@@ -11931,6 +11990,10 @@
                         </div>
                     </div>
                     <footer class="bvh-settings-footer"><button type="button" data-cancel>取消</button><button type="button" data-save>保存设置</button></footer>
+                    <div class="bvh-settings-busy" data-settings-busy hidden>
+                        <span class="bvh-settings-spinner" aria-hidden="true"></span>
+                        <p data-settings-busy-text aria-live="polite"></p>
+                    </div>
                 </section>`;
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => {

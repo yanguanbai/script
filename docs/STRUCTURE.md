@@ -43,6 +43,7 @@
 | G 主题变量 | token 定义 + 组件映射 + 预设 / 深浅色 / 取色预览 | `themeVariablesAndOverrides`、`darkThemeOverrides`、`themeEditorAndPreview` |
 | H 状态修饰 | `is-active`、`is-danger`、`bvh-resizing`、`bvh-dragging` | `panelDragAndResize` 及各片段内联状态规则 |
 | I 字号 | `--bvh-ui-font-size`、`--bvh-setting-font-size` | `settingsLayoutOverrides`、各片段 |
+| J 忙碌遮罩 | `.bvh-settings-busy`、`.bvh-settings-spinner` | `settingsBase`（`createSettingsWindow` 末尾）+ `SettingsOperations.sync` 控制显隐 |
 
 ---
 
@@ -166,6 +167,19 @@ CSV 有两条出口，共用 `_exportCSV(entries, label, fileSuffix)`：
 冷库清单、导入 JSON 到冷库、删除空白冷库、导出、CSV、导入、清理、重置、归并、修复、迁移、清空**仍然可用**——`GM_*` 在文件顶部统一改写成 `StorageRouter` 调用，主存模式下走 DB。
 
 置灰同时给 `title` 写明原因，并在冷库组顶部显示一条 `bvh-primary-note` 说明，避免“看着能点其实不生效”。
+
+### 长任务的忙碌状态
+
+`SettingsOperations.run(overlay, name, action)` 是设置页所有耗时操作的唯一入口：
+
+1. 首个动作同步写 `overlay._bvhTask = name`，第二个点击进来直接 `return`（重入锁）；
+2. `sync` 打开 `.bvh-settings-busy` 遮罩（转圈 + `BUSY_TEXT[name]` 文案），并把全部 `button/input/select/textarea` 置 `disabled`，在 `finally` 之前不可能重复触发；
+3. `finally` 清空任务名并再 `sync` 一次，遮罩收起、控件按 primary 规则重新算出状态。
+
+新增任务名时必须在 `BUSY_TEXT` 里补一条中文说明，否则遮罩会显示兜底文案。
+冷库扫描（`_bvhScanning`）只锁它自己的刷新按钮，不弹遮罩，避免每次开窗闪一下。
+
+设置页之外：`StorageApi.exportAllRecords` 另有 `_exportingBackup` 重入锁，历史页连点也只生成一份文件。
 
 ---
 
