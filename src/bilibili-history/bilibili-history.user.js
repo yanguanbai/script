@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.22
+// @version      5.10.23
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.23：修复沙箱内调用系统保存对话框报 Illegal invocation（改用真实窗口调用，失败静默降级）；导出新增“只导出油猴存储”；设置页把界面配色移到最前、运行日志移到末尾。
 // 5.10.22：保存备份新增 GM_download 档，以下载完成回调判定保存成功并自动登记；失败或超时退回普通下载并给错误码。
 // 5.10.21：导出拆成"构建/保存/确认"三段，只有确认文件确实保存后才登记可清理；新增按范围导出、错误码与运行日志；设置页按功能重排为七组并补齐全部功能入口。
 // 5.10.20：官方多P接口视频名仅补空合集名；扫描迁移保留扁平记录合集名，锁内保护最新名称；页面缺名不清空已有合集名。
@@ -4816,7 +4817,13 @@
                 return { min, max };
             };
             return (key, rec) => {
-                if (kind !== 'all') {
+                // kind='gm'：只导出仍存放在油猴存储里的记录，已归档进冷库的不算。
+                // 这样导出的备份不含冷库数据，清理时也就只会放行热层的那部分。
+                if (kind === 'gm') {
+                    const raw = GM_getValue(key, null);
+                    if (raw === null || raw === undefined) return false;
+                }
+                if (kind !== 'all' && kind !== 'gm') {
                     const isBangumi = RecordKey.isBangumiKey(key) || RecordKey.isEpisodeKey(key) || Number(rec?.seasonId) > 0;
                     const isLive = RecordKey.isLiveKey(key);
                     const isCollection = rec?.type === 'collection' && !RecordKey.isSeasonKey(key);
@@ -4872,7 +4879,12 @@
             } catch (error) {
                 throw new Error(reportError('E2006', error.message, { where: 'prepareFullBackup' }));
             }
-            if (!backup.count) throw new Error(reportError('E1003', '所选范围内没有可导出的记录', { where: 'prepareFullBackup' }));
+            if (!backup.count) {
+                const reason = scope?.kind === 'gm'
+                    ? '油猴存储里没有记录：它们可能已全部归档进冷库，或当前已切到 DB 主存模式'
+                    : '所选范围内没有可导出的记录';
+                throw new Error(reportError('E1003', reason, { where: 'prepareFullBackup' }));
+            }
             const json = JSON.stringify(backup.payload, null, 2);
             const prep = {
                 payload: backup.payload,
@@ -4889,19 +4901,58 @@
             return prep;
         },
 
+        // 在脚本沙箱里 window 可能是包装过的对象，直接 window.showSaveFilePicker(...) 会报
+        // “Illegal invocation”（原生方法拿到的 this 不是真正的 Window）。
+        // 这里按“真实窗口优先”的顺序找函数，始终用正确的接收者调用。
+        _nativeSaveFilePicker() {
+            const receivers = [];
+            try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow) receivers.push(unsafeWindow); } catch (error) { /* 没有 unsafeWindow 就跳过 */ }
+            receivers.push(window);
+            try { if (globalThis !== window) receivers.push(globalThis); } catch (error) { /* 忽略 */ }
+            for (const receiver of receivers) {
+                try {
+                    const fn = receiver && receiver.showSaveFilePicker;
+                    if (typeof fn === 'function') return { fn, receiver };
+                } catch (error) { /* 读属性本身可能抛，换下一个 */ }
+            }
+            return null;
+        },
+
+        // 打开系统保存对话框。环境本身不提供时抛 NotSupportedError，由调用方降级。
+        async _openSavePicker(options) {
+            const native = this._nativeSaveFilePicker();
+            if (!native) throw Object.assign(new Error('当前环境不提供系统保存对话框'), { name: 'NotSupportedError' });
+            try {
+                return await native.fn.call(native.receiver, options);
+            } catch (error) {
+                // 沙箱代理仍可能让原生方法拒绝 this：换成无接收者调用再试一次。
+                if (!/Illegal invocation/i.test(String(error && error.message))) throw error;
+                return await native.fn(options);
+            }
+        },
+
+        // 这类错误说明“这个环境用不了系统保存对话框”，属于能力缺失而非保存失败，
+        // 只记调试信息、不写进运行日志，避免把降级过程当成错误刷屏。
+        _isPickerUnavailable(error) {
+            const name = String(error && error.name || '');
+            const message = String(error && error.message || '');
+            return name === 'NotSupportedError' || /Illegal invocation|not a function|undefined is not/i.test(message);
+        },
+
         // 在用户手势内立即请求系统保存句柄。拿不到就返回 null，由调用方降级为普通下载。
         // cancelled=true 表示用户主动取消，此时不应再走下载兜底。
         async requestBackupHandle(filename) {
-            if (typeof window.showSaveFilePicker !== 'function' || location.protocol !== 'https:') return { handle: null, cancelled: false };
+            if (location.protocol !== 'https:' || !this._nativeSaveFilePicker()) return { handle: null, cancelled: false };
             try {
-                const handle = await window.showSaveFilePicker({
+                const handle = await this._openSavePicker({
                     suggestedName: filename,
                     types: [{ description: '观看记录 JSON 备份', accept: { 'application/json': ['.json'] } }]
                 });
                 return { handle, cancelled: false };
             } catch (error) {
                 if (error?.name === 'AbortError') return { handle: null, cancelled: true };
-                reportError('E2005', error?.message || String(error), { where: 'requestBackupHandle', silent: true });
+                if (this._isPickerUnavailable(error)) console.debug('[BVH] 系统保存对话框不可用，改用下一档：', error && error.message);
+                else reportError('E2005', error?.message || String(error), { where: 'requestBackupHandle', silent: true });
                 return { handle: null, cancelled: false };
             }
         },
@@ -4926,7 +4977,7 @@
             }
             if (!preHandle && !options.pickerTried) {
                 try {
-                    const handle = await window.showSaveFilePicker({
+                    const handle = await this._openSavePicker({
                         suggestedName: prep.filename,
                         types: [{ description: '观看记录 JSON 备份', accept: { 'application/json': ['.json'] } }]
                     });
@@ -4936,7 +4987,8 @@
                         return { ok: false, method: 'picker', pending: false, code: 'E2003', message: '已取消保存，备份未生成，本次不登记为已备份' };
                     }
                     // 缺少用户手势、权限被拒、无此 API 等情况继续降级。
-                    reportError('E2005', error?.message || String(error), { where: 'saveBackupVerified', silent: true });
+                    if (this._isPickerUnavailable(error)) console.debug('[BVH] 系统保存对话框不可用，改用下一档：', error && error.message);
+                    else reportError('E2005', error?.message || String(error), { where: 'saveBackupVerified', silent: true });
                 }
             }
             // GM_download 档：下载完成的 onload 回调才是“已保存”的证据；
@@ -11669,97 +11721,14 @@
                             <div><strong>按你的观看习惯精细调整</strong><p>设置分七组：观看去重、记录与保留、冷库与存储、数据导入导出、维护工具、运行日志、界面配色。每组开头都写明这组管什么、改动会带来什么后果；滑轨上的节点是常用值，点击即可平滑移动，右侧数字框可直接输入精确值。</p></div>
                         </section>
                         <nav class="bvh-settings-nav" aria-label="设置分组导航">
+                            <button type="button" data-nav="bvh-group-theme">界面配色</button>
                             <button type="button" data-nav="bvh-group-dedup">观看去重</button>
                             <button type="button" data-nav="bvh-group-retain">记录与保留</button>
                             <button type="button" data-nav="bvh-group-cold">冷库与存储</button>
                             <button type="button" data-nav="bvh-group-transfer">数据导入导出</button>
                             <button type="button" data-nav="bvh-group-maint">维护工具</button>
                             <button type="button" data-nav="bvh-group-log">运行日志</button>
-                            <button type="button" data-nav="bvh-group-theme">界面配色</button>
                         </nav>
-                        <div class="bvh-setting-group" id="bvh-group-dedup"><h4>观看去重</h4>
-                            <label class="bvh-setting-row"><span>判定方式 <small title="时间：只比较两次快照的时间间隔；进度：只比较进度百分比差值；同时满足：时间和进度差都在阈值内才合并。建议值：时间和进度都满足。">ⓘ</small></span><select id="bvh-setting-dedup-mode"><option value="both">时间和进度都满足</option><option value="time">只根据时间差</option><option value="progress">只根据进度差</option></select></label>
-                            <label class="bvh-setting-row"><span>时间差上限 <b id="bvh-setting-gap-value"></b><small title="两次快照相隔不超过该分钟数时，时间条件成立。范围 1–180 分钟。建议值：30 分钟。">ⓘ</small></span><input id="bvh-setting-gap" type="range" min="1" max="180" step="1"></label>
-                            <label class="bvh-setting-row"><span>进度差上限 <b id="bvh-setting-progress-value"></b><small title="比较两次快照进度的绝对差值。例如 35% 和 40% 相差 5 个百分点。建议值：10 个百分点。">ⓘ</small></span><input id="bvh-setting-progress" type="range" min="0" max="100" step="1"></label>
-                            <p class="bvh-setting-note">差值按百分点计算。选择“只根据时间”时忽略进度；选择“只根据进度”时忽略时间；“时间和进度都满足”要求两项同时在阈值内。</p>
-                        </div>
-                        <div class="bvh-setting-group" id="bvh-group-retain"><h4>记录与保留</h4>
-                            <p class="bvh-setting-note">这一组决定什么算同一次观看、多久算过期、面板显示多少条、同步读多少页。改动只影响之后的行为，不会主动删除已有记录；“过期天数”只决定何时标记为可清理。</p>
-                            <label class="bvh-setting-row"><span>长期记录过期天数 <b id="bvh-setting-expire-value"></b><small title="超过该天数且已备份的长期未更新记录会被标记为可清理，不会自动删除。建议值：60 天；记录约达 2,000 条时建议导出备份。观看越频繁，越应缩短导出和清理间隔。">ⓘ</small></span><input id="bvh-setting-expire" type="range" min="1" max="365" step="1"></label>
-                            <label class="bvh-setting-row"><span>官方历史同步页数 <b id="bvh-setting-pages-value"></b><small title="每次同步最多加载的官方历史页数；页数越多读取越多，也越耗时。建议值：30 页。">ⓘ</small></span><input id="bvh-setting-pages" type="range" min="1" max="100" step="1"></label>
-                            <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="player 与 official 各最多保留 N 条候选（合计最多 2N）；历史页读满前 N 条后固定 official 候选，player 候选继续更新。修改 N 后刷新历史页生效。不改变每条记录保存的快照上限。建议值：5 条。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
-                            <label class="bvh-setting-row"><span>自动获取来源占比 <b id="bvh-setting-quota-value"></b><small title="player 至少占展示名额的该比例；剩余名额从 player 与 official 的未选候选中按观看时间排序补齐。0% 不会排除较新的 player 快照。建议值：0%。">ⓘ</small></span><input id="bvh-setting-quota" type="range" min="0" max="100" step="5"></label>
-                            <label class="bvh-setting-row"><span>短观看阈值 <b id="bvh-setting-short-value"></b><small title="播放位置严格小于该秒数的记录会被视为短观看，按下面的保留天数清理。建议值：5 秒。">ⓘ</small></span><input id="bvh-setting-short" type="range" min="0" max="120" step="1"></label>
-                            <label class="bvh-setting-row"><span>短观看保留天数 <b id="bvh-setting-retention-value"></b><small title="短观看记录保留多久；0 表示立即符合清理条件。建议值：7 天。">ⓘ</small></span><input id="bvh-setting-retention" type="range" min="0" max="365" step="1"></label>
-                        </div>
-                        <div class="bvh-setting-group" id="bvh-group-cold"><h4>冷库与存储</h4>
-                            <p class="bvh-setting-note">这一组管理 IndexedDB 冷库。归档会把超过“归档年龄”的记录从油猴热层搬进冷库，热层不再保留副本；归档年龄设为 0 会把全部记录迁入冷库并永久启用 DB 主存模式，无法切回。导出与导入在下一组，这里只负责归档与库本身。</p>
-                            <label class="bvh-setting-row"><span>归档年龄 <b id="bvh-setting-cold-age-value"></b><small title="大于 0 天时，旧记录从 GM 迁入 IndexedDB。设为 0 会把所有记录迁入 IndexedDB 并永久启用 DB 主存模式，无法切回 GM；开始前会再次确认。建议值：30 天。">ⓘ</small></span><input id="bvh-setting-cold-age" type="range" min="0" max="180" step="1"></label>
-                            <label class="bvh-setting-row"><span>自动归档周期 <b id="bvh-setting-cold-interval-value"></b><small title="history 页面按周期检查并归档达到年龄的记录；检查周期从上次成功检查后计算。建议值：7 天。年龄设为 0 后不再归档。">ⓘ</small></span><input id="bvh-setting-cold-interval" type="range" min="1" max="90" step="1"></label>
-                            <label class="bvh-setting-row"><span>自动归档 <small title="开启后按上方周期在打开 history 页面时执行；年龄为 0 的 DB 主存模式不需归档。">ⓘ</small></span><input type="checkbox" class="bvh-toggle-input" data-cold-auto><span class="bvh-toggle-track" aria-hidden="true"></span></label>
-                            <label class="bvh-setting-row"><span>无结果自动查冷库 <small title="开启后，只有搜索词未命中油猴热层记录时才扫描 IndexedDB。会增加这类搜索的等待时间；本地记录较少时建议开启。">ⓘ</small></span><input type="checkbox" class="bvh-toggle-input" data-cold-search-auto><span class="bvh-toggle-track" aria-hidden="true"></span></label>
-                            <div class="bvh-cold-management">
-                                <button type="button" data-cold-delete-empty>删除空白冷库</button>
-                                <button type="button" data-cold-archive>立即归档</button>
-                                <button type="button" data-cold-import>导入 JSON 到冷库</button>
-                                <input type="file" accept=".json,application/json" data-cold-file hidden>
-                                <p class="bvh-setting-note" data-cold-status>脚本自动识别并复用冷库；新观看记录保存在油猴热层，达到年龄的记录自动归档。</p>
-                                <div class="bvh-cold-inventory">
-                                    <div class="bvh-cold-inventory-header"><strong>已识别的冷库</strong><button type="button" data-cold-refresh>刷新数据库信息</button></div>
-                                    <div data-cold-databases aria-live="polite">正在等待数据库扫描。</div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="bvh-setting-group" id="bvh-group-transfer"><h4>数据导入导出</h4>
-                            <p class="bvh-setting-note">导出的 JSON 是唯一能登记为“已备份”的格式；只有确认文件确实保存之后，清理才会删除对应记录。CSV 供分析查看，不参与备份判定。两条导入路径语义不同，下面的说明写清了区别。</p>
-                            <div class="bvh-cold-management">
-                                <button type="button" data-cold-export-all data-backup-export>导出完整备份</button>
-                                <button type="button" data-backup-csv>导出 CSV</button>
-                                <button type="button" data-backup-import>导入到当前存储</button>
-                                <button type="button" data-backup-sync>同步官方历史</button>
-                            </div>
-                            <p class="bvh-setting-note" data-backup-sync-note hidden></p>
-                            <p class="bvh-setting-note">导出完整备份：把热层与全部冷库合并成一份 JSON，可登记为“已备份”，也是唯一能让清理生效的导出。<br>导出 CSV：按快照展开成表格，仅用于查看和分析，不会登记为备份。<br>导入到当前存储：按同键取较新的规则合并进当前记录，不覆盖更新的本地记录；无法确认归属的番剧分集会被跳过。<br>导入到冷库（在“冷库与存储”组）：只写进一个冷库，不合并到当前记录，用来单独保存一份外部备份。<br>同步官方历史：按“记录与保留”里的同步页数读取官方历史页并合并到本地，不会删除本地已有记录；离开历史页时该操作无效。</p>
-                            <label class="bvh-setting-row"><span>导出范围 <small title="只导出所选类型的记录；范围外的记录不会被登记为已备份，清理时也不会被删除。">ⓘ</small></span><select data-backup-scope><option value="all">全部记录</option><option value="video">只要视频</option><option value="bangumi">只要番剧</option><option value="live">只要直播</option><option value="collection">只要合集</option></select></label>
-                            <label class="bvh-setting-row"><span>时间范围 <small title="留空表示不限。只导出在该时间段内有观看记录的条目；合集按分集的最早/最晚时间判断。">ⓘ</small></span><span class="bvh-setting-date-range"><input type="date" data-backup-since aria-label="导出起始日期"><input type="date" data-backup-until aria-label="导出结束日期"></span></label>
-                            <div class="bvh-backup-state">
-                                <p class="bvh-setting-note">保存方式按浏览器能力自动选择：①系统保存对话框（写入完成才返回成功）；②GM_download（下载完成回调才算成功，首次会问是否允许下载）；③普通下载（脚本拿不到结果，只能由你点“我已确认文件已保存”）。前两种成功即自动登记。</p>
-                                <p class="bvh-setting-note" data-backup-state-text>还没有已确认保存的备份。清理过期记录前需要先完成一次。</p>
-                                <div class="bvh-cold-management" data-backup-pending hidden>
-                                    <button type="button" data-backup-picker>保存到磁盘并确认</button>
-                                    <button type="button" data-backup-confirm>我已确认文件已保存</button>
-                                    <button type="button" data-backup-cancel>取消这次备份</button>
-                                </div>
-                                <p class="bvh-setting-note" data-backup-pending-hint hidden></p>
-                            </div>
-                        </div>
-                        <div class="bvh-setting-group" id="bvh-group-maint"><h4>维护工具</h4>
-                            <p class="bvh-setting-note">这些操作会批量改写记录，执行时间可能较长；开始前建议先完成一次已确认备份。四个结构维护操作原本只在油猴菜单里，现在也放在这里，执行结果会显示在下方并写入运行日志。</p>
-                            <div class="bvh-cold-management">
-                                <button type="button" data-maint="reset-counts">重置所有观看次数为 1</button>
-                                <button type="button" data-maint="merge-ep">归并单集到整季</button>
-                                <button type="button" data-maint="repair-identity">修复分集身份与完整键</button>
-                                <button type="button" data-maint="migrate">迁移到合集容器</button>
-                            </div>
-                            <p class="bvh-setting-note">重置所有观看次数：把每条记录改回 1 次，快照与进度保留。<br>归并单集到整季：把散落的 ep 记录并进所属 ss 季，合并后单集键消失。<br>修复分集身份：按本地数据重新推断分集归属与完整键。<br>迁移到合集容器：把旧扁平记录迁成合集结构，未确认备份时会直接中止。</p>
-                            <h5>清理</h5>
-                            <div class="bvh-cold-management">
-                                <button type="button" data-maint="clean-expire">清理已备份过期记录</button>
-                                <button type="button" data-maint="clean-short">清理短观看快照</button>
-                                <button type="button" data-maint="delete-all">清空全部记录</button>
-                            </div>
-                            <p class="bvh-setting-note">清理已备份过期：只删已确认备份且超过过期天数的记录，删除前两次确认，不可撤销。<br>清理短观看：删掉播放位置低于阈值且超过保留天数的快照，原来只在保存设置时自动执行，这里可以手动触发。<br>清空全部：删除所有记录，不可恢复，需要二次确认。</p>
-                            <p class="bvh-setting-note" data-maint-status aria-live="polite"></p>
-                        </div>
-                        <div class="bvh-setting-group" id="bvh-group-log"><h4>运行日志</h4>
-                            <p class="bvh-setting-note">每次失败都会带错误码记进这里，最多保留最近 50 条，不占用存储预算。出问题时点“复制全部”把内容发出来，就能定位到具体是哪一步、哪条记录失败。</p>
-                            <div class="bvh-cold-management">
-                                <button type="button" data-error-copy>复制全部</button>
-                                <button type="button" data-error-clear>清空日志</button>
-                            </div>
-                            <p class="bvh-setting-note" data-error-summary aria-live="polite">最近没有失败记录。</p>
-                            <div class="bvh-error-list" data-error-list></div>
-                        </div>
                         <div class="bvh-setting-group bvh-theme-settings" id="bvh-group-theme"><h4>界面配色</h4>
                             <label class="bvh-setting-row"><span>界面字号 <small title="调整设置窗口、历史列表、搜索规则卡和设置说明卡的主要文字字号。建议值：标准（16 px）。">ⓘ</small></span><select id="bvh-setting-font-size"><option value="14">较小（14px）</option><option value="16">标准（16px）</option><option value="18">较大（18px）</option><option value="20">特大（20px）</option></select></label>
                             <div class="bvh-theme-presets" role="group" aria-label="预设主题">
@@ -11808,6 +11777,89 @@
                             </div>
                             <p class="bvh-theme-contrast" id="bvh-theme-contrast" hidden>文字与背景对比度偏低，可能不容易看清。<button type="button">自动修正设置/记录文字</button></p>
                             <p class="bvh-setting-note">粉、蓝、黑金配色分别记忆。调整只预览此样例；点击“保存设置”后应用，取消不保存。高级颜色选择中只显示当前主题的恢复默认按钮。</p>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-dedup"><h4>观看去重</h4>
+                            <label class="bvh-setting-row"><span>判定方式 <small title="时间：只比较两次快照的时间间隔；进度：只比较进度百分比差值；同时满足：时间和进度差都在阈值内才合并。建议值：时间和进度都满足。">ⓘ</small></span><select id="bvh-setting-dedup-mode"><option value="both">时间和进度都满足</option><option value="time">只根据时间差</option><option value="progress">只根据进度差</option></select></label>
+                            <label class="bvh-setting-row"><span>时间差上限 <b id="bvh-setting-gap-value"></b><small title="两次快照相隔不超过该分钟数时，时间条件成立。范围 1–180 分钟。建议值：30 分钟。">ⓘ</small></span><input id="bvh-setting-gap" type="range" min="1" max="180" step="1"></label>
+                            <label class="bvh-setting-row"><span>进度差上限 <b id="bvh-setting-progress-value"></b><small title="比较两次快照进度的绝对差值。例如 35% 和 40% 相差 5 个百分点。建议值：10 个百分点。">ⓘ</small></span><input id="bvh-setting-progress" type="range" min="0" max="100" step="1"></label>
+                            <p class="bvh-setting-note">差值按百分点计算。选择“只根据时间”时忽略进度；选择“只根据进度”时忽略时间；“时间和进度都满足”要求两项同时在阈值内。</p>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-retain"><h4>记录与保留</h4>
+                            <p class="bvh-setting-note">这一组决定什么算同一次观看、多久算过期、面板显示多少条、同步读多少页。改动只影响之后的行为，不会主动删除已有记录；“过期天数”只决定何时标记为可清理。</p>
+                            <label class="bvh-setting-row"><span>长期记录过期天数 <b id="bvh-setting-expire-value"></b><small title="超过该天数且已备份的长期未更新记录会被标记为可清理，不会自动删除。建议值：60 天；记录约达 2,000 条时建议导出备份。观看越频繁，越应缩短导出和清理间隔。">ⓘ</small></span><input id="bvh-setting-expire" type="range" min="1" max="365" step="1"></label>
+                            <label class="bvh-setting-row"><span>官方历史同步页数 <b id="bvh-setting-pages-value"></b><small title="每次同步最多加载的官方历史页数；页数越多读取越多，也越耗时。建议值：30 页。">ⓘ</small></span><input id="bvh-setting-pages" type="range" min="1" max="100" step="1"></label>
+                            <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="player 与 official 各最多保留 N 条候选（合计最多 2N）；历史页读满前 N 条后固定 official 候选，player 候选继续更新。修改 N 后刷新历史页生效。不改变每条记录保存的快照上限。建议值：5 条。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
+                            <label class="bvh-setting-row"><span>自动获取来源占比 <b id="bvh-setting-quota-value"></b><small title="player 至少占展示名额的该比例；剩余名额从 player 与 official 的未选候选中按观看时间排序补齐。0% 不会排除较新的 player 快照。建议值：0%。">ⓘ</small></span><input id="bvh-setting-quota" type="range" min="0" max="100" step="5"></label>
+                            <label class="bvh-setting-row"><span>短观看阈值 <b id="bvh-setting-short-value"></b><small title="播放位置严格小于该秒数的记录会被视为短观看，按下面的保留天数清理。建议值：5 秒。">ⓘ</small></span><input id="bvh-setting-short" type="range" min="0" max="120" step="1"></label>
+                            <label class="bvh-setting-row"><span>短观看保留天数 <b id="bvh-setting-retention-value"></b><small title="短观看记录保留多久；0 表示立即符合清理条件。建议值：7 天。">ⓘ</small></span><input id="bvh-setting-retention" type="range" min="0" max="365" step="1"></label>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-cold"><h4>冷库与存储</h4>
+                            <p class="bvh-setting-note">这一组管理 IndexedDB 冷库。归档会把超过“归档年龄”的记录从油猴热层搬进冷库，热层不再保留副本；归档年龄设为 0 会把全部记录迁入冷库并永久启用 DB 主存模式，无法切回。导出与导入在下一组，这里只负责归档与库本身。</p>
+                            <label class="bvh-setting-row"><span>归档年龄 <b id="bvh-setting-cold-age-value"></b><small title="大于 0 天时，旧记录从 GM 迁入 IndexedDB。设为 0 会把所有记录迁入 IndexedDB 并永久启用 DB 主存模式，无法切回 GM；开始前会再次确认。建议值：30 天。">ⓘ</small></span><input id="bvh-setting-cold-age" type="range" min="0" max="180" step="1"></label>
+                            <label class="bvh-setting-row"><span>自动归档周期 <b id="bvh-setting-cold-interval-value"></b><small title="history 页面按周期检查并归档达到年龄的记录；检查周期从上次成功检查后计算。建议值：7 天。年龄设为 0 后不再归档。">ⓘ</small></span><input id="bvh-setting-cold-interval" type="range" min="1" max="90" step="1"></label>
+                            <label class="bvh-setting-row"><span>自动归档 <small title="开启后按上方周期在打开 history 页面时执行；年龄为 0 的 DB 主存模式不需归档。">ⓘ</small></span><input type="checkbox" class="bvh-toggle-input" data-cold-auto><span class="bvh-toggle-track" aria-hidden="true"></span></label>
+                            <label class="bvh-setting-row"><span>无结果自动查冷库 <small title="开启后，只有搜索词未命中油猴热层记录时才扫描 IndexedDB。会增加这类搜索的等待时间；本地记录较少时建议开启。">ⓘ</small></span><input type="checkbox" class="bvh-toggle-input" data-cold-search-auto><span class="bvh-toggle-track" aria-hidden="true"></span></label>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-cold-delete-empty>删除空白冷库</button>
+                                <button type="button" data-cold-archive>立即归档</button>
+                                <button type="button" data-cold-import>导入 JSON 到冷库</button>
+                                <input type="file" accept=".json,application/json" data-cold-file hidden>
+                                <p class="bvh-setting-note" data-cold-status>脚本自动识别并复用冷库；新观看记录保存在油猴热层，达到年龄的记录自动归档。</p>
+                                <div class="bvh-cold-inventory">
+                                    <div class="bvh-cold-inventory-header"><strong>已识别的冷库</strong><button type="button" data-cold-refresh>刷新数据库信息</button></div>
+                                    <div data-cold-databases aria-live="polite">正在等待数据库扫描。</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-transfer"><h4>数据导入导出</h4>
+                            <p class="bvh-setting-note">导出的 JSON 是唯一能登记为“已备份”的格式；只有确认文件确实保存之后，清理才会删除对应记录。CSV 供分析查看，不参与备份判定。两条导入路径语义不同，下面的说明写清了区别。</p>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-cold-export-all data-backup-export>导出完整备份</button>
+                                <button type="button" data-backup-csv>导出 CSV</button>
+                                <button type="button" data-backup-import>导入到当前存储</button>
+                                <button type="button" data-backup-sync>同步官方历史</button>
+                            </div>
+                            <p class="bvh-setting-note" data-backup-sync-note hidden></p>
+                            <p class="bvh-setting-note">导出完整备份：把热层与全部冷库合并成一份 JSON，可登记为“已备份”，也是唯一能让清理生效的导出。范围选“只导出油猴存储”时只包含热层记录，冷库里的记录不会被导出、也不会被放行为可清理。<br>导出 CSV：按快照展开成表格，仅用于查看和分析，不会登记为备份。<br>导入到当前存储：按同键取较新的规则合并进当前记录，不覆盖更新的本地记录；无法确认归属的番剧分集会被跳过。<br>导入到冷库（在“冷库与存储”组）：只写进一个冷库，不合并到当前记录，用来单独保存一份外部备份。<br>同步官方历史：按“记录与保留”里的同步页数读取官方历史页并合并到本地，不会删除本地已有记录；离开历史页时该操作无效。</p>
+                            <label class="bvh-setting-row"><span>导出范围 <small title="只导出所选类型的记录。只导出油猴存储：跳过已归档进冷库的记录，适合只想备份热层的情况。范围外的记录不会被登记为已备份，清理时也不会被删除。">ⓘ</small></span><select data-backup-scope><option value="all">全部记录</option><option value="video">只要视频</option><option value="bangumi">只要番剧</option><option value="live">只要直播</option><option value="collection">只要合集</option><option value="gm">只导出油猴存储</option></select></label>
+                            <label class="bvh-setting-row"><span>时间范围 <small title="留空表示不限。只导出在该时间段内有观看记录的条目；合集按分集的最早/最晚时间判断。">ⓘ</small></span><span class="bvh-setting-date-range"><input type="date" data-backup-since aria-label="导出起始日期"><input type="date" data-backup-until aria-label="导出结束日期"></span></label>
+                            <div class="bvh-backup-state">
+                                <p class="bvh-setting-note">保存方式按浏览器能力自动选择：①系统保存对话框（写入完成才返回成功）；②GM_download（下载完成回调才算成功，首次会问是否允许下载）；③普通下载（脚本拿不到结果，只能由你点“我已确认文件已保存”）。前两种成功即自动登记。</p>
+                                <p class="bvh-setting-note" data-backup-state-text>还没有已确认保存的备份。清理过期记录前需要先完成一次。</p>
+                                <div class="bvh-cold-management" data-backup-pending hidden>
+                                    <button type="button" data-backup-picker>保存到磁盘并确认</button>
+                                    <button type="button" data-backup-confirm>我已确认文件已保存</button>
+                                    <button type="button" data-backup-cancel>取消这次备份</button>
+                                </div>
+                                <p class="bvh-setting-note" data-backup-pending-hint hidden></p>
+                            </div>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-maint"><h4>维护工具</h4>
+                            <p class="bvh-setting-note">这些操作会批量改写记录，执行时间可能较长；开始前建议先完成一次已确认备份。四个结构维护操作原本只在油猴菜单里，现在也放在这里，执行结果会显示在下方并写入运行日志。</p>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-maint="reset-counts">重置所有观看次数为 1</button>
+                                <button type="button" data-maint="merge-ep">归并单集到整季</button>
+                                <button type="button" data-maint="repair-identity">修复分集身份与完整键</button>
+                                <button type="button" data-maint="migrate">迁移到合集容器</button>
+                            </div>
+                            <p class="bvh-setting-note">重置所有观看次数：把每条记录改回 1 次，快照与进度保留。<br>归并单集到整季：把散落的 ep 记录并进所属 ss 季，合并后单集键消失。<br>修复分集身份：按本地数据重新推断分集归属与完整键。<br>迁移到合集容器：把旧扁平记录迁成合集结构，未确认备份时会直接中止。</p>
+                            <h5>清理</h5>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-maint="clean-expire">清理已备份过期记录</button>
+                                <button type="button" data-maint="clean-short">清理短观看快照</button>
+                                <button type="button" data-maint="delete-all">清空全部记录</button>
+                            </div>
+                            <p class="bvh-setting-note">清理已备份过期：只删已确认备份且超过过期天数的记录，删除前两次确认，不可撤销。<br>清理短观看：删掉播放位置低于阈值且超过保留天数的快照，原来只在保存设置时自动执行，这里可以手动触发。<br>清空全部：删除所有记录，不可恢复，需要二次确认。</p>
+                            <p class="bvh-setting-note" data-maint-status aria-live="polite"></p>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-log"><h4>运行日志</h4>
+                            <p class="bvh-setting-note">每次失败都会带错误码记进这里，最多保留最近 50 条，不占用存储预算。出问题时点“复制全部”把内容发出来，就能定位到具体是哪一步、哪条记录失败。</p>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-error-copy>复制全部</button>
+                                <button type="button" data-error-clear>清空日志</button>
+                            </div>
+                            <p class="bvh-setting-note" data-error-summary aria-live="polite">最近没有失败记录。</p>
+                            <div class="bvh-error-list" data-error-list></div>
                         </div>
                     </div>
                     <footer class="bvh-settings-footer"><button type="button" data-cancel>取消</button><button type="button" data-save>保存设置</button></footer>

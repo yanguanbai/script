@@ -204,5 +204,18 @@ const record = (title, watchCount = 2, when = Date.now() - 100 * dayMs) => ({
   delete ctx.GM_download;
   console.log('a failed GM_download falls back without registering');
 
+  // 11) 沙箱里调用系统保存对话框可能报 Illegal invocation：按“环境不支持”处理，
+  //     不当作保存失败、不写 E2005 日志，交给下一档。
+  records.delete(LOG_KEY);
+  ctx.window.showSaveFilePicker = () => {
+    throw new Error("Failed to execute 'showSaveFilePicker' on 'Window': Illegal invocation");
+  };
+  const picker = await StorageApi.requestBackupHandle('illegal.json');
+  assert.equal(picker.handle, null, 'a broken picker yields no handle');
+  assert.equal(picker.cancelled, false, 'Illegal invocation is a capability gap, not a user cancel');
+  assert.equal(ErrorLog.read().some(entry => entry.code === 'E2005'), false, 'environment gaps are not logged as save errors');
+  delete ctx.window.showSaveFilePicker;
+  console.log('an unusable save picker degrades silently');
+
   console.log('backup confirmation gate checks passed');
 })().catch(error => { console.error(error); process.exit(1); });

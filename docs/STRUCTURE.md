@@ -83,7 +83,7 @@
 
 | 档 | 判定依据 | 结果 | 备注 |
 |---|---|---|---|
-| `picker` | `createWritable` + `close()` 完整返回 | `ok`，自动登记 | 需要点击手势；调用方应先 `requestBackupHandle` |
+| `picker` | `createWritable` + `close()` 完整返回 | `ok`，自动登记 | 需要点击手势；调用方应先 `requestBackupHandle`；沙箱里必须用真实窗口调用（`_nativeSaveFilePicker` / `_openSavePicker`），否则报 Illegal invocation |
 | `gm_download` | `GM_download` 的 `onload` 回调 | `ok`，自动登记 | 需要 `@grant GM_download`；首次使用浏览器会问"允许下载" |
 | `download` | 只有 `a.click()`，拿不到任何结果 | `pending` + E2004 | 必须由用户点"我已确认文件已保存" |
 
@@ -101,8 +101,10 @@
 范围参数只作用于最终合并集，payload 的 `format`/`version` 不变，`importRecords` 无需改动：
 
 ```
-scope = { kind: 'all' | 'video' | 'bangumi' | 'live' | 'collection', since, until }
+scope = { kind: 'all' | 'video' | 'bangumi' | 'live' | 'collection' | 'gm', since, until }
 ```
+
+`kind='gm'` 只取仍在油猴存储里的记录（`GM_getValue(key)` 存在），冷库里的记录不导出、也不会因这份备份被放行为可清理。
 
 ---
 
@@ -125,15 +127,17 @@ scope = { kind: 'all' | 'video' | 'bangumi' | 'live' | 'collection', since, unti
 
 ## 设置页分组（M34）
 
-| 组 | 内容 |
-|---|---|
-| 观看去重 | 判定方式、时间差上限、进度差上限 |
-| 记录与保留 | 过期天数、同步页数、快照条数、来源配额、短观看阈值 / 保留天数 |
-| 冷库与存储 | 归档年龄 / 周期 / 开关、无结果查冷库、删空白库、立即归档、冷库清单、导入到冷库 |
-| 数据导入导出 | 导出完整备份（含范围与时间筛选）、导出 CSV、导入到当前存储、备份确认闸门 |
-| 维护工具 | 重置次数、归并单集、修复身份、迁移到合集容器、清理过期、清理短观看、清空全部 |
-| 运行日志 | 错误码归类、复制全部、清空日志 |
-| 界面配色 | 字号、预设主题、高级取色、对比度修正 |
+顺序即用户看到的上到下：**常用个性化在前，调试与破坏性操作在后。**
+
+| 组 | id | 内容 |
+|---|---|---|
+| 界面配色 | `bvh-group-theme` | 字号、预设主题、高级取色、对比度修正 |
+| 观看去重 | `bvh-group-dedup` | 判定方式、时间差上限、进度差上限 |
+| 记录与保留 | `bvh-group-retain` | 过期天数、同步页数、快照条数、来源配额、短观看阈值 / 保留天数 |
+| 冷库与存储 | `bvh-group-cold` | 归档年龄 / 周期 / 开关、无结果查冷库、删空白库、立即归档、冷库清单、导入到冷库 |
+| 数据导入导出 | `bvh-group-transfer` | 导出完整备份（含范围与时间筛选）、导出 CSV、导入到当前存储、同步官方历史、备份确认闸门 |
+| 维护工具 | `bvh-group-maint` | 重置次数、归并单集、修复身份、迁移到合集容器、清理过期、清理短观看、清空全部 |
+| 运行日志 | `bvh-group-log` | 错误码归类、复制全部、清空日志 |
 
 新增按钮统一放在 `bvh-cold-management` 容器里，复用现有按钮样式与忙碌锁；
 每个按钮下方必须有一行常驻说明（做什么 / 影响什么 / 能否撤销），不依赖 `title` 悬浮提示。
