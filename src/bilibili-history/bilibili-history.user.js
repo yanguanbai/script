@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.21
+// @version      5.10.22
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -19,6 +19,7 @@
 // @grant        GM_deleteValue
 // @grant        GM_listValues
 // @grant        GM_registerMenuCommand
+// @grant        GM_download
 // @grant        GM_addStyle
 // @run-at       document-end
 // @icon         https://www.bilibili.com/favicon.ico
@@ -26,6 +27,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.22：保存备份新增 GM_download 档，以下载完成回调判定保存成功并自动登记；失败或超时退回普通下载并给错误码。
 // 5.10.21：导出拆成"构建/保存/确认"三段，只有确认文件确实保存后才登记可清理；新增按范围导出、错误码与运行日志；设置页按功能重排为七组并补齐全部功能入口。
 // 5.10.20：官方多P接口视频名仅补空合集名；扫描迁移保留扁平记录合集名，锁内保护最新名称；页面缺名不清空已有合集名。
 // 5.10.19：扁平记录并入合集时不再用当前视频标题回退覆盖合集名；合集名仅接受明确识别的合集标题。
@@ -493,6 +495,9 @@
         E2004: '保存未确认，不登记为备份',
         E2005: '浏览器拒绝写入文件',
         E2006: '备份生成失败，未生成文件',
+        E2007: '等待下载结果超时，无法确认是否保存',
+        E2008: 'GM_download 下载失败',
+        E2009: '下载请求被浏览器拦截',
         // E3xxx 存储
         E3001: '存储占用接近上限',
         E3002: '存储写入校验失败',
@@ -4902,9 +4907,10 @@
         },
 
         // 真正保存备份。传入已打开的句柄时直接写入并等待 close() 完成；
-        // 否则三档降级：系统保存对话框（可确认写入）→ 普通下载（无法确认）。
+        // 否则按能力逐档降级：系统保存对话框 → GM_download → 普通下载。
         // 返回 ok=true 只代表“已确认落盘”，pending=true 代表“文件已交出去但没确认”。
-        async saveBackupVerified(prep, preHandle = null) {
+        // options.pickerTried=true 表示调用方刚试过保存对话框，这里不再重复弹第二个。
+        async saveBackupVerified(prep, preHandle = null, options = {}) {
             if (!prep) return { ok: false, method: 'none', pending: false, code: 'E2006', message: '没有待保存的备份内容' };
             const writeWithHandle = async handle => {
                 const writable = await handle.createWritable();
@@ -4918,7 +4924,7 @@
                 try { return await writeWithHandle(preHandle); }
                 catch (error) { reportError('E2005', error?.message || String(error), { where: 'saveBackupVerified', silent: true }); }
             }
-            if (!preHandle) {
+            if (!preHandle && !options.pickerTried) {
                 try {
                     const handle = await window.showSaveFilePicker({
                         suggestedName: prep.filename,
@@ -4929,10 +4935,14 @@
                     if (error?.name === 'AbortError') {
                         return { ok: false, method: 'picker', pending: false, code: 'E2003', message: '已取消保存，备份未生成，本次不登记为已备份' };
                     }
-                    // 缺少用户手势、权限被拒、无此 API 等情况降级为普通下载，由用户自己确认。
+                    // 缺少用户手势、权限被拒、无此 API 等情况继续降级。
                     reportError('E2005', error?.message || String(error), { where: 'saveBackupVerified', silent: true });
                 }
             }
+            // GM_download 档：下载完成的 onload 回调才是“已保存”的证据；
+            // 浏览器首次会弹一次“允许下载”确认，那就是用户本人对这次保存的授权。
+            const gmResult = await this._gmDownloadBackup(prep);
+            if (gmResult) return gmResult;
             const blob = new Blob([prep.json], { type: 'application/json;charset=utf-8' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -4950,6 +4960,49 @@
                 code: 'E2004',
                 message: '文件已生成并交给浏览器下载，但脚本无法确认它是否真的保存成功'
             };
+        },
+
+        // GM_download 档：能真正判定保存结果，代价是需要 @grant GM_download。
+        // 返回 null 表示这一档不可用或下载失败，调用方继续降级为普通下载；
+        // 返回对象则一定是终态（成功、超时或拦截），不再产生第二个文件。
+        async _gmDownloadBackup(prep) {
+            if (typeof GM_download !== 'function') return null;
+            // data: URL 而不是 blob: URL：GM_download 在内置下载器里解析 blob: 不稳定，data: 各管理器都能取到。
+            const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(prep.json);
+            return await new Promise(resolve => {
+                let settled = false;
+                let timer = 0;
+                const settle = result => {
+                    if (settled) return;
+                    settled = true;
+                    if (timer) clearTimeout(timer);
+                    resolve(result);
+                };
+                // 用户没点“允许下载”时 onload/onerror 都不会来，必须自己收口，否则设置页会一直卡在忙碌状态。
+                timer = setTimeout(() => settle({
+                    ok: false, method: 'gm_download', pending: false, code: 'E2007',
+                    message: '等待下载结果超时（可能是没有点“允许下载”），无法确认文件是否保存'
+                }), 90 * 1000);
+                try {
+                    GM_download({
+                        url: dataUrl,
+                        name: prep.filename,
+                        saveAs: false,
+                        onload: () => settle({ ok: true, method: 'gm_download', fileName: prep.filename }),
+                        onerror: error => {
+                            reportError('E2008', String(error?.error || error?.details || error?.message || error), { where: 'gmDownloadBackup', silent: true });
+                            settle(null);
+                        },
+                        ontimeout: () => {
+                            reportError('E2007', 'GM_download 报告超时', { where: 'gmDownloadBackup', silent: true });
+                            settle(null);
+                        }
+                    });
+                } catch (error) {
+                    reportError('E2008', error?.message || String(error), { where: 'gmDownloadBackup', silent: true });
+                    settle(null);
+                }
+            });
         },
 
         // 只有确认保存成功才登记“可清理”。登记前逐键比对当前值：
@@ -5022,7 +5075,7 @@
                 alert(`完整备份失败，未生成文件，也未删除任何记录。\n${error.message}`);
                 return false;
             }
-            const save = await this.saveBackupVerified(prep, ask.handle);
+            const save = await this.saveBackupVerified(prep, ask.handle, { pickerTried: true });
             if (!save.ok) {
                 alert(
                     `${save.message}。\n共 ${prep.count} 条记录，文件 ${prep.filename}（${ByteTool.format(prep.bytes)}）。\n\n` +
@@ -11670,6 +11723,7 @@
                             <label class="bvh-setting-row"><span>导出范围 <small title="只导出所选类型的记录；范围外的记录不会被登记为已备份，清理时也不会被删除。">ⓘ</small></span><select data-backup-scope><option value="all">全部记录</option><option value="video">只要视频</option><option value="bangumi">只要番剧</option><option value="live">只要直播</option><option value="collection">只要合集</option></select></label>
                             <label class="bvh-setting-row"><span>时间范围 <small title="留空表示不限。只导出在该时间段内有观看记录的条目；合集按分集的最早/最晚时间判断。">ⓘ</small></span><span class="bvh-setting-date-range"><input type="date" data-backup-since aria-label="导出起始日期"><input type="date" data-backup-until aria-label="导出结束日期"></span></label>
                             <div class="bvh-backup-state">
+                                <p class="bvh-setting-note">保存方式按浏览器能力自动选择：①系统保存对话框（写入完成才返回成功）；②GM_download（下载完成回调才算成功，首次会问是否允许下载）；③普通下载（脚本拿不到结果，只能由你点“我已确认文件已保存”）。前两种成功即自动登记。</p>
                                 <p class="bvh-setting-note" data-backup-state-text>还没有已确认保存的备份。清理过期记录前需要先完成一次。</p>
                                 <div class="bvh-cold-management" data-backup-pending hidden>
                                     <button type="button" data-backup-picker>保存到磁盘并确认</button>
@@ -12136,6 +12190,13 @@
         const pendingActions = overlay.querySelector('[data-backup-pending]');
         const pendingHint = overlay.querySelector('[data-backup-pending-hint]');
 
+        // 三种保存方式对用户的含义不同，统一在这里翻译成人话，避免只显示内部标识。
+        const backupMethodLabel = method => ({
+            picker: '系统保存对话框（已校验写入）',
+            gm_download: 'GM_download（下载完成已确认）',
+            download: '手动确认下载'
+        }[method] || '手动确认下载');
+
         const renderBackupState = () => {
             const prep = StorageApi._pendingBackup;
             const meta = StorageApi.readConfirmedBackup();
@@ -12151,7 +12212,7 @@
                 if (pendingHint) { pendingHint.hidden = true; pendingHint.textContent = ''; }
                 if (backupStateText) {
                     backupStateText.textContent = meta
-                        ? `上次确认备份：${new Date(Number(meta.ts) || Date.now()).toLocaleString()} · ${meta.name || '未记录文件名'} · ${Number(meta.count) || 0} 条 · ${meta.method === 'picker' ? '系统保存对话框（已校验写入）' : '手动确认下载'}`
+                        ? `上次确认备份：${new Date(Number(meta.ts) || Date.now()).toLocaleString()} · ${meta.name || '未记录文件名'} · ${Number(meta.count) || 0} 条 · ${backupMethodLabel(meta.method)}`
                         : '还没有已确认保存的备份。清理过期记录前需要先完成一次。';
                 }
             }
@@ -12201,7 +12262,7 @@
                 if (backupStateText) backupStateText.textContent = error.message;
                 return;
             }
-            finishBackupFlow(prep, await StorageApi.saveBackupVerified(prep, handle));
+            finishBackupFlow(prep, await StorageApi.saveBackupVerified(prep, handle, { pickerTried: true }));
         }));
 
         // 系统保存对话框需要新的用户手势，所以单独一个按钮触发，避免生成过程耗尽激活窗口。

@@ -164,5 +164,45 @@ const record = (title, watchCount = 2, when = Date.now() - 100 * dayMs) => ({
   assert.equal(summary[0].count, ErrorLog.MAX, 'same code collapses into one bucket');
   console.log('error log is capped and grouped by code');
 
+  // 8) GM_download 档：下载完成回调才算保存；成功即自动登记，报错则退回普通下载。
+  records.clear();
+  records.set('BVGATE00005', record('GM下载成功', 1));
+  let seenUrl = '';
+  let seenName = '';
+  ctx.GM_download = options => {
+    seenUrl = options.url;
+    seenName = options.name;
+    queueMicrotask(options.onload);
+  };
+  const gmSave = await StorageApi.saveBackupVerified(await StorageApi.prepareFullBackup(), null, { pickerTried: true });
+  assert.equal(gmSave.ok, true, 'a completed GM_download counts as saved');
+  assert.equal(gmSave.method, 'gm_download');
+  assert.ok(!gmSave.pending, 'a verified GM_download is not left pending');
+  assert.match(seenUrl, /^data:application\/json/, 'GM_download receives a data: URL');
+  assert.ok(seenName.endsWith('.json'), 'GM_download receives the prepared file name');
+  assert.equal(records.has(EXPORTED_KEY), false, 'saving alone still registers nothing');
+  console.log('GM_download completion is treated as a confirmed save');
+
+  // 9) 完整链路：GM_download 成功 → 自动登记为已备份，清理可以正常工作。
+  records.clear();
+  records.set('BVGATE00006', record('GM自动登记', 1));
+  const exported = await StorageApi.exportAllRecords();
+  assert.equal(exported, true, 'exportAllRecords returns true once the save is confirmed');
+  assert.ok(records.get(EXPORTED_KEY)?.BVGATE00006, 'a verified GM_download registers the record automatically');
+  assert.equal(records.get(CONFIRM_KEY)?.method, 'gm_download', 'confirm metadata records the save method');
+  console.log('exportAllRecords auto-registers after a verified GM_download');
+
+  // 10) GM_download 报错：不登记，继续退回普通下载（pending），等待用户手动确认。
+  records.clear();
+  records.set('BVGATE00007', record('GM下载失败', 1));
+  ctx.GM_download = options => queueMicrotask(() => options.onerror({ error: 'disk full' }));
+  const gmFail = await StorageApi.saveBackupVerified(await StorageApi.prepareFullBackup(), null, { pickerTried: true });
+  assert.equal(gmFail.ok, false, 'a failed GM_download is not a confirmed save');
+  assert.equal(gmFail.pending, true, 'after GM failure the plain download fallback still runs');
+  assert.equal(gmFail.code, 'E2004');
+  assert.equal(records.has(EXPORTED_KEY), false, 'no registration after a failed download');
+  delete ctx.GM_download;
+  console.log('a failed GM_download falls back without registering');
+
   console.log('backup confirmation gate checks passed');
 })().catch(error => { console.error(error); process.exit(1); });

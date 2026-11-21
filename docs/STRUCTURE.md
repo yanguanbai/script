@@ -69,15 +69,26 @@
 
 ---
 
-## 备份确认协议（5.10.21）
+## 备份确认协议（5.10.21 起）
 
 导出的唯一目的是"删之前先有一份外部副本"，所以**保存是否真的完成**决定了能不能删。协议拆三段，不许合并：
 
 | 阶段 | 函数 | 是否写存储 | 说明 |
 |---|---|---|---|
 | 构建 | `prepareFullBackup(scope)` | 否 | 只生成 payload / 文件名 / 体积，放在 `StorageApi._pendingBackup` |
-| 保存 | `saveBackupVerified(prep, handle)` | 否 | 系统保存对话框 `close()` 完成才算成功；否则降级为普通下载并标记 `pending` |
+| 保存 | `saveBackupVerified(prep, handle, opts)` | 否 | 按能力逐档降级，见下表 |
 | 登记 | `confirmBackup(prep, method)` | 是 | 只有成功或用户明确确认后，才写 `EXPORTED_RECORDS_KEY` 与 `BACKUP_CONFIRM_KEY` |
+
+保存档位（`saveBackupVerified` 从强到弱）：
+
+| 档 | 判定依据 | 结果 | 备注 |
+|---|---|---|---|
+| `picker` | `createWritable` + `close()` 完整返回 | `ok`，自动登记 | 需要点击手势；调用方应先 `requestBackupHandle` |
+| `gm_download` | `GM_download` 的 `onload` 回调 | `ok`，自动登记 | 需要 `@grant GM_download`；首次使用浏览器会问"允许下载" |
+| `download` | 只有 `a.click()`，拿不到任何结果 | `pending` + E2004 | 必须由用户点"我已确认文件已保存" |
+
+`opts.pickerTried=true` 表示调用方已弹过保存对话框，避免重复弹第二个。
+`GM_download` 走 `data:` URL（不用 `blob:`，内置下载器解析 blob 不稳定）；90 秒内既无 `onload` 也无 `onerror` 则以 E2007 收口，避免设置页永久卡在忙碌状态。
 
 三条不变量：
 
@@ -168,6 +179,6 @@ git diff --ignore-all-space -U0 | Select-String '^-[^-]'     # 结构类改动�
 
 - 80 处重复选择器声明（占 298 个选择器的 27%），来源是"基础层 + 覆盖层"两遍写法，合并需逐段截图核对。
 - `refreshSettingsWindow` 约 700 行单函数（含新增的导入导出、维护工具、日志三块闭包），可拆成 5–6 个命名函数。
-- 普通下载档（`<a download>`）无法确认保存，只能靠用户在设置页点"我已确认文件已保存"；
-  若要真检测，需要 `GM_download`（新增 `@grant`，安装时会提示权限）。
+- 普通下载档（`<a download>`）无法确认保存，只能靠用户在设置页点"我已确认文件已保存"。
+  已提供 `GM_download` 档做真检测；若管理器不支持，仍会落到这一档。
 - 启动自动修复 `repairAndCleanLocalRecords` 仍然在写回前不做备份，只在 GM 模式生效。
