@@ -193,6 +193,16 @@ DB 主存模式下热层就是当前库，两条出口内容一致，`data-backu
 
 退出后的语义：主库变成一份普通归档库，热层为空，历史面板需要“查冷库”；冷库记录不再按 `CONFIG.EXPIRE_DAY` 自动清理（`cleanExpireRecords` 只遍历 `GM_listValues()`），这些后果都写在第二步确认里。
 
+危险视觉统一走两条规则，新增高风险入口照此办理：
+
+| 位置 | 约定 |
+|---|---|
+| 三重确认面板 | 顶部 `.bvh-triple-banner` 红色横幅 + 标题 `⚠` 前缀 + 风险行 `.bvh-triple-warn`（红边红底，行首自动加 `⚠`）+ 步数 `<b>` 标红 + 最后一步按钮 `.is-danger` |
+| 设置页按钮 | 会删除/合并/改写记录的按钮加 `class="bvh-danger"`（红边红字），文案另加 `⚠` 前缀；整组风险说明用 `.bvh-danger-note` 红底段落 |
+| 原生 `confirm()` | 不可恢复的写成 `⚠ 高风险：…`，只是改写/合并的写成 `⚠ 注意：…`，与无前缀的普通确认区分开 |
+
+当前标记为 `bvh-danger` 的按钮：`data-maint="reset-counts" / "merge-ep" / "migrate" / "clean-expire" / "delete-all"`、`data-cold-delete-empty`、`data-cold-exit-primary`。`clean-short`（只删快照）与 `repair-identity`（不改记录内容）保持普通样式。
+
 
 置灰同时给 `title` 写明原因，并在冷库组顶部显示一条 `bvh-primary-note` 说明，避免“看着能点其实不生效”。
 

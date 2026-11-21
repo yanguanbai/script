@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.31
+// @version      5.10.32
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,8 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.32：危险操作统一加红色警示——三重确认面板顶部红色横幅、标题与风险行带 ⚠、步骤数标红、最终按钮红色；
+//          设置页“清空/重置/迁移/清理/退出主存/删空白库”改为红色按钮，各处原生确认框补 ⚠ 高风险前缀。
 // 5.10.31：新增“退出主存模式”——当前主库整份转为归档库、油猴热层从零开始记录，不复制也不合并任何记录；
 //          进入与退出 DB 主存模式都改为设置页内三步确认，逐步写清会发生什么、之后怎么用、哪些入口会失效。
 // 5.10.30：备份可记住一个默认保存目录——选一次后每次导出直接写进该目录、不再弹保存对话框；
@@ -4860,7 +4862,7 @@
             let includeUnknownTime = false;
             if (unknownCount > 0) {
                 includeUnknownTime = confirm(
-                    `另发现 ${unknownCount} 条已备份但时间不确定的记录/分集（缺少有效时间戳，无法判断是否超过 ${CONFIG.EXPIRE_DAY} 天）。\n\n` +
+                    `⚠ 注意：另发现 ${unknownCount} 条已备份但时间不确定的记录/分集（缺少有效时间戳，无法判断是否超过 ${CONFIG.EXPIRE_DAY} 天）。\n\n` +
                     `点击"确定"：也清理这些时间不明的记录。\n点击"取消"：保留时间不明的记录，只清理明确过期的记录。`
                 );
             }
@@ -4871,7 +4873,7 @@
             }
 
             const confirmDelete = confirm(
-                `即将清理 ${selected.length} 条记录/分集：\n` +
+                `⚠ 高风险：即将清理 ${selected.length} 条记录/分集（删除后无法恢复）：\n` +
                 `- 明确超过 ${CONFIG.EXPIRE_DAY} 天且已确认备份：${expiredCount} 条\n` +
                 `- 时间不明且已确认备份：${includeUnknownTime ? unknownCount : 0} 条\n\n` +
                 `番剧只删除符合条件的分集；清掉某季最后一集时，该季的旧累计数据也会删除。` +
@@ -4961,7 +4963,7 @@
                 const rec = RecordNormalizer.normalize(GM_getValue(key));
                 title = rec?.title || key;
             }
-            if (!confirm(`确定删除这条视频记录？\n${title}\n\n删除后无法恢复。`)) return false;
+            if (!confirm(`⚠ 确定删除这条视频记录？\n${title}\n\n删除后无法恢复。`)) return false;
             try {
                 await RecordStore.delete(key);
                 await StorageRouter.requireCommitted(key);
@@ -5440,7 +5442,7 @@
                 if (!silent) alert('没有单集(ep)记录需要归并。');
                 return { merged: [], skipped: [] };
             }
-            if (!silent && !confirm('将把单集(ep)记录的快照合并进对应整季(ss)记录，并删除 ep 记录。确认继续？')) {
+            if (!silent && !confirm('⚠ 注意：将把单集(ep)记录的快照合并进对应整季(ss)记录，并删除 ep 记录。确认继续？')) {
                 return { merged: [], skipped: [], cancelled: true };
             }
 
@@ -5716,7 +5718,7 @@
         // 读取 JSON 备份，校验并归一化数据，再按记录键合并或写入本地存储。
         // ── 导入：JSON 导入与同键合并 ──
         importRecords() {
-            if (!confirm('导入番剧时会按 ss 季和 ep 分集身份合并；无法确认归属的分集会跳过。建议先导出当前数据作为备份，确认继续导入？')) return;
+            if (!confirm('⚠ 注意：导入番剧时会按 ss 季和 ep 分集身份合并；无法确认归属的分集会跳过。建议先导出当前数据作为备份，确认继续导入？')) return;
 
             const input = document.createElement('input');
             input.type = 'file';
@@ -6131,7 +6133,7 @@
 
         // 清除全部观看记录及备份标记，并重置索引。
         deleteAllRecords() {
-            if (!confirm('确认删除全部观看历史？该操作不可恢复！\n建议先完成一次“已确认保存”的备份（设置页 → 数据导入导出）。')) return;
+            if (!confirm('⚠ 高风险：确认删除全部观看历史？该操作不可恢复！\n建议先完成一次“已确认保存”的备份（设置页 → 数据导入导出）。')) return;
             GM_listValues().filter(k => RecordKey.isRecordKey(k)).forEach(k => RecordStore.delete(k));
             GM_setValue(EXPORTED_RECORDS_KEY, {});
             HistoryViewIndex.reset();
@@ -6149,7 +6151,7 @@
                 alert('当前没有任何观看记录。');
                 return;
             }
-            if (!confirm(`将把 ${keys.length} 条记录的观看次数全部重置为 1（快照、标题、作者等信息保留）。\n确认继续？`)) return;
+            if (!confirm(`⚠ 高风险：将把 ${keys.length} 条记录的观看次数全部重置为 1（快照、标题、作者等信息保留）。\n确认继续？`)) return;
             keys.forEach(key => {
                 const rec = RecordNormalizer.normalize(GM_getValue(key));
                 if (!rec) return;
@@ -6398,7 +6400,7 @@
                 alert(`本地数据扫描完成，没有需要修改的记录。\n番剧无映射：${unmapped} 条\n番剧映射冲突：${ambiguous} 条\n疑似整季聚合记录保留：${aggregateSkipped} 条\n普通合集完整分集键修正：${collectionKeysFixed} 条`);
                 return;
             }
-            if (!confirm(`将直接整合油猴本地存储，不需要打开播放页。\n\n待写入容器：${changes.length} 个\n从旧 BV?p=N 键恢复/合并分集：${restoredLegacyParts} 条\n修正番剧旧分集身份：${repaired} 条\n合并重复分集：${merged} 条\n修正普通合集完整分集键：${collectionKeysFixed} 条\n番剧无映射保留：${unmapped} 条\n番剧映射冲突保留：${ambiguous} 条\n疑似整季聚合保留：${aggregateSkipped} 条\n\n将先备份受影响容器和旧分P记录；写入成功后才删除已合并的旧分P键。是否继续？`)) return;
+            if (!confirm(`⚠ 高风险：将直接整合油猴本地存储，不需要打开播放页。\n\n待写入容器：${changes.length} 个\n从旧 BV?p=N 键恢复/合并分集：${restoredLegacyParts} 条\n修正番剧旧分集身份：${repaired} 条\n合并重复分集：${merged} 条\n修正普通合集完整分集键：${collectionKeysFixed} 条\n番剧无映射保留：${unmapped} 条\n番剧映射冲突保留：${ambiguous} 条\n疑似整季聚合保留：${aggregateSkipped} 条\n\n将先备份受影响容器和旧分P记录；写入成功后才删除已合并的旧分P键。是否继续？`)) return;
 
             const backupKey = `bvh_bangumi_identity_backup_${Date.now()}`;
             const backup = { createdAt: Date.now(), records: {} };
@@ -6446,7 +6448,7 @@
             if (!allKeys.length) { alert('当前没有任何记录。'); return; }
 
             if (!confirm(
-                '即将把本地历史迁移到「合集容器」结构：\n' +
+                '⚠ 高风险：即将把本地历史迁移到「合集容器」结构：\n' +
                 '- 同BV多P（BV?p=N）归并成合集容器，分集进 parts[]\n' +
                 '- 删除旧的分P键（删除前会逐条确认）\n' +
                 '- 开始前必须已有一份“已确认保存”的备份\n\n继续？'
@@ -6583,7 +6585,7 @@
             if (uniqueToDelete.length) {
                 const sample = uniqueToDelete.slice(0, 20).map(k => `- ${k}`).join('\n');
                 if (!confirm(
-                    `本次整理将删除 ${uniqueToDelete.length} 条旧扁平键或无效空记录（有观看事实或有用标题/合集元数据的记录会保留）：\n${sample}` +
+                    `⚠ 高风险：本次整理将删除 ${uniqueToDelete.length} 条旧扁平键或无效空记录（有观看事实或有用标题/合集元数据的记录会保留）：\n${sample}` +
                     (uniqueToDelete.length > 20 ? `\n… 还有 ${uniqueToDelete.length - 20} 条` : '') +
                     `\n\n点击"确定"删除并完成迁移；点击"取消"中止（不删任何键、不做改动）。`
                 )) { alert('已中止迁移，未做任何删除。'); return; }
@@ -6884,7 +6886,7 @@
                 });
                 makeButton('删除整条记录', () => {
                     if (!coldDatabaseIds.length) return StorageApi.deleteSingleRecord(key);
-                    if (!confirm(`确定删除这条归档记录？\n${key}\n\n删除后无法恢复。`)) return;
+                    if (!confirm(`⚠ 确定删除这条归档记录？\n${key}\n\n删除后无法恢复。`)) return;
                     const coldKey = collectionContext?.containerKey || key;
                     const update = collectionContext?.containerKey ? data => {
                         const target = RecordStore.findCollectionPart(data, collectionContext.partKey || key, collectionContext.partNumber);
@@ -10539,16 +10541,27 @@
             .bvh-backup-dir b { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; padding:5px 9px; border-radius:8px; background:color-mix(in srgb,var(--bvh-theme-border,#eadfe5) 30%,var(--bvh-theme-card,#fff)); color:var(--bvh-theme-muted,#77717c); font-size:12px; font-weight:600; }
             .bvh-backup-dir button { padding:6px 11px; font-size:12px; }
             /* 三重确认面板：设置窗口内的独立遮罩，连续三步点击；任何一步取消都不改动任何设置。 */
+            /* 危险操作的统一视觉：红色横幅 + 红色风险行 + 红色最终按钮；与普通粉色强调区分开。 */
             .bvh-triple-mask { position:fixed; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; padding:20px; background:rgba(18,14,22,.55); }
-            .bvh-triple-panel { width:min(560px,100%); max-height:84vh; overflow:auto; padding:20px 22px; border-radius:16px; background:var(--bvh-theme-panel,#fffafd); color:var(--bvh-theme-settings-text,#624b54); box-shadow:0 24px 60px rgba(0,0,0,.28); font-size:13px; }
-            .bvh-triple-panel h5 { margin:0 0 6px; font-size:15px; color:var(--bvh-theme-accent,#fb7299); }
+            .bvh-triple-panel { width:min(560px,100%); max-height:84vh; overflow:auto; padding:0 22px 20px; border-radius:16px; border:2px solid #e0324b; background:var(--bvh-theme-panel,#fffafd); color:var(--bvh-theme-settings-text,#624b54); box-shadow:0 24px 60px rgba(150,20,40,.35); font-size:13px; }
+            .bvh-triple-banner { position:sticky; top:0; margin:0 -22px 14px; padding:12px 22px; border-radius:13px 13px 0 0; background:linear-gradient(100deg,#d81b38,#ef5b6f); color:#fff; font-size:13px; font-weight:800; letter-spacing:.4px; display:flex; gap:8px; align-items:center; }
+            .bvh-triple-banner span { font-size:18px; line-height:1; }
+            .bvh-triple-panel h5 { margin:12px 0 8px; font-size:16px; font-weight:800; color:#c81d33; }
             .bvh-triple-progress { margin:0 0 12px; font-size:12px; color:var(--bvh-theme-muted,#77717c); }
+            .bvh-triple-progress b { color:#d81b38; font-weight:800; }
             .bvh-triple-body p { margin:0 0 9px; line-height:1.65; }
-            .bvh-triple-body p.bvh-triple-lead { font-weight:700; color:var(--bvh-theme-record-text,#39343a); }
-            .bvh-triple-body p.bvh-triple-warn { padding:8px 10px; border-left:3px solid var(--bvh-theme-accent,#fb7299); border-radius:0 8px 8px 0; background:color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 10%,transparent); }
-            .bvh-triple-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:16px; }
+            .bvh-triple-body p.bvh-triple-lead { font-weight:800; color:var(--bvh-theme-record-text,#39343a); }
+            .bvh-triple-body p.bvh-triple-warn { padding:9px 11px; border-left:4px solid #e0324b; border-radius:0 8px 8px 0; background:color-mix(in srgb,#e0324b 12%,transparent); color:#8f1026; font-weight:700; }
+            .bvh-triple-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
             .bvh-triple-panel button { padding:8px 14px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:9px; background:var(--bvh-theme-card,#fff); color:inherit; font:inherit; cursor:pointer; }
-            .bvh-triple-panel button.bvh-triple-next { background:var(--bvh-theme-accent,#fb7299); border-color:transparent; color:#fff; font-weight:600; }
+            .bvh-triple-panel button.bvh-triple-next, .bvh-triple-panel button.is-danger { background:linear-gradient(100deg,#d81b38,#ef5b6f); border-color:#b3122c; color:#fff; font-weight:800; }
+            .bvh-triple-panel button.is-danger { box-shadow:0 5px 16px rgba(200,29,51,.32); }
+            /* 设置页里的危险按钮（清空、重置、迁移、清空冷库、退出主存）：红字红边，和普通按钮区分。 */
+            .bvh-cold-management button.bvh-danger, .bvh-setting-group button.bvh-danger { border-color:#e0324b; color:#c81d33; font-weight:800; background:color-mix(in srgb,#e0324b 8%,var(--bvh-theme-card,#fff)); }
+            .bvh-cold-management button.bvh-danger:hover, .bvh-setting-group button.bvh-danger:hover { background:color-mix(in srgb,#e0324b 16%,var(--bvh-theme-card,#fff)); }
+            .bvh-cold-management button.bvh-danger:disabled, .bvh-setting-group button.bvh-danger:disabled { border-color:color-mix(in srgb,#e0324b 30%,var(--bvh-theme-border,#eadfe5)); color:color-mix(in srgb,#c81d33 45%,var(--bvh-theme-muted,#77717c)); background:color-mix(in srgb,var(--bvh-theme-border,#eadfe5) 30%,var(--bvh-theme-card,#fff)); }
+            /* 红色警示段落：用于整组操作前的风险说明，和普通灰色说明区分开。 */
+            .bvh-danger-note { padding:10px 12px; border-left:4px solid #e0324b; border-radius:0 9px 9px 0; background:color-mix(in srgb,#e0324b 9%,transparent); color:#8f1026; font-weight:700; }
             .bvh-backup-state { margin-top:10px; padding:11px 13px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:11px; background:color-mix(in srgb,var(--bvh-theme-card,#fff) 86%,transparent); }
             .bvh-backup-state .bvh-setting-note { margin:0 0 8px; }
             .bvh-backup-state .bvh-setting-note:last-child { margin-bottom:0; }
@@ -12150,8 +12163,8 @@
     // 为什么不用连续三个 window.confirm：浏览器在连续弹窗后会给出“阻止此页面创建更多对话框”，
     // 第二步会被静默吞掉，三重确认就形同虚设。这里改成设置窗口内的三步面板：
     // 每步都要用户主动点“继续”，任何一步点“取消”都整体放弃、不改动任何设置或数据。
-    // steps: [{ heading?, lines: string[], confirm? }]；以 ! / ！开头的行按“风险提示”样式渲染。
-    function openTripleConfirm(overlay, { title, steps }) {
+    // steps: [{ heading?, lines: string[], confirm? }]；以 ! / ！开头的行按红色风险样式渲染并加 ⚠ 图标。
+    function openTripleConfirm(overlay, { title, steps, danger = true }) {
         return new Promise(resolve => {
             const mask = document.createElement('div');
             mask.className = 'bvh-triple-mask';
@@ -12160,8 +12173,16 @@
             panel.setAttribute('role', 'dialog');
             panel.setAttribute('aria-modal', 'true');
             panel.setAttribute('aria-label', title);
+            // 顶部红色横幅：进面板第一眼就是“这是高风险操作”，而不是读完三步才发现。
+            const banner = document.createElement('p');
+            banner.className = 'bvh-triple-banner';
+            const bannerIcon = document.createElement('span');
+            bannerIcon.textContent = '⚠';
+            const bannerText = document.createElement('span');
+            bannerText.textContent = danger ? '高风险操作 · 会改动本地数据，请逐步读完再继续' : '请逐步确认后再继续';
+            banner.append(bannerIcon, bannerText);
             const heading = document.createElement('h5');
-            heading.textContent = title;
+            heading.textContent = `${danger ? '⚠ ' : ''}${title}`;
             const progress = document.createElement('p');
             progress.className = 'bvh-triple-progress';
             const body = document.createElement('div');
@@ -12176,14 +12197,18 @@
             next.type = 'button';
             next.className = 'bvh-triple-next';
             actions.append(cancel, next);
-            panel.append(heading, progress, body, actions);
+            panel.append(banner, heading, progress, body, actions);
             mask.appendChild(panel);
             // 面板挂在设置窗口内部：遮罩跟随窗口层级，关闭窗口时一起消失，不会留在页面上。
             overlay.appendChild(mask);
             let index = 0;
             const paint = () => {
                 const step = steps[index] || {};
-                progress.textContent = `第 ${index + 1} 步 / 共 ${steps.length} 步`;
+                // 步数用 <b> 标红，让“第 3 步 / 共 3 步”在长文案里也一眼可见。
+                const current = document.createElement('b');
+                current.textContent = String(index + 1);
+                progress.textContent = '';
+                progress.append(document.createTextNode('第 '), current, document.createTextNode(` 步 / 共 ${steps.length} 步`));
                 body.textContent = '';
                 if (step.heading) {
                     const lead = document.createElement('p');
@@ -12195,10 +12220,12 @@
                     const warn = /^[!！]/.test(line);
                     const p = document.createElement('p');
                     if (warn) p.className = 'bvh-triple-warn';
-                    p.textContent = warn ? line.replace(/^[!！]\s*/, '') : line;
+                    p.textContent = warn ? `⚠ ${line.replace(/^[!！]\s*/, '')}` : line;
                     body.appendChild(p);
                 });
                 next.textContent = step.confirm || '继续';
+                // 最后一步是真正执行的那一下：红色加深并加阴影，和“继续”区分开。
+                next.classList.toggle('is-danger', danger && index === steps.length - 1);
             };
             const finish = value => { mask.remove(); resolve(value); };
             cancel.addEventListener('click', () => finish(false));
@@ -12307,10 +12334,10 @@
                             <label class="bvh-setting-row"><span>自动归档 <small title="开启后按上方周期在打开 history 页面时执行；年龄为 0 的 DB 主存模式不需归档。">ⓘ</small></span><input type="checkbox" class="bvh-toggle-input" data-cold-auto><span class="bvh-toggle-track" aria-hidden="true"></span></label>
                             <label class="bvh-setting-row"><span>无结果自动查冷库 <small title="开启后，只有搜索词未命中油猴热层记录时才扫描 IndexedDB。会增加这类搜索的等待时间；本地记录较少时建议开启。">ⓘ</small></span><input type="checkbox" class="bvh-toggle-input" data-cold-search-auto><span class="bvh-toggle-track" aria-hidden="true"></span></label>
                             <div class="bvh-cold-management">
-                                <button type="button" data-cold-delete-empty>删除空白冷库</button>
+                                <button type="button" class="bvh-danger" data-cold-delete-empty>⚠ 删除空白冷库</button>
                                 <button type="button" data-cold-archive>立即归档</button>
                                 <button type="button" data-cold-import>导入 JSON 到冷库</button>
-                                <button type="button" data-cold-exit-primary>退出主存模式（当前库转为归档）</button>
+                                <button type="button" class="bvh-danger" data-cold-exit-primary>⚠ 退出主存模式（当前库转为归档）</button>
                                 <input type="file" accept=".json,application/json" data-cold-file hidden>
                                 <p class="bvh-setting-note" data-cold-status>脚本自动识别并复用冷库；新观看记录保存在油猴热层，达到年龄的记录自动归档。</p>
                                 <p class="bvh-setting-note" data-cold-exit-note>“退出主存模式”只在 DB 主存模式下可用：它不复制、不合并任何记录，直接把当前主库当作一份普通冷库登记为归档目标，油猴热层清空后重新开始记录。退出后历史面板暂时看不到旧记录，需要到冷库里查；冷库里的记录也不再按“长期记录过期天数”自动清理。执行前会连续确认三步。</p>
@@ -12348,21 +12375,21 @@
                             </div>
                         </div>
                         <div class="bvh-setting-group" id="bvh-group-maint"><h4>维护工具</h4>
-                            <p class="bvh-setting-note">这些操作会批量改写记录，执行时间可能较长；开始前建议先完成一次已确认备份。四个结构维护操作原本只在油猴菜单里，现在也放在这里，执行结果会显示在下方并写入运行日志。</p>
+                            <p class="bvh-setting-note bvh-danger-note">⚠ 本组包含会改写、合并或删除记录的操作，其中“清空全部记录”不可恢复；开始前建议先完成一次已确认备份。四个结构维护操作原本只在油猴菜单里，现在也放在这里，执行结果会显示在下方并写入运行日志。</p>
                             <div class="bvh-cold-management">
-                                <button type="button" data-maint="reset-counts">重置所有观看次数为 1</button>
-                                <button type="button" data-maint="merge-ep">归并单集到整季</button>
+                                <button type="button" class="bvh-danger" data-maint="reset-counts">⚠ 重置所有观看次数为 1</button>
+                                <button type="button" class="bvh-danger" data-maint="merge-ep">⚠ 归并单集到整季</button>
                                 <button type="button" data-maint="repair-identity">修复分集身份与完整键</button>
-                                <button type="button" data-maint="migrate">迁移到合集容器</button>
+                                <button type="button" class="bvh-danger" data-maint="migrate">⚠ 迁移到合集容器</button>
                             </div>
                             <p class="bvh-setting-note">重置所有观看次数：把每条记录改回 1 次，快照与进度保留。<br>归并单集到整季：把散落的 ep 记录并进所属 ss 季，合并后单集键消失。<br>修复分集身份：按本地数据重新推断分集归属与完整键。<br>迁移到合集容器：把旧扁平记录迁成合集结构，未确认备份时会直接中止。</p>
                             <h5>清理</h5>
                             <div class="bvh-cold-management">
-                                <button type="button" data-maint="clean-expire">清理已备份过期记录</button>
+                                <button type="button" class="bvh-danger" data-maint="clean-expire">⚠ 清理已备份过期记录</button>
                                 <button type="button" data-maint="clean-short">清理短观看快照</button>
-                                <button type="button" data-maint="delete-all">清空全部记录</button>
+                                <button type="button" class="bvh-danger" data-maint="delete-all">⚠ 清空全部记录</button>
                             </div>
-                            <p class="bvh-setting-note">清理已备份过期：只删已确认备份且超过过期天数的记录，删除前两次确认，不可撤销。<br>清理短观看：删掉播放位置低于阈值且超过保留天数的快照，原来只在保存设置时自动执行，这里可以手动触发。<br>清空全部：删除所有记录，不可恢复，需要二次确认。</p>
+                            <p class="bvh-setting-note">⚠ 清理已备份过期：只删已确认备份且超过过期天数的记录，删除前两次确认，不可撤销。<br>清理短观看：删掉播放位置低于阈值且超过保留天数的快照，原来只在保存设置时自动执行，这里可以手动触发。<br>⚠ 清空全部：删除所有记录，不可恢复，需要二次确认。</p>
                             <p class="bvh-setting-note" data-maint-status aria-live="polite"></p>
                         </div>
                         <div class="bvh-setting-group" id="bvh-group-log"><h4>运行日志</h4>
@@ -12750,7 +12777,7 @@
                         removeButton.textContent = '移除失联旧库登记';
                         removeButton.title = '只移除油猴中的目录登记，不删除数据库记录';
                         removeButton.addEventListener('click', () => SettingsOperations.run(overlay, 'remove-registration', async () => {
-                            if (!confirm(`确认移除失联旧库“${meta.name}”的登记吗？\n\n目录原记载 ${Number(meta.count) || 0} 条记录。此操作只移除油猴目录项，不删除实际数据库内容；数据库已被确认不存在，之后脚本无法再从此登记定位其数据，完整备份也不再等待这个旧库。`)) return;
+                            if (!confirm(`⚠ 注意：确认移除失联旧库“${meta.name}”的登记吗？\n\n目录原记载 ${Number(meta.count) || 0} 条记录。此操作只移除油猴目录项，不删除实际数据库内容；数据库已被确认不存在，之后脚本无法再从此登记定位其数据，完整备份也不再等待这个旧库。`)) return;
                             removeButton.disabled = true;
                             try {
                                 await ColdArchiveStore.removeMissingDatabaseRegistration(meta.id);
