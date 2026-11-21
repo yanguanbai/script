@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.27
+// @version      5.10.28
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.28：让忙碌遮罩真的可见——同步型任务先让出一帧再干活，遮罩加深一层暗色，按钮禁用状态不再一闪而过。
 // 5.10.27：备份“待确认”三个按钮改名并写清各自含义；环境无保存对话框时“另存”置灰且不再重复下载。
 // 5.10.26：设置页长任务加全程遮罩（转圈 + 说明当前在做什么），期间锁定全部控件防重复点击；导出备份加重入锁。
 // 5.10.25：CSV 导出一分为二——热层 CSV 与全部 CSV（热层 + 全部冷库合并后展开），共用同一套列与格式。
@@ -10251,7 +10252,7 @@
             /* ── 忙碌遮罩族 ── */
             /* 长任务期间盖住整个设置窗口：转圈 + 一句“在等什么”，同时拦截全部点击，避免重复触发。 */
             .bvh-settings-dialog { position:relative; }
-            .bvh-settings-busy { position:absolute; inset:0; z-index:9; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; border-radius:inherit; background:color-mix(in srgb,var(--bvh-theme-card,#fff) 76%,transparent); backdrop-filter:blur(4px) saturate(1.2); -webkit-backdrop-filter:blur(4px); cursor:progress; }
+            .bvh-settings-busy { position:absolute; inset:0; z-index:9; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; border-radius:inherit; background:linear-gradient(rgba(18,14,22,.12),rgba(18,14,22,.12)),color-mix(in srgb,var(--bvh-theme-card,#fff) 78%,transparent); backdrop-filter:blur(4px) saturate(1.2); -webkit-backdrop-filter:blur(4px); cursor:progress; }
             .bvh-settings-busy[hidden] { display:none; }
             .bvh-settings-spinner { width:36px; height:36px; border-radius:50%; border:3px solid color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 22%,transparent); border-top-color:color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 92%,transparent); animation:bvh-busy-spin .85s linear infinite; }
             .bvh-settings-busy p { margin:0; padding:0 24px; color:var(--bvh-theme-settings-text,#624b54); font-size:13px; line-height:1.7; text-align:center; }
@@ -11828,6 +11829,14 @@
             this.sync(overlay);
             try { return await action(); }
             finally { overlay._bvhTask = ''; this.sync(overlay); }
+        },
+
+        // 同步型任务（例如整理 CSV 行、写下载链接）可能在几十毫秒内结束，
+        // 浏览器的绘制还没轮到，遮罩和“按钮已禁用”就一起撤销了，用户什么反馈都看不到。
+        // 这里主动让出一个任务：先让状态画上屏，再继续干活。
+        async paintBusyFrame(ms = 60) {
+            if (typeof setTimeout !== 'function') return;
+            await new Promise(resolve => setTimeout(resolve, ms));
         }
     };
 
@@ -12498,6 +12507,8 @@
         });
 
         SettingsOperations.bind(overlay.querySelector('[data-backup-csv]'), 'click', () => SettingsOperations.run(overlay, 'csv', async () => {
+            // 先让遮罩画出来：CSV 整理是同步的，不这样会让整个操作在 1 帧内结束、看不到任何反馈。
+            await SettingsOperations.paintBusyFrame();
             try { StorageApi.exportCSVRecords(); }
             catch (error) { if (backupStateText) backupStateText.textContent = reportError('E2006', error.message, { where: 'exportCSVRecords' }); }
         }));

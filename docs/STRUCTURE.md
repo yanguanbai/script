@@ -187,6 +187,8 @@ CSV 有两条出口，共用 `_exportCSV(entries, label, fileSuffix)`：
 3. `finally` 清空任务名并再 `sync` 一次，遮罩收起、控件按 primary 规则重新算出状态。
 
 新增任务名时必须在 `BUSY_TEXT` 里补一条中文说明，否则遮罩会显示兜底文案。
+同步型任务（如热层 CSV 整理）要在动作开头 `await SettingsOperations.paintBusyFrame()`：
+状态设置与任务结束在同一帧内完成时，浏览器根本来不及绘制，遮罩和按钮禁用都会一闪而过。
 冷库扫描（`_bvhScanning`）只锁它自己的刷新按钮，不弹遮罩，避免每次开窗闪一下。
 
 设置页之外：`StorageApi.exportAllRecords` 另有 `_exportingBackup` 重入锁，历史页连点也只生成一份文件。
