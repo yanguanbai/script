@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.34
+// @version      5.11.0
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,11 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.11.0：历史页面板底部按钮条高度可在设置页调（面板尺寸组，24–56 px，默认 34 px，随手即存）——
+//         面板整体宽高仍直接拖边框，进设置的只有“外部拖不到、点不准”的内部尺寸；
+//         调整时面板半透明浮在最上层、点击穿透，停手 1.5 秒自动收起；
+//         同时修掉“点滑轨空白处就回到最开头”：整行是 <label>，会把行内点击按坐标转发给 range，
+//         现在除 range 自身外一律取消转发，点空白停在点的位置、点圆点才取该点值。
 // 5.10.34：历史页面板底部按钮（同步官方历史、设置、导出 JSON、导出 CSV、导入 JSON）加大高度与内边距，
 //          从原来贴边的 6px 内边距改成最小 34px 高，避免太扁、误点。
 // 5.10.33：设置页其余危险操作补齐三步确认面板（重置次数、归并单集、迁移容器、清理过期、清空全部、删空白冷库），
@@ -10288,6 +10293,90 @@
         });
     }
 
+    // ── 历史页面板底部按钮条：内部框架尺寸 ──
+    // 为什么放设置里而不是放面板上：按钮条在面板内部，外面既拖不到也点不准，误触只会改到别的控件。
+    // 面板整体宽高不在这里——那个直接拖面板右下角边框就能调。
+    const HP_ACTIONS_HEIGHT_KEY = 'BVH_HP_ACTIONS_HEIGHT_V1';
+    const HP_ACTIONS_HEIGHT = { min: 24, max: 56, default: 34 };
+
+    // 读取记住的按钮高度；越界或存坏了回默认值。
+    function readHpActionsHeight() {
+        let saved;
+        try { saved = Number(GM_getValue(HP_ACTIONS_HEIGHT_KEY, HP_ACTIONS_HEIGHT.default)); }
+        catch (_) { saved = HP_ACTIONS_HEIGHT.default; }
+        if (!Number.isFinite(saved)) return HP_ACTIONS_HEIGHT.default;
+        return Math.round(Math.max(HP_ACTIONS_HEIGHT.min, Math.min(HP_ACTIONS_HEIGHT.max, saved)));
+    }
+
+    // 改一个 CSS 变量就够了：按钮样式里 min-height 读的就是它，历史页与播放页两处共用。
+    function applyHpActionsHeight(px) {
+        const numeric = Number(px);
+        const height = Number.isFinite(numeric)
+            ? Math.round(Math.max(HP_ACTIONS_HEIGHT.min, Math.min(HP_ACTIONS_HEIGHT.max, numeric)))
+            : HP_ACTIONS_HEIGHT.default;
+        document.documentElement.style.setProperty('--bvh-hp-actions-btn-height', `${height}px`);
+        return height;
+    }
+
+    function writeHpActionsHeight(px) {
+        const height = applyHpActionsHeight(px);
+        try { GM_setValue(HP_ACTIONS_HEIGHT_KEY, height); }
+        catch (_) { /* 记住失败不影响本次显示 */ }
+        return height;
+    }
+
+    // 预览：把历史页面板半透明地浮到最上层，并对指针“透明”——鼠标点上去会直接穿透到下面的设置窗口。
+    // 这样既能看清真实按钮条高度，又不会挡住、拖不动设置页；面板原本关着的，预览结束自动关回去，
+    // left/bottom/zIndex/opacity/pointer-events 全部还原，不污染用户自己的布局。
+    function beginHistoryPanelPreview(overlay) {
+        const panel = document.getElementById('bvh-history-page-panel');
+        if (!panel) return null;
+        const state = {
+            panel,
+            overlay: overlay || null,
+            wasOpen: panel.classList.contains('bvh-hp-show'),
+            openedByUs: false,
+            left: panel.style.left,
+            bottom: panel.style.bottom,
+            zIndex: panel.style.zIndex,
+            opacity: panel.style.opacity,
+            pointerEvents: panel.style.pointerEvents
+        };
+        if (!state.wasOpen) {
+            const float = document.getElementById('bvh-status-float');
+            if (float) float.click();
+            else panel.classList.add('bvh-hp-show');
+            state.openedByUs = panel.classList.contains('bvh-hp-show');
+        }
+        panel.style.left = '8px';
+        panel.style.zIndex = '10051';
+        // 半透明 + 不吃鼠标事件：看得见、点得穿，设置窗口里的滑轨照常拖。
+        panel.style.opacity = '0.68';
+        panel.style.pointerEvents = 'none';
+        panel.dataset.bvhPreview = 'true';
+        return state;
+    }
+
+    function endHistoryPanelPreview(state) {
+        if (!state) return;
+        if (state.timer) { clearTimeout(state.timer); state.timer = 0; }
+        const panel = state.panel;
+        if (panel && panel.isConnected) {
+            delete panel.dataset.bvhPreview;
+            panel.style.zIndex = state.zIndex;
+            panel.style.left = state.left;
+            panel.style.bottom = state.bottom;
+            panel.style.opacity = state.opacity;
+            panel.style.pointerEvents = state.pointerEvents;
+            if (state.openedByUs && panel.classList.contains('bvh-hp-show')) {
+                const float = document.getElementById('bvh-status-float');
+                if (float) float.click();
+                else panel.classList.remove('bvh-hp-show');
+            }
+        }
+        state.panel = null;
+    }
+
     // 让状态浮窗能够拖动、靠边停靠，并在鼠标移入时暂时展开。
     // 【模块 M25 · 交互层：悬浮窗停靠与边缘吸附】
     // 在拖动完成后处理浮窗的位置与边缘停靠效果，让悬浮窗既能自由移动，也能保持在可访问的位置。
@@ -11031,8 +11120,12 @@
             }
             #bvh-hp-storage { margin: 0; padding-bottom: 5px; font-size: 11px; }
             .bvh-hp-actions { display: flex; gap: 8px; }
+            /* 按钮高度走变量：这个值在设置页“面板尺寸”组里调，默认 34px（见 HP_ACTIONS_HEIGHT）。
+               用 flex 居中，改 min-height 就能真正决定高度，不会被内边距顶回去。 */
             .bvh-hp-actions button {
-                flex: 1; min-height:34px; padding:9px 7px; border: 1px solid rgba(225,220,228,.8);
+                flex: 1; display: flex; align-items: center; justify-content: center;
+                min-height: var(--bvh-hp-actions-btn-height, 34px); padding: 4px 7px;
+                border: 1px solid rgba(225,220,228,.8);
                 border-radius: 11px; background: rgba(255,255,255,.64); color: #3a3940;
                 transition: transform .22s ease, background .22s ease, border-color .22s ease;
                 font-size: 11px; line-height: 1.35; cursor: pointer;
@@ -11218,7 +11311,7 @@
             :root[data-bvh-theme="dark"] #bvh-hp-drag-bar { color:var(--bvh-theme-header-text) !important; background:linear-gradient(120deg,var(--bvh-theme-header-start),var(--bvh-theme-header-end)) !important; }
             #bvh-hp-close-btn { background:color-mix(in srgb,var(--bvh-theme-header-text) 12%,transparent) !important; color:var(--bvh-theme-header-text) !important; }
             :root[data-bvh-theme="dark"] .bvh-hp-actions { display:flex !important; }
-            :root[data-bvh-theme="dark"] .bvh-hp-actions button { min-width:0; min-height:42px; padding:8px 6px; border:1px solid var(--bvh-theme-border) !important; border-radius:10px; background:#242321 !important; color:var(--bvh-theme-settings-text) !important; font-size:12px; line-height:1.3; white-space:normal; overflow-wrap:anywhere; }
+            :root[data-bvh-theme="dark"] .bvh-hp-actions button { min-width:0; min-height:var(--bvh-hp-actions-btn-height,34px); padding:4px 6px; border:1px solid var(--bvh-theme-border) !important; border-radius:10px; background:#242321 !important; color:var(--bvh-theme-settings-text) !important; font-size:12px; line-height:1.3; white-space:normal; overflow-wrap:anywhere; }
             :root[data-bvh-theme="dark"] .bvh-hp-actions button:hover { border-color:var(--bvh-theme-accent) !important; background:color-mix(in srgb,var(--bvh-theme-accent) 18%,#242321) !important; color:var(--bvh-theme-settings-text) !important; transform:translateY(-1px); }
             :root[data-bvh-theme="dark"] #bvh-history-page-panel { border:0 !important; box-shadow:0 18px 48px rgba(0,0,0,.48) !important; }
             :root[data-bvh-theme="dark"] #bvh-hp-list { border:1px solid #343537 !important; background:#1b1c1f !important; scrollbar-color:#77736a #222326; scrollbar-width:thin; }
@@ -11888,6 +11981,9 @@
             });
 
             makeDraggable(panel, document.getElementById('bvh-hp-drag-bar'), { preventDefault: true, easing: 1, animateOnEnd: false, transformDuringDrag: true });
+            // 从设置页“面板按钮条”点“显示面板对照调整”跳过来时（地址带 #bvh-panel-actions），
+            // 自动把面板打开，省得用户再点一次浮标。
+            if (/bvh-panel-actions/.test(location.hash)) document.getElementById('bvh-status-float')?.click();
         }
     };
 
@@ -12296,10 +12392,11 @@
                     <div class="bvh-settings-body">
                         <section class="bvh-settings-intro">
                             <div class="bvh-settings-intro-mark">✦</div>
-                            <div><strong>按你的观看习惯精细调整</strong><p>设置分七组：观看去重、记录与保留、冷库与存储、数据导入导出、维护工具、运行日志、界面配色。每组开头都写明这组管什么、改动会带来什么后果；滑轨上的节点是常用值，点击即可平滑移动，右侧数字框可直接输入精确值。</p></div>
+                            <div><strong>按你的观看习惯精细调整</strong><p>设置分八组：界面配色、面板尺寸、观看去重、记录与保留、冷库与存储、数据导入导出、维护工具、运行日志。每组开头都写明这组管什么、改动会带来什么后果；滑轨上的节点是常用值，点击即可平滑移动，右侧数字框可直接输入精确值。</p></div>
                         </section>
                         <nav class="bvh-settings-nav" aria-label="设置分组导航">
                             <button type="button" data-nav="bvh-group-theme">界面配色</button>
+                            <button type="button" data-nav="bvh-group-panel-size">面板尺寸</button>
                             <button type="button" data-nav="bvh-group-dedup">观看去重</button>
                             <button type="button" data-nav="bvh-group-retain">记录与保留</button>
                             <button type="button" data-nav="bvh-group-cold">冷库与存储</button>
@@ -12355,6 +12452,15 @@
                             </div>
                             <p class="bvh-theme-contrast" id="bvh-theme-contrast" hidden>文字与背景对比度偏低，可能不容易看清。<button type="button">自动修正设置/记录文字</button></p>
                             <p class="bvh-setting-note">粉、蓝、黑金配色分别记忆。调整只预览此样例；点击“保存设置”后应用，取消不保存。高级颜色选择中只显示当前主题的恢复默认按钮。</p>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-panel-size"><h4>面板按钮条</h4>
+                            <p class="bvh-setting-note">历史页面板最底下那排按钮（同步官方历史、设置、导出 JSON、导出 CSV、导入 JSON）的高度。范围 24–56 px，默认 34 px：调太高会占掉记录列表的空间，调太矮文字会挤成一团、不好点。</p>
+                            <label class="bvh-setting-row"><span>按钮高度 <b id="bvh-setting-hp-actions-height-value"></b><small title="历史页面板底部那排按钮的高度（同步官方历史、设置、导出 JSON、导出 CSV、导入 JSON）。范围 24–56 px，默认 34 px；太矮不好点，太高会挤占列表空间。">ⓘ</small></span><input id="bvh-setting-hp-actions-height" type="range" min="24" max="56" step="1"></label>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-hp-actions-preview>显示面板对照调整</button>
+                                <button type="button" data-hp-actions-reset>恢复默认高度</button>
+                            </div>
+                            <p class="bvh-setting-note" data-hp-actions-status>拖动滑轨或点圆点即可调整，值立即保存；面板会半透明浮在最上层供对照，不挡操作。</p>
                         </div>
                         <div class="bvh-setting-group" id="bvh-group-dedup"><h4>观看去重</h4>
                             <label class="bvh-setting-row"><span>判定方式 <small title="时间：只比较两次快照的时间间隔；进度：只比较进度百分比差值；同时满足：时间和进度差都在阈值内才合并。建议值：时间和进度都满足。">ⓘ</small></span><select id="bvh-setting-dedup-mode"><option value="both">时间和进度都满足</option><option value="time">只根据时间差</option><option value="progress">只根据进度差</option></select></label>
@@ -12457,6 +12563,9 @@
         overlay.addEventListener('click', e => {
             if (e.target === overlay || e.target.closest('[data-close], [data-cancel]')) {
                 if (overlay._bvhTask === 'save') return;
+                // 关窗前收起“按钮高度”的面板预览，避免面板留在被提上层的位置。
+                endHistoryPanelPreview(overlay._bvhHpPreview || null);
+                overlay._bvhHpPreview = null;
                 applyColorTheme(readColorTheme());
                 overlay.style.display = 'none';
                 const tooltip = document.getElementById('bvh-setting-tooltip');
@@ -12615,6 +12724,9 @@
     }
 
     function refreshSettingsWindow(overlay) {
+        // 重新刷新窗口前先收起上一次的面板预览，避免旧状态（提上层/临时位置）残留。
+        endHistoryPanelPreview(overlay._bvhHpPreview || null);
+        overlay._bvhHpPreview = null;
         const values = {
             'bvh-setting-dedup-mode': CONFIG.CONTINUOUS_DEDUP_MODE,
             'bvh-setting-gap': CONFIG.CONTINUOUS_GAP_MIN,
@@ -12627,7 +12739,8 @@
             'bvh-setting-retention': CONFIG.SHORT_WATCH_EXPIRE_DAY,
             'bvh-setting-cold-age': CONFIG.COLD_ARCHIVE_AGE_DAY,
             'bvh-setting-cold-interval': CONFIG.COLD_ARCHIVE_INTERVAL_DAY,
-            'bvh-setting-font-size': CONFIG.UI_FONT_SIZE
+            'bvh-setting-font-size': CONFIG.UI_FONT_SIZE,
+            'bvh-setting-hp-actions-height': readHpActionsHeight()
         };
         const dialog = overlay.querySelector('.bvh-settings-dialog');
         document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
@@ -13573,7 +13686,8 @@
             const input = overlay.querySelector(`#${id}`);
             const output = overlay.querySelector(`#${id}-value`);
             const suffix = id.includes('gap') ? ' 分钟' : id.includes('progress') || id.includes('quota') ? '%'
-                : id.includes('expire') || id.includes('retention') || id.includes('cold-age') || id.includes('cold-interval') ? ' 天' : id.includes('short') ? ' 秒' : '';
+                : id.includes('expire') || id.includes('retention') || id.includes('cold-age') || id.includes('cold-interval') ? ' 天'
+                    : id.includes('short') ? ' 秒' : id.includes('height') ? ' px' : '';
             let control = input.closest('.bvh-setting-control');
             let liquid = control?.querySelector('.bvh-liquid-slider');
             let liquidFill = control?.querySelector('.bvh-liquid-fill');
@@ -13590,7 +13704,8 @@
                 'bvh-setting-short': [0, 5, 10, 15, 30, 60, 120],
                 'bvh-setting-retention': [0, 1, 3, 7, 14, 30, 90, 180, 365],
                 'bvh-setting-cold-age': [0, 1, 3, 7, 14, 30, 60, 90, 180],
-                'bvh-setting-cold-interval': [1, 3, 7, 14, 30, 60, 90]
+                'bvh-setting-cold-interval': [1, 3, 7, 14, 30, 60, 90],
+                'bvh-setting-hp-actions-height': [24, 28, 34, 42, 50, 56]
             };
             const min = Number(input.min || 0);
             const max = Number(input.max || 100);
@@ -13610,6 +13725,19 @@
                 const fraction = scaled - index;
                 return sliderMarkers[index] + (sliderMarkers[index + 1] - sliderMarkers[index]) * fraction;
             };
+
+            // 这一整行是个 <label>：浏览器会把「行内任意点击」按坐标转交给里面的 range 输入，
+            // 于是点到文字、点到空白、甚至点到右侧数字框，都会被换算成最左/最右一格 ——
+            // 表现就是「点一下直接回到最开头」。滑轨的取值只交给下面的 pointerdown / 圆点 click，
+            // 所以这一行里除 range 自身外的点击全部拦掉 label 的转发（数字框的聚焦在 pointerdown 已完成）。
+            const rowLabel = input.closest('label');
+            if (rowLabel && !rowLabel.dataset.bvhLabelGuard) {
+                rowLabel.dataset.bvhLabelGuard = 'true';
+                rowLabel.addEventListener('click', e => {
+                    if (e.target === input) return;
+                    e.preventDefault();
+                });
+            }
 
             if (input.type === 'range' && !control) {
                 control = document.createElement('div');
@@ -13656,6 +13784,8 @@
                         if (input.disabled) return;
                         input.value = String(markerValue);
                         input.dispatchEvent(new Event('input', { bubbles: true }));
+                        // 点圆点也算一次确定的取值：补发 change，让“松手/确定才落盘”的监听能保存。
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
                     });
                     markerLayer.appendChild(marker);
                 });
@@ -13695,16 +13825,19 @@
                     const updateFromPointer = e => {
                         if (input.disabled) return;
                         const rect = liquid.getBoundingClientRect();
+                        if (!rect.width) return;
                         const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                         input.value = String(fromPercent(percent * 100));
                         input.dispatchEvent(new Event('input', { bubbles: true }));
                     };
                     liquid.addEventListener('pointerdown', e => {
                         if (input.disabled) return;
+                        // 按在刻度圆点上交给圆点自己的 click（直接取该点的值），不启动拖动——
+                        // 否则按下瞬间会先按坐标取一个中间值，再被 click 覆盖，显得“点哪都跳”。
                         if (e.target.closest('.bvh-slider-node')) return;
                         pointerActive = true;
                         liquid.classList.add('bvh-pointer-dragging');
-                        liquid.setPointerCapture?.(e.pointerId);
+                        try { liquid.setPointerCapture?.(e.pointerId); } catch (_) { /* 忽略 */ }
                         updateFromPointer(e);
                         e.preventDefault();
                     });
@@ -13712,8 +13845,11 @@
                         if (pointerActive) updateFromPointer(e);
                     });
                     const stopPointer = () => {
+                        const wasActive = pointerActive;
                         pointerActive = false;
                         liquid.classList.remove('bvh-pointer-dragging');
+                        // 松手补发一次 change：拖动过程中只发 input，change 才是“这次取值定了”。
+                        if (wasActive) input.dispatchEvent(new Event('change', { bubbles: true }));
                     };
                     liquid.addEventListener('pointerup', stopPointer);
                     liquid.addEventListener('pointercancel', stopPointer);
@@ -13737,6 +13873,89 @@
             } else {
                 input.value = value;
             }
+        });
+        // ── 面板按钮条高度：调的时候把历史页面板显示到设置窗口左边对照，值随手就存 ──
+        // 监听挂在整条控件上：滑轨拖动（input）、点圆点 / 松手（change）、右侧数字框（change）都会冒泡到这里，
+        // 所以不管用哪种方式改，值都能落进存储，不依赖“必须点保存设置”。
+        const hpActionsInput = overlay.querySelector('#bvh-setting-hp-actions-height');
+        const hpControl = hpActionsInput?.closest('.bvh-setting-control');
+        const hpActionsStatus = overlay.querySelector('[data-hp-actions-status]');
+        const setHpStatus = text => { if (hpActionsStatus) hpActionsStatus.textContent = text; };
+        const dropHpPreview = () => {
+            const state = overlay._bvhHpPreview;
+            if (state && state.timer) { clearTimeout(state.timer); state.timer = 0; }
+            endHistoryPanelPreview(state || null);
+            overlay._bvhHpPreview = null;
+        };
+        const ensureHpPreview = () => {
+            const state = overlay._bvhHpPreview;
+            if (state) {
+                if (state.timer) { clearTimeout(state.timer); state.timer = 0; }
+                return state;
+            }
+            const created = beginHistoryPanelPreview(overlay);
+            overlay._bvhHpPreview = created;
+            return created;
+        };
+        const scheduleHpPreviewEnd = () => {
+            const state = overlay._bvhHpPreview;
+            if (!state) return;
+            if (state.timer) clearTimeout(state.timer);
+            state.timer = setTimeout(() => {
+                dropHpPreview();
+                setHpStatus('预览已收起；高度已经记住，下次打开面板就是这个高度。');
+            }, 1500);
+        };
+        let hpSaveTimer = 0;
+        const commitHpActionsHeight = () => {
+            if (!hpActionsInput) return HP_ACTIONS_HEIGHT.default;
+            if (hpSaveTimer) { clearTimeout(hpSaveTimer); hpSaveTimer = 0; }
+            return writeHpActionsHeight(hpActionsInput.value);
+        };
+        if (hpControl) {
+            SettingsOperations.bind(hpControl, 'input', () => {
+                if (!hpActionsInput) return;
+                const height = applyHpActionsHeight(hpActionsInput.value);
+                const state = ensureHpPreview();
+                // 拖动中每 200ms 落一次盘，防止拖到一半直接关窗丢值；松手时 change 立刻再落一次。
+                if (hpSaveTimer) clearTimeout(hpSaveTimer);
+                hpSaveTimer = setTimeout(() => { hpSaveTimer = 0; writeHpActionsHeight(hpActionsInput.value); }, 200);
+                setHpStatus(!state ? `按钮高度 ${height} px（当前页面没有历史页面板，去历史记录页才看得到效果）`
+                    : `按钮高度 ${height} px；面板半透明浮在最上层，点它会穿透到设置窗口，不影响继续拖。`);
+            });
+            SettingsOperations.bind(hpControl, 'change', () => {
+                if (!hpActionsInput) return;
+                const height = commitHpActionsHeight();
+                setHpStatus(`已保存：按钮高度 ${height} px。`);
+                scheduleHpPreviewEnd();
+            });
+        }
+        SettingsOperations.bind(overlay.querySelector('[data-hp-actions-preview]'), 'click', () => {
+            if (!document.getElementById('bvh-history-page-panel')) {
+                // 不在历史页：带标记跳过去，历史页初始化时会自动把面板打开，回来就能对照。
+                location.href = 'https://www.bilibili.com/history#bvh-panel-actions';
+                return;
+            }
+            if (overlay._bvhHpPreview) {
+                dropHpPreview();
+                setHpStatus('预览已收起；面板回到原来的位置与层级。');
+                return;
+            }
+            ensureHpPreview();
+            setHpStatus('面板已半透明浮在最上层：拖上面的滑轨就能对照，点面板会穿透过去；再点一次这个按钮收起，关窗也会收起。');
+        });
+        SettingsOperations.bind(overlay.querySelector('[data-hp-actions-reset]'), 'click', () => {
+            if (hpActionsInput) {
+                hpActionsInput.value = String(HP_ACTIONS_HEIGHT.default);
+                applyHpActionsHeight(HP_ACTIONS_HEIGHT.default);
+                commitHpActionsHeight();
+                const numberInput = hpControl?.querySelector('.bvh-setting-number');
+                if (numberInput) numberInput.value = String(HP_ACTIONS_HEIGHT.default);
+                hpActionsInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            ensureHpPreview();
+            setHpStatus(`已恢复默认 ${HP_ACTIONS_HEIGHT.default} px 并保存。`);
+            scheduleHpPreviewEnd();
         });
         overlay.style.display = 'flex';
         SettingsOperations.sync(overlay);
@@ -13810,6 +14029,9 @@
     async function mainInit() {
         injectStyle();
         loadSettings();
+        // 按钮高度是纯显示偏好，存在独立键里，和 CONFIG 的“保存设置”互不影响；这里先应用一次，
+        // 保证首屏的历史页面板就是这个高度，不必等打开设置页。
+        applyHpActionsHeight(readHpActionsHeight());
         registerMenus();
 
         if (CONFIG.COLD_PRIMARY_MODE) {

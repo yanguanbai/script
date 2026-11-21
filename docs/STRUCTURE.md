@@ -156,6 +156,7 @@ DB 主存模式下热层就是当前库，两条出口内容一致，`data-backu
 | 组 | id | 内容 |
 |---|---|---|
 | 界面配色 | `bvh-group-theme` | 字号、预设主题、高级取色、对比度修正 |
+| 面板尺寸 | `bvh-group-panel-size` | 历史页面板底部按钮条高度（24–56 px）、显示面板对照、恢复默认 |
 | 观看去重 | `bvh-group-dedup` | 判定方式、时间差上限、进度差上限 |
 | 记录与保留 | `bvh-group-retain` | 过期天数、同步页数、快照条数、来源配额、短观看阈值 / 保留天数 |
 | 冷库与存储 | `bvh-group-cold` | 归档年龄 / 周期 / 开关、无结果查冷库、删空白库、立即归档、冷库清单、导入到冷库 |
@@ -165,6 +166,20 @@ DB 主存模式下热层就是当前库，两条出口内容一致，`data-backu
 
 新增按钮统一放在 `bvh-cold-management` 容器里，复用现有按钮样式与忙碌锁；
 每个按钮下方必须有一行常驻说明（做什么 / 影响什么 / 能否撤销），不依赖 `title` 悬浮提示。
+
+### 面板按钮条高度（5.11.0 起）
+
+**分工原则：能从外面拖的不进设置页，进设置的只有"外部拖不到、点不准、容易误触"的内部尺寸。**
+
+- 面板整体宽高：直接拖历史页面板 / 播放页浮窗右下角边框（`setupPersistentResize`，键 `BVH_PANEL_SIZE_*_V1`），不进设置页。
+- 面板**内部**的底部按钮条高度：进 `面板尺寸` 组，键 `BVH_HP_ACTIONS_HEIGHT_V1`，范围 24–56 px、默认 34 px。
+  - CSS 只读变量 `--bvh-hp-actions-btn-height`（`min-height` + `display:flex;align-items:center` 居中），base 与 dark 各一处引用；`applyHpActionsHeight(px)` 写到 `document.documentElement`。
+  - `mainInit` 在 `loadSettings()` 之后立刻应用一次，首屏即生效；滑轨松手才 `GM_setValue`，拖动中不写。
+  - **对照预览**：拖滑轨 / 点"显示面板对照调整"时调 `beginHistoryPanelPreview(overlay)`——把 `#bvh-history-page-panel` 固定贴屏幕左缘、抬到 `z-index:10051`（高于设置遮罩 10050），同时设 `opacity:0.68` 与 `pointer-events:none`：**半透明浮在最上层，鼠标点上去直接穿透到设置窗口**，既看得见真实按钮条、又不挡拖滑轨。设置窗口全程不动，拖动中不重排，取值不会跳。记录并还原 `left/bottom/z-index/opacity/pointer-events`，原本关闭的面板在预览结束时点浮标关回。停手 1.5 秒自动收起，关窗 / 刷新设置页也会强制收起。
+  - 保存时机：值随手就存——滑轨 `input` 每 200ms 落一次盘（防拖到一半关窗丢值），`change`（松手 / 点圆点 / 数字框）立即落盘，不依赖"保存设置"按钮。
+  - 滑轨交互（原版逻辑 + 两处必要修补）：轨道空白处按下即按坐标取值并拖动；按在刻度圆点上交给圆点自己的 `click` 取该点值；拖动只发 `input`，松手 / `pointercancel` 才补发一次 `change`（"这次取值定了"）。
+  - **"点空白就回到最开头"的真因**：整行是 `<label>`，浏览器会把行内任意点击（文字、留白、右侧数字框上方）按坐标转发给里面的 `range`，坐标落在轨道外就夹成最左一格 = 最小值。修法是给每个滑轨行的 `<label>` 加一次性 `click` 守卫：除 `range` 自身外的点击一律 `preventDefault()`，取消 label 的转发；数字框的聚焦发生在 `pointerdown`，不受影响。slider 的取值只由 `pointerdown`（空白处）与圆点 `click`（指定点）决定。
+  - 不在历史页时点"显示面板对照调整"会跳 `https://www.bilibili.com/history#bvh-panel-actions`，历史页初始化末尾检测该 hash 自动点浮标开面板。
 
 ### DB 主存模式下的置灰规则
 
