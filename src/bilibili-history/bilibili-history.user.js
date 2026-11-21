@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.33
+// @version      5.10.34
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,8 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.34：历史页面板底部按钮（同步官方历史、设置、导出 JSON、导出 CSV、导入 JSON）加大高度与内边距，
+//          从原来贴边的 6px 内边距改成最小 34px 高，避免太扁、误点。
 // 5.10.33：设置页其余危险操作补齐三步确认面板（重置次数、归并单集、迁移容器、清理过期、清空全部、删空白冷库），
 //          面板里现算真实条数、写清后果，清理过期可在最后一步选择“连时间不明的记录一起清”；
 //          历史页面板移除“清理已备份过期记录”与“清空全部”两个按钮，避免随手误触，这两个操作只在设置页保留。
@@ -11030,10 +11032,10 @@
             #bvh-hp-storage { margin: 0; padding-bottom: 5px; font-size: 11px; }
             .bvh-hp-actions { display: flex; gap: 8px; }
             .bvh-hp-actions button {
-                flex: 1; padding: 6px; border: 1px solid rgba(225,220,228,.8);
+                flex: 1; min-height:34px; padding:9px 7px; border: 1px solid rgba(225,220,228,.8);
                 border-radius: 11px; background: rgba(255,255,255,.64); color: #3a3940;
                 transition: transform .22s ease, background .22s ease, border-color .22s ease;
-                font-size: 11px; cursor: pointer;
+                font-size: 11px; line-height: 1.35; cursor: pointer;
             }
             .bvh-hp-actions button:hover {
                 background: rgba(255,240,245,.9); border-color: #ffc2d2; transform: translateY(-1px);
