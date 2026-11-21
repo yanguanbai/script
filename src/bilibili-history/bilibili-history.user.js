@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.23
+// @version      5.10.24
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.24：DB 主存模式（归档年龄=0）下把归档、自动查冷库、“只导出油猴存储”等失效控件统一置灰并写明原因；迁移成功后立即生效。
 // 5.10.23：修复沙箱内调用系统保存对话框报 Illegal invocation（改用真实窗口调用，失败静默降级）；导出新增“只导出油猴存储”；设置页把界面配色移到最前、运行日志移到末尾。
 // 5.10.22：保存备份新增 GM_download 档，以下载完成回调判定保存成功并自动登记；失败或超时退回普通下载并给错误码。
 // 5.10.21：导出拆成"构建/保存/确认"三段，只有确认文件确实保存后才登记可清理；新增按范围导出、错误码与运行日志；设置页按功能重排为七组并补齐全部功能入口。
@@ -10206,6 +10207,14 @@
             .bvh-cold-database strong { display:block; margin-bottom:3px; }
             .bvh-cold-database small { display:block; color:var(--bvh-theme-muted,#77717c); line-height:1.6; }
             .bvh-cold-database button { margin-top:7px; padding:5px 9px; font-size:12px; }
+            /* ── 不可用状态族 ── */
+            /* 用于 DB 主存模式下被停用的控件：保留形状、降低存在感、给出禁止光标，避免“看着能点其实不能用”。 */
+            .bvh-cold-management button:disabled, .bvh-setting-group button:disabled { color:color-mix(in srgb,var(--bvh-theme-muted,#77717c) 78%,transparent); border-color:color-mix(in srgb,var(--bvh-theme-border,#eadfe5) 60%,transparent); background:color-mix(in srgb,var(--bvh-theme-border,#eadfe5) 30%,var(--bvh-theme-card,#fff)); cursor:not-allowed; transform:none; }
+            .bvh-cold-management button:disabled:hover, .bvh-setting-group button:disabled:hover { transform:none; background:color-mix(in srgb,var(--bvh-theme-border,#eadfe5) 30%,var(--bvh-theme-card,#fff)); }
+            .bvh-setting-row:has(input:disabled) { opacity:.48; cursor:not-allowed; }
+            .bvh-setting-row > .bvh-toggle-input:disabled + .bvh-toggle-track { opacity:.5; filter:grayscale(1); }
+            .bvh-setting-row > .bvh-toggle-input:disabled { cursor:not-allowed; }
+            .bvh-primary-note { padding:10px 12px; border-radius:9px; border:1px dashed color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 40%,transparent); background:color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 7%,var(--bvh-theme-card,#fff)); }
             /* ── 设置页新增族：分组导航 / 备份闸门 / 日期范围 / 运行日志 ── */
             /* 这些元素只为“功能可见、可解释”服务，沿用同一套主题变量，不引入独立配色。 */
             .bvh-settings-nav { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 6px; }
@@ -11691,6 +11700,43 @@
             }
             const auto = overlay.querySelector('[data-cold-auto]');
             if (auto) auto.disabled = primary || busy;
+            // ── DB 主存模式下的联动置灰 ──
+            // 主存模式的语义是“不再有热层、冷库就是当前库”，与归档/查冷库相关的控件因此无效：
+            // 置灰 + 写明原因，而不是让用户点下去才发现不生效。
+            const primaryNote = overlay.querySelector('[data-primary-note]');
+            if (primaryNote) {
+                primaryNote.hidden = !primary;
+                primaryNote.textContent = primary
+                    ? '当前为 DB 主存模式（归档年龄 = 0）：记录直接写入当前冷库，因此归档年龄、归档周期、自动归档、立即归档、无结果自动查冷库 都已停用；“只导出油猴存储”也不可选。冷库清单、导入 JSON 到冷库、导出与清理仍可正常使用。'
+                    : '';
+            }
+            overlay.querySelectorAll('.bvh-setting-row:has(input:disabled)').forEach(row => row.setAttribute('aria-disabled', 'true'));
+            // 置灰的按钮也补一句悬停原因，避免只看到灰按钮却不知道为什么。
+            const primaryButtonReasons = {
+                '[data-cold-archive]': 'DB 主存模式下不归档：记录本来就写在冷库里。',
+                '[data-cold-auto]': 'DB 主存模式下没有热层可归档，自动归档已失去意义。'
+            };
+            Object.entries(primaryButtonReasons).forEach(([selector, reason]) => {
+                const el = overlay.querySelector(selector);
+                if (el) el.title = primary ? reason : '';
+            });
+            const searchAuto = overlay.querySelector('[data-cold-search-auto]');
+            if (searchAuto) {
+                searchAuto.disabled = primary || busy;
+                searchAuto.title = primary ? 'DB 主存模式下当前库就是冷库，当前记录本身已在 IndexedDB 里，无需再“查冷库”。' : '';
+            }
+            const ageInput = overlay.querySelector('#bvh-setting-cold-age');
+            if (primary && ageInput) ageInput.title = 'DB 主存模式固定为 0：记录直接写 IndexedDB，不再从热层归档。';
+            // “只导出油猴存储”在主存模式下等价于全量（记录都在库里），因此禁用并回退到“全部记录”。
+            const scopeSelect = overlay.querySelector('[data-backup-scope]');
+            if (scopeSelect) {
+                const gmOption = scopeSelect.querySelector('option[value="gm"]');
+                if (gmOption) {
+                    gmOption.disabled = primary;
+                    gmOption.title = primary ? 'DB 主存模式下油猴里已没有记录，这份范围没有意义。' : '';
+                }
+                if (primary && scopeSelect.value === 'gm') scopeSelect.value = 'all';
+            }
             // 先恢复原状态并应用当前 primary 规则，保存锁只在最后叠加。
             if (saving) {
                 overlay.querySelectorAll('input, select, textarea, button').forEach(el => { el.disabled = true; });
@@ -11794,6 +11840,7 @@
                             <label class="bvh-setting-row"><span>短观看保留天数 <b id="bvh-setting-retention-value"></b><small title="短观看记录保留多久；0 表示立即符合清理条件。建议值：7 天。">ⓘ</small></span><input id="bvh-setting-retention" type="range" min="0" max="365" step="1"></label>
                         </div>
                         <div class="bvh-setting-group" id="bvh-group-cold"><h4>冷库与存储</h4>
+                            <p class="bvh-setting-note bvh-primary-note" data-primary-note hidden></p>
                             <p class="bvh-setting-note">这一组管理 IndexedDB 冷库。归档会把超过“归档年龄”的记录从油猴热层搬进冷库，热层不再保留副本；归档年龄设为 0 会把全部记录迁入冷库并永久启用 DB 主存模式，无法切回。导出与导入在下一组，这里只负责归档与库本身。</p>
                             <label class="bvh-setting-row"><span>归档年龄 <b id="bvh-setting-cold-age-value"></b><small title="大于 0 天时，旧记录从 GM 迁入 IndexedDB。设为 0 会把所有记录迁入 IndexedDB 并永久启用 DB 主存模式，无法切回 GM；开始前会再次确认。建议值：30 天。">ⓘ</small></span><input id="bvh-setting-cold-age" type="range" min="0" max="180" step="1"></label>
                             <label class="bvh-setting-row"><span>自动归档周期 <b id="bvh-setting-cold-interval-value"></b><small title="history 页面按周期检查并归档达到年龄的记录；检查周期从上次成功检查后计算。建议值：7 天。年龄设为 0 后不再归档。">ⓘ</small></span><input id="bvh-setting-cold-interval" type="range" min="1" max="90" step="1"></label>
@@ -11892,6 +11939,9 @@
                     if (intervalControl) intervalControl.disabled = true;
                     const autoArchiveControl = overlay.querySelector('[data-cold-auto]');
                     if (autoArchiveControl) autoArchiveControl.disabled = true;
+                    // 迁移成功后，界面立刻按主存模式重新置灰，不必等再次打开设置窗口。
+                    SettingsOperations.sync(overlay);
+                    if (status) status.textContent = `DB 主存模式已永久启用：${result.count} 条记录已迁移并核验；归档相关设置已置灰。`;
                 } catch (error) {
                     if (status) status.textContent = `迁移未完成，原存储模式与源记录保留：${error.message}`;
                     alert(`DB 主存迁移失败，GM 中的原记录已保留：${error.message}`);
@@ -12272,7 +12322,9 @@
         };
 
         const readBackupScope = () => {
-            const kind = overlay.querySelector('[data-backup-scope]')?.value || 'all';
+            const rawKind = overlay.querySelector('[data-backup-scope]')?.value || 'all';
+            // 主存模式下“只导出油猴存储”已无意义（记录都在库里），按全量处理。
+            const kind = rawKind === 'gm' && StorageRouter.isPrimaryMode() ? 'all' : rawKind;
             const dayStart = el => {
                 const value = el?.value || '';
                 const ts = value ? new Date(`${value}T00:00:00`).getTime() : 0;

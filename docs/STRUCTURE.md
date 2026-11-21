@@ -142,6 +142,22 @@ scope = { kind: 'all' | 'video' | 'bangumi' | 'live' | 'collection' | 'gm', sinc
 新增按钮统一放在 `bvh-cold-management` 容器里，复用现有按钮样式与忙碌锁；
 每个按钮下方必须有一行常驻说明（做什么 / 影响什么 / 能否撤销），不依赖 `title` 悬浮提示。
 
+### DB 主存模式下的置灰规则
+
+`StorageRouter.isPrimaryMode()` 为真（归档年龄 = 0、已迁移）时，以下控件由 `SettingsOperations.sync` 统一停用：
+
+| 控件 | 原因 |
+|---|---|
+| 归档年龄 / 归档周期 | 主存模式固定 0，不再从热层归档 |
+| 自动归档（`data-cold-auto`） | 没有热层可归档 |
+| 立即归档（`data-cold-archive`） | `archiveNow` 会直接报错 |
+| 无结果自动查冷库（`data-cold-search-auto`） | 当前库就是冷库，记录已在 IndexedDB 里 |
+| 导出范围的“只导出油猴存储”（`option[value="gm"]`） | 油猴里已无记录，等价于全量；选中时自动回退到“全部记录” |
+
+冷库清单、导入 JSON 到冷库、删除空白冷库、导出、CSV、导入、清理、重置、归并、修复、迁移、清空**仍然可用**——`GM_*` 在文件顶部统一改写成 `StorageRouter` 调用，主存模式下走 DB。
+
+置灰同时给 `title` 写明原因，并在冷库组顶部显示一条 `bvh-primary-note` 说明，避免“看着能点其实不生效”。
+
 ---
 
 ## 命名与注释约定
