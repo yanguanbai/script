@@ -12,6 +12,7 @@
 |---|---|---|---|
 | M01–M03 | 常量层 | 内部键名与协议、运行参数、CSV 字段 | `RECORD_CHANGE_EVENT`、`CONFIG`、`CSV_COLUMNS` |
 | M04–M05 | 工具层 | 时间换算与格式化、油猴存储用量 | `TimeTool`、`ByteTool` |
+| M05b | 诊断层 | 错误码表与运行日志 | `ERR`、`ErrorLog`、`reportError` |
 | M06, M08–M09 | 身份层 | 记录键解析、旧格式兼容、数据规范化 | `RecordKey`、`LegacyMigration`、`RecordNormalizer` |
 | M07 | 采集层 | 从当前播放页解析番剧身份 | `PageData` 的番剧部分 |
 | M10–M11, M14 | 存储层 | 容器合并、容器查找、原始记录读写与一致性 | `mergeContainers`、`RecordStore`、`StorageOperations`、`ColdArchiveStore`、`StorageRouter`、`ColdArchiveApi` |
@@ -68,6 +69,66 @@
 
 ---
 
+## 备份确认协议（5.10.21）
+
+导出的唯一目的是"删之前先有一份外部副本"，所以**保存是否真的完成**决定了能不能删。协议拆三段，不许合并：
+
+| 阶段 | 函数 | 是否写存储 | 说明 |
+|---|---|---|---|
+| 构建 | `prepareFullBackup(scope)` | 否 | 只生成 payload / 文件名 / 体积，放在 `StorageApi._pendingBackup` |
+| 保存 | `saveBackupVerified(prep, handle)` | 否 | 系统保存对话框 `close()` 完成才算成功；否则降级为普通下载并标记 `pending` |
+| 登记 | `confirmBackup(prep, method)` | 是 | 只有成功或用户明确确认后，才写 `EXPORTED_RECORDS_KEY` 与 `BACKUP_CONFIRM_KEY` |
+
+三条不变量：
+
+1. **`prepare` 绝不写 `EXPORTED_RECORDS_KEY`**。下载、取消、失败都不会让记录变成"可清理"。
+2. **登记前逐键比对当前值**。`prepare` 到 `confirm` 之间被改过的记录从标记中剔除，避免新值被误标为已备份。
+3. **`cleanExpireRecords` 只认已确认备份**。范围导出后，范围外的过期记录会保留，并在确认文案里给出数量。
+
+`migrateToContainerStructure` 不再隐式导出，改为前置条件 `hasConfirmedBackup()`；未确认直接中止（E2004）。
+
+范围参数只作用于最终合并集，payload 的 `format`/`version` 不变，`importRecords` 无需改动：
+
+```
+scope = { kind: 'all' | 'video' | 'bangumi' | 'live' | 'collection', since, until }
+```
+
+---
+
+## 错误码
+
+`ERR` 按域分段，新增错误先登记再用；所有面向用户的失败走 `reportError(code, detail, {where})`：
+
+| 段 | 范围 | 典型码 |
+|---|---|---|
+| E1xxx | 导入 | E1001 非 JSON、E1002 顶层非对象、E1101 字段无法识别、E1201 合集身份冲突、E1202 回读不一致 |
+| E2xxx | 备份导出 | E2001 非历史页、E2002 主存库不可用、E2003 用户取消、E2004 保存未确认、E2006 生成失败 |
+| E3xxx | 存储 | E3002 写入校验失败、E3003 冷库失联、E3004 版本不兼容 |
+| E4xxx | 冷库归档 | E4001 冷库导入失败、E4002 归档中断、E4003 移除旧库登记失败 |
+| E5xxx | 维护工具 | E5001 迁移未完成、E5002 归并失败、E5003 身份修复失败 |
+
+日志写 `bvh_error_log_v1`，环形保留 50 条，且被 `ByteTool.calcStorageSize` 排除在容量统计之外。
+设置页"运行日志"组按错误码归类显示（`E1201 ×2`），并支持一键复制。
+
+---
+
+## 设置页分组（M34）
+
+| 组 | 内容 |
+|---|---|
+| 观看去重 | 判定方式、时间差上限、进度差上限 |
+| 记录与保留 | 过期天数、同步页数、快照条数、来源配额、短观看阈值 / 保留天数 |
+| 冷库与存储 | 归档年龄 / 周期 / 开关、无结果查冷库、删空白库、立即归档、冷库清单、导入到冷库 |
+| 数据导入导出 | 导出完整备份（含范围与时间筛选）、导出 CSV、导入到当前存储、备份确认闸门 |
+| 维护工具 | 重置次数、归并单集、修复身份、迁移到合集容器、清理过期、清理短观看、清空全部 |
+| 运行日志 | 错误码归类、复制全部、清空日志 |
+| 界面配色 | 字号、预设主题、高级取色、对比度修正 |
+
+新增按钮统一放在 `bvh-cold-management` 容器里，复用现有按钮样式与忙碌锁；
+每个按钮下方必须有一行常驻说明（做什么 / 影响什么 / 能否撤销），不依赖 `title` 悬浮提示。
+
+---
+
 ## 命名与注释约定
 
 - 模块头固定三行：`// 【模块 Mxx · 层：名称】` + 职责 + 边界（不该做什么）。
@@ -92,8 +153,11 @@
 
 ```powershell
 node --check src/bilibili-history/bilibili-history.user.js
-node --test src/bilibili-history/tests/history-import.test.cjs src/bilibili-history/tests/flat-collection-import.test.cjs
-git diff --ignore-all-space -U0 | Select-String '^-[^-]'     # 应只剩注释行
+node --test src/bilibili-history/tests/history-import.test.cjs `
+  src/bilibili-history/tests/flat-collection-import.test.cjs `
+  src/bilibili-history/tests/backup-gate.test.cjs
+node tools/sync-readme-versions.mjs --check
+git diff --ignore-all-space -U0 | Select-String '^-[^-]'     # 结构类改动应只剩注释行
 ```
 
 最后一条用于确认"被删掉的只有注释"：忽略空白后，任何非注释的删除行都说明动了逻辑。
@@ -103,5 +167,7 @@ git diff --ignore-all-space -U0 | Select-String '^-[^-]'     # 应只剩注释�
 ## 已知待办（本次未处理）
 
 - 80 处重复选择器声明（占 298 个选择器的 27%），来源是"基础层 + 覆盖层"两遍写法，合并需逐段截图核对。
-- `refreshSettingsWindow` 约 460 行单函数，内含主题同步、滑轨绘制、刻度节点、tooltip、冷库扫描等闭包，可拆成 5–6 个命名函数。
-- `settingsBase` 里的冷库块与开关行目前仍混在表单片段内，后续可独立成片段。
+- `refreshSettingsWindow` 约 700 行单函数（含新增的导入导出、维护工具、日志三块闭包），可拆成 5–6 个命名函数。
+- 普通下载档（`<a download>`）无法确认保存，只能靠用户在设置页点"我已确认文件已保存"；
+  若要真检测，需要 `GM_download`（新增 `@grant`，安装时会提示权限）。
+- 启动自动修复 `repairAndCleanLocalRecords` 仍然在写回前不做备份，只在 GM 模式生效。

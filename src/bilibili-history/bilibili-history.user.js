@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.20
+// @version      5.10.21
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -26,6 +26,7 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.21：导出拆成"构建/保存/确认"三段，只有确认文件确实保存后才登记可清理；新增按范围导出、错误码与运行日志；设置页按功能重排为七组并补齐全部功能入口。
 // 5.10.20：官方多P接口视频名仅补空合集名；扫描迁移保留扁平记录合集名，锁内保护最新名称；页面缺名不清空已有合集名。
 // 5.10.19：扁平记录并入合集时不再用当前视频标题回退覆盖合集名；合集名仅接受明确识别的合集标题。
 // 5.10.18：修正内部键大小写识别；仅清理历史派生索引中的误入设置项，保留 GM 尺寸设置和观看记录。
@@ -182,6 +183,10 @@
     const COLD_PRIMARY_MODE_KEY = 'bvh_cold_primary_mode_v1';
     const COLD_PRIMARY_DB_KEY = 'bvh_cold_primary_database_v1';
     const COLD_WRITE_QUEUE_KEY = 'bvh_cold_cross_origin_write_queue_v1';
+    // 最近一次"已确认保存"的备份信息（时间/文件名/条数/保存方式）；只用于界面呈现，不参与记录判定。
+    const BACKUP_CONFIRM_KEY = 'bvh_backup_confirm_v1';
+    // 运行日志：面向用户的失败按错误码记录，只保留最近若干条。
+    const ERROR_LOG_KEY = 'bvh_error_log_v1';
 
     // 【模块 M02 · 常量层：统一运行参数】
     // 集中管理记录过期、最近快照数量与来源配额、存储容量、采集间隔、搜索防抖、
@@ -445,6 +450,8 @@
             let totalStr = '';
             let recordCount = 0;
             keys.forEach(k => {
+                // 诊断类键不计入占用：日志和备份确认信息不应影响容量判断与清理提示。
+                if (ErrorLog.EXCLUDED_FROM_SIZE.includes(k)) return;
                 totalStr += k + JSON.stringify(GM_getValue(k));
                 if (RecordKey.isRecordKey(k)) recordCount++;
             });
@@ -463,6 +470,96 @@
             };
         }
     };
+
+    // ── 诊断：错误码与运行日志 ──
+    // 【模块 M05b · 工具层：错误码与运行日志】
+    // 所有面向用户的失败都从这里上报：给出可识别的错误码、写一条运行日志、返回可直接展示的文本。
+    // 日志只保留最近 MAX 条，并且不计入存储占用（见 ByteTool.calcStorageSize 的排除列表）。
+    // 约定：错误码按域分段，E1 导入、E2 备份导出、E3 存储、E4 冷库、E5 维护；新增错误先在此登记再使用。
+    const ERR = {
+        // E1xxx 导入
+        E1001: '文件内容不是有效 JSON',
+        E1002: '备份顶层不是对象',
+        E1003: '备份里没有可识别的记录',
+        E1101: '记录字段无法识别',
+        E1102: '分集归属无法确定',
+        E1201: '合集身份冲突',
+        E1202: '合集写入后回读不一致',
+        E1203: '记录写入提交校验失败',
+        // E2xxx 备份与导出
+        E2001: '只能在 B 站历史页执行',
+        E2002: 'DB 主存库不可用，无法生成完整备份',
+        E2003: '已取消保存，未登记为备份',
+        E2004: '保存未确认，不登记为备份',
+        E2005: '浏览器拒绝写入文件',
+        E2006: '备份生成失败，未生成文件',
+        // E3xxx 存储
+        E3001: '存储占用接近上限',
+        E3002: '存储写入校验失败',
+        E3003: '冷库失联',
+        E3004: '数据库版本不兼容',
+        E3005: '存储写入失败',
+        // E4xxx 冷库与归档
+        E4001: '没有可用冷库',
+        E4002: '归档中断',
+        E4003: '移除旧库登记失败',
+        // E5xxx 维护工具
+        E5001: '结构迁移未完成',
+        E5002: '单集归并失败',
+        E5003: '分集身份修复失败',
+        // E6xxx 采集
+        E6001: '同步官方历史失败',
+    };
+
+    const ErrorLog = {
+        MAX: 50,
+        // 排除在存储占用统计之外的键：诊断数据不应影响容量判断。
+        EXCLUDED_FROM_SIZE: [ERROR_LOG_KEY, BACKUP_CONFIRM_KEY],
+        read() {
+            try {
+                const raw = GM_getValue(ERROR_LOG_KEY, []);
+                return Array.isArray(raw) ? raw.filter(item => item && typeof item === 'object') : [];
+            } catch (_) { return []; }
+        },
+        write(list) {
+            try { GM_setValue(ERROR_LOG_KEY, list.slice(-this.MAX)); } catch (_) { /* 日志写不进去不能影响主流程 */ }
+        },
+        clear() { this.write([]); },
+        // 上报一次失败。code 必须是 ERR 里的键；detail 具体到哪条记录/哪个文件；
+        // silent=true 表示只进日志不弹窗（用于被吞掉的内部降级路径）。
+        report(code, detail = '', { where = '', silent = false } = {}) {
+            const label = ERR[code] || '未归类错误';
+            const text = `[${code}] ${label}${detail ? `：${detail}` : ''}`;
+            const entry = { ts: Date.now(), code, label, detail: String(detail || ''), where: String(where || '') };
+            try { console.error(`[BVH ${code}] ${label}`, detail || '', where || ''); } catch (_) { /* 控制台不可用时忽略 */ }
+            const list = this.read();
+            list.push(entry);
+            this.write(list);
+            return silent ? '' : text;
+        },
+        // 把一组日志按错误码归类，供界面显示“E1201 ×2”这类摘要。
+        summarize(entries = null) {
+            const items = Array.isArray(entries) ? entries : this.read();
+            const map = new Map();
+            items.forEach(item => {
+                const code = item?.code || 'UNKNOWN';
+                const bucket = map.get(code) || {
+                    code,
+                    label: item?.label || ERR[code] || '未归类错误',
+                    count: 0,
+                    first: item?.detail || '',
+                    where: item?.where || ''
+                };
+                bucket.count++;
+                if (!bucket.first && item?.detail) bucket.first = item.detail;
+                map.set(code, bucket);
+            });
+            return [...map.values()].sort((a, b) => b.count - a.count);
+        }
+    };
+
+    // 简写入口：业务代码只关心“报哪个码 + 具体细节”，不需要自己拼文案。
+    function reportError(code, detail, options) { return ErrorLog.report(code, detail, options); }
 
     // 合并短时间内连续触发的调用，只在最后一次触发后等待指定时间执行。
     function debounce(fn, delay) {
@@ -4402,7 +4499,7 @@
             const meta = await this.ensureDefault();
             const result = await ColdArchiveStore.archiveOldRecords({ ageDays, targetId: meta.id });
             const skipped = result.unavailableDatabases?.length
-                ? `\n另有 ${result.unavailableDatabases.length} 个失联冷库已跳过；完整导出仍会提示处理。`
+                ? `\n另有 ${result.unavailableDatabases.length} 个失联冷库已跳过（${reportError('E3003', '冷库无法打开，本次归档跳过，源记录仍在热层', { where: 'archiveNow', silent: true })}）；完整导出仍会提示处理。`
                 : '';
             alert(`归档完成：${result.archived} 条记录已移入冷库。${skipped}`);
             refreshOpenHistoryLists(true);
@@ -4420,17 +4517,18 @@
                     if (HistoryViewIndex._index) HistoryViewIndex._rebuild(HistoryViewIndex._index.itemsByKey, true);
                     result.keys.forEach(key => RecordStore._broadcast(key));
                 }
-                alert(`冷库导入完成：读取 ${result.read} 条，新增 ${result.inserted} 条，合并 ${result.merged} 条。`);
+                alert(`冷库导入完成：读取 ${result.read} 条，新增 ${result.inserted} 条，合并 ${result.merged} 条。\n本次只写入冷库，未合并到当前记录。`);
                 return result;
             } catch (error) {
-                throw new Error(`冷库导入失败：${error.message}`);
+                throw new Error(`冷库导入失败：${reportError('E4001', error.message, { where: 'ColdArchiveApi.importFile' })}`);
             }
         }
     };
 
     // 根据当前过期天数设置更新清理按钮文字。
     function updateCleanupButtonLabels() {
-        const label = `清理已备份过期记录（${CONFIG.EXPIRE_DAY}天）`;
+        // 按钮文案统一由这里生成：强调“已确认备份”，因为只有登记过的备份才会被清理。
+        const label = `清理已确认备份的过期记录（${CONFIG.EXPIRE_DAY}天）`;
         ['hp-clean', 'bvh-clean-expire'].forEach(id => {
             const button = document.getElementById(id);
             if (button) button.textContent = label;
@@ -4443,6 +4541,8 @@
     // 番剧身份修复、旧结构迁移和存储容量提醒等管理功能。
     // 这些操作会调用 RecordStore 维护原始数据，并让索引/列表跟随更新；此处注释不代表额外改变行为。
     const StorageApi = {
+        // 最近一次已生成但尚未确认保存的备份（只在本次会话有效，用于设置页的确认闸门）。
+        _pendingBackup: null,
         // 按油猴设置清理未达到观看阈值且满足保留期限的短观看记录。
         // ── 清理：短观看 / 过期记录 ──
         cleanShortWatchRecords() {
@@ -4522,10 +4622,15 @@
                 else if (nowTs - candidate.ts > CONFIG.EXPIRE_MS) expiredExported.push(candidate);
             };
 
+            // 同时统计“已过期但不在任何已确认备份内”的记录：
+            // 范围导出后可能只备份了部分记录，这个数字用来解释为什么有些过期记录不会被删。
+            let unconfirmedExpired = 0;
+            const expiredAt = ts => Number(ts) > 0 && nowTs - Number(ts) > CONFIG.EXPIRE_MS;
+
             GM_listValues().filter(RecordKey.isRecordKey).forEach(key => {
-                if (!Object.prototype.hasOwnProperty.call(exportedMap, key)) return;
                 const rec = RecordNormalizer.normalize(GM_getValue(key));
                 if (!rec || typeof rec !== 'object') return;
+                const isExported = Object.prototype.hasOwnProperty.call(exportedMap, key);
 
                 if (RecordKey.isSeasonKey(key) && rec.type === 'collection') {
                     rec.parts.forEach(part => {
@@ -4534,19 +4639,34 @@
                             .find(value => RecordKey.isEpisodeKey(value)) || '';
                         // 缺少 ep 身份的旧分集不能安全地映射到删除入口，留待人工处理。
                         if (!episodeKey) return;
+                        if (!isExported) {
+                            if (expiredAt(part.lastTs)) unconfirmedExpired++;
+                            return;
+                        }
                         addCandidate(key, episodeKey, part);
                     });
                     return;
                 }
 
+                if (!isExported) {
+                    if (expiredAt(rec.lastTs)) unconfirmedExpired++;
+                    return;
+                }
                 addCandidate(key, '', rec);
             });
 
             const expiredCount = expiredExported.length;
             const unknownCount = unknownTimeExported.length;
+            const backupNote = StorageApi.hasConfirmedBackup()
+                ? ''
+                : '\n当前还没有“已确认保存”的备份，因此不会删除任何记录；请先导出并在设置页确认保存。';
 
             if (expiredCount === 0 && unknownCount === 0) {
-                alert(`没有可清理的已备份记录。\n清理条件：已导出备份，并且超过 ${CONFIG.EXPIRE_DAY} 天未更新；时间不明的记录会单独询问。番剧按分集判断。`);
+                alert(
+                    `没有可清理的已备份记录。\n清理条件：已确认保存的备份，并且超过 ${CONFIG.EXPIRE_DAY} 天未更新；时间不明的记录会单独询问。番剧按分集判断。` +
+                    (unconfirmedExpired > 0 ? `\n\n另有 ${unconfirmedExpired} 条已过期但不在已确认备份内，不会删除。` : '') +
+                    backupNote
+                );
                 return;
             }
 
@@ -4565,9 +4685,10 @@
 
             const confirmDelete = confirm(
                 `即将清理 ${selected.length} 条记录/分集：\n` +
-                `- 明确超过 ${CONFIG.EXPIRE_DAY} 天且已导出备份：${expiredCount} 条\n` +
-                `- 时间不明且已导出备份：${includeUnknownTime ? unknownCount : 0} 条\n\n` +
-                `番剧只删除符合条件的分集；清掉某季最后一集时，该季的旧累计数据也会删除。未导出备份的记录不会删除。确认继续？`
+                `- 明确超过 ${CONFIG.EXPIRE_DAY} 天且已确认备份：${expiredCount} 条\n` +
+                `- 时间不明且已确认备份：${includeUnknownTime ? unknownCount : 0} 条\n\n` +
+                `番剧只删除符合条件的分集；清掉某季最后一集时，该季的旧累计数据也会删除。` +
+                `未在已确认备份内的记录不会删除${unconfirmedExpired > 0 ? `（当前有 ${unconfirmedExpired} 条已过期但未备份，将保留）` : ''}。确认继续？`
             );
             if (!confirmDelete) return;
 
@@ -4665,51 +4786,255 @@
             }
         },
 
-        // ── 导出：完整备份 / 全量导出 / CSV ──
-        async buildFullBackupPayload() {
+        // ── 导出：完整备份 / 按范围导出 / CSV ──
+        // 备份分三段：prepare 构建内容、save 真正写文件、confirm 登记“可清理”。
+        // 只有确认文件确实保存之后才写 EXPORTED_RECORDS_KEY；否则清理会删掉没有备份的数据。
+        // 范围筛选只作用在最终合并后的记录集上：payload 格式不变，importRecords 无需改动。
+
+        // 判断一条记录是否落在导出范围内。scope 省略或 kind='all' 表示全量。
+        // 时间区间按记录（含合集各分集）的最早/最晚观看时间判断，命中区间即纳入。
+        _backupScopeFilter(scope) {
+            const kind = String(scope?.kind || 'all');
+            const since = Number(scope?.since) > 0 ? Number(scope.since) : 0;
+            const until = Number(scope?.until) > 0 ? Number(scope.until) : 0;
+            const rangeOf = rec => {
+                let min = Number(rec?.lastTs) || 0;
+                let max = min;
+                if (Array.isArray(rec?.parts)) {
+                    rec.parts.forEach(part => {
+                        const ts = Number(part?.lastTs) || 0;
+                        if (!(ts > 0)) return;
+                        min = min > 0 ? Math.min(min, ts) : ts;
+                        max = Math.max(max, ts);
+                    });
+                }
+                return { min, max };
+            };
+            return (key, rec) => {
+                if (kind !== 'all') {
+                    const isBangumi = RecordKey.isBangumiKey(key) || RecordKey.isEpisodeKey(key) || Number(rec?.seasonId) > 0;
+                    const isLive = RecordKey.isLiveKey(key);
+                    const isCollection = rec?.type === 'collection' && !RecordKey.isSeasonKey(key);
+                    const isVideo = !isBangumi && !isLive && !isCollection;
+                    if (kind === 'bangumi' && !isBangumi) return false;
+                    if (kind === 'live' && !isLive) return false;
+                    if (kind === 'collection' && !isCollection) return false;
+                    if (kind === 'video' && !isVideo) return false;
+                }
+                if (!since && !until) return true;
+                const { min, max } = rangeOf(rec);
+                if (!(max > 0)) return false;
+                if (since && max < since) return false;
+                if (until && min > until) return false;
+                return true;
+            };
+        },
+
+        // 只构建备份内容，绝不持久化“已备份”标记。返回值结构与原有调用方保持兼容。
+        async buildFullBackupPayload(scope = null) {
             const allRecords = await StorageRouter.readAllRecordsForBackup();
             const exportedAt = Date.now();
             const nowTs = TimeTool.now();
             const exportedMap = RecordStore._exportedMap();
+            const inScope = this._backupScopeFilter(scope);
             const records = {};
             for (const [key, normalized] of allRecords) {
-                if (!normalized) continue;
+                if (!normalized || !inScope(key, normalized)) continue;
                 const ts = Number(normalized.lastTs);
                 const isExpired = Number.isFinite(ts) && ts > 0 && nowTs - ts > CONFIG.EXPIRE_MS;
                 records[key] = { key, data: normalized, isExpired, exportedAt };
                 exportedMap[key] = exportedAt;
             }
             return {
-                payload: { format: 'bvh-history-backup', version: 2, exportedAt, records },
+                payload: { format: 'bvh-history-backup', version: 2, exportedAt, scope: scope || null, records },
                 exportedMap,
                 count: Object.keys(records).length
             };
         },
 
-        // 本地完整备份读取 GM、全部 IndexedDB 冷库及待处理队列；任何冷库读取失败都不生成部分文件。
-        async exportAllRecords() {
+        // 生成待保存的备份：内容、文件名、体积都算好，但不写任何存储键。
+        // 文件名单独抽出来，因为系统保存对话框必须在点击瞬间先拿到文件名。
+        _backupFileName(scope = null) {
+            const stamp = new Date().toISOString().slice(0, 10);
+            const scopeSuffix = scope && scope.kind && scope.kind !== 'all' ? `_${scope.kind}` : '';
+            return `bvh_history_backup_${stamp}${scopeSuffix}.json`;
+        },
+
+        async prepareFullBackup(scope = null) {
             let backup;
             try {
-                backup = await StorageApi.buildFullBackupPayload();
+                backup = await this.buildFullBackupPayload(scope);
             } catch (error) {
-                alert(`完整备份失败，未生成文件，也未删除任何记录：${error.message}`);
-                return false;
+                throw new Error(reportError('E2006', error.message, { where: 'prepareFullBackup' }));
             }
-            const blob = new Blob([JSON.stringify(backup.payload, null, 2)], { type: 'application/json;charset=utf-8' });
+            if (!backup.count) throw new Error(reportError('E1003', '所选范围内没有可导出的记录', { where: 'prepareFullBackup' }));
+            const json = JSON.stringify(backup.payload, null, 2);
+            const prep = {
+                payload: backup.payload,
+                exportedMap: backup.exportedMap,
+                count: backup.count,
+                exportedAt: backup.payload.exportedAt,
+                json,
+                filename: this._backupFileName(scope),
+                bytes: new Blob([json]).size,
+                scope: scope || null,
+                preparedAt: Date.now()
+            };
+            StorageApi._pendingBackup = prep;
+            return prep;
+        },
+
+        // 在用户手势内立即请求系统保存句柄。拿不到就返回 null，由调用方降级为普通下载。
+        // cancelled=true 表示用户主动取消，此时不应再走下载兜底。
+        async requestBackupHandle(filename) {
+            if (typeof window.showSaveFilePicker !== 'function' || location.protocol !== 'https:') return { handle: null, cancelled: false };
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: filename,
+                    types: [{ description: '观看记录 JSON 备份', accept: { 'application/json': ['.json'] } }]
+                });
+                return { handle, cancelled: false };
+            } catch (error) {
+                if (error?.name === 'AbortError') return { handle: null, cancelled: true };
+                reportError('E2005', error?.message || String(error), { where: 'requestBackupHandle', silent: true });
+                return { handle: null, cancelled: false };
+            }
+        },
+
+        // 真正保存备份。传入已打开的句柄时直接写入并等待 close() 完成；
+        // 否则三档降级：系统保存对话框（可确认写入）→ 普通下载（无法确认）。
+        // 返回 ok=true 只代表“已确认落盘”，pending=true 代表“文件已交出去但没确认”。
+        async saveBackupVerified(prep, preHandle = null) {
+            if (!prep) return { ok: false, method: 'none', pending: false, code: 'E2006', message: '没有待保存的备份内容' };
+            const writeWithHandle = async handle => {
+                const writable = await handle.createWritable();
+                await writable.write(new Blob([prep.json], { type: 'application/json;charset=utf-8' }));
+                // close() resolve 才代表数据真正落盘；此前任何异常都视为未保存。
+                await writable.close();
+                prep.filename = handle.name || prep.filename;
+                return { ok: true, method: 'picker', fileName: prep.filename };
+            };
+            if (preHandle) {
+                try { return await writeWithHandle(preHandle); }
+                catch (error) { reportError('E2005', error?.message || String(error), { where: 'saveBackupVerified', silent: true }); }
+            }
+            if (!preHandle) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: prep.filename,
+                        types: [{ description: '观看记录 JSON 备份', accept: { 'application/json': ['.json'] } }]
+                    });
+                    return await writeWithHandle(handle);
+                } catch (error) {
+                    if (error?.name === 'AbortError') {
+                        return { ok: false, method: 'picker', pending: false, code: 'E2003', message: '已取消保存，备份未生成，本次不登记为已备份' };
+                    }
+                    // 缺少用户手势、权限被拒、无此 API 等情况降级为普通下载，由用户自己确认。
+                    reportError('E2005', error?.message || String(error), { where: 'saveBackupVerified', silent: true });
+                }
+            }
+            const blob = new Blob([prep.json], { type: 'application/json;charset=utf-8' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `bvh_history_backup_${new Date().toISOString().slice(0, 10)}.json`;
+            a.download = prep.filename;
             document.body.appendChild(a);
             a.click();
             a.remove();
-            GM_setValue(EXPORTED_RECORDS_KEY, backup.exportedMap);
             setTimeout(() => URL.revokeObjectURL(url), 1000);
+            return {
+                ok: false,
+                method: 'download',
+                pending: true,
+                fileName: prep.filename,
+                code: 'E2004',
+                message: '文件已生成并交给浏览器下载，但脚本无法确认它是否真的保存成功'
+            };
+        },
+
+        // 只有确认保存成功才登记“可清理”。登记前逐键比对当前值：
+        // prepare 之后被改动过的记录不能算进这份备份，否则新值会被误标为已备份。
+        confirmBackup(prep, method = 'download') {
+            if (!prep) return { ok: false, marked: 0, stale: 0 };
+            const map = RecordStore._exportedMap();
+            let marked = 0;
+            let stale = 0;
+            Object.values(prep.payload?.records || {}).forEach(item => {
+                const key = item?.key;
+                if (!key) return;
+                const raw = StorageRouter.getValue(key, null);
+                const current = raw === null || raw === undefined ? null : RecordNormalizer.normalize(raw);
+                if (!current || JSON.stringify(current) !== JSON.stringify(item.data)) { stale++; return; }
+                map[key] = prep.exportedAt;
+                marked++;
+            });
+            GM_setValue(EXPORTED_RECORDS_KEY, map);
+            GM_setValue(BACKUP_CONFIRM_KEY, {
+                ts: Date.now(),
+                name: prep.filename,
+                count: marked,
+                stale,
+                method,
+                scope: prep.scope || null,
+                exportedAt: prep.exportedAt
+            });
+            StorageApi._pendingBackup = null;
             refreshOpenHistoryLists();
             updateCleanupButtonLabels();
+            return { ok: true, marked, stale };
+        },
+
+        // 设置页用它确认“本次会话已生成但还没确认保存”的备份。
+        confirmPendingBackup(method = 'download') {
+            const prep = StorageApi._pendingBackup;
+            if (!prep) return { ok: false, marked: 0, stale: 0, reason: '本次会话没有待确认的备份，请重新导出' };
+            return this.confirmBackup(prep, method);
+        },
+
+        cancelPendingBackup() {
+            StorageApi._pendingBackup = null;
+            return { ok: true };
+        },
+
+        // 是否存在“已确认保存且仍有效”的备份：迁移等破坏性操作的前置条件。
+        hasConfirmedBackup() {
+            const meta = GM_getValue(BACKUP_CONFIRM_KEY, null);
+            return !!meta && Object.keys(RecordStore._exportedMap()).length > 0;
+        },
+
+        readConfirmedBackup() {
+            return GM_getValue(BACKUP_CONFIRM_KEY, null);
+        },
+
+        // 本地完整备份读取 GM、全部 IndexedDB 冷库及待处理队列；任何冷库读取失败都不生成部分文件。
+        // 一键导出：构建 → 保存 → 仅当确认成功才登记。返回 true 表示“已登记为已备份”。
+        async exportAllRecords(scope = null) {
+            // 系统保存对话框必须在点击手势里同步打开；等到构建完再弹，浏览器会判为无手势而拒绝。
+            const ask = await this.requestBackupHandle(this._backupFileName(scope));
+            if (ask.cancelled) {
+                alert('已取消保存：本次没有生成备份，也没有登记为已备份，不会删除任何记录。');
+                return false;
+            }
+            let prep;
+            try {
+                prep = await this.prepareFullBackup(scope);
+            } catch (error) {
+                alert(`完整备份失败，未生成文件，也未删除任何记录。\n${error.message}`);
+                return false;
+            }
+            const save = await this.saveBackupVerified(prep, ask.handle);
+            if (!save.ok) {
+                alert(
+                    `${save.message}。\n共 ${prep.count} 条记录，文件 ${prep.filename}（${ByteTool.format(prep.bytes)}）。\n\n` +
+                    `确认方式：打开设置 → 数据导入导出 → 点击“确认已保存”。未确认前不会登记为已备份，清理也不会删除任何记录。`
+                );
+                return false;
+            }
+            const result = this.confirmBackup(prep, save.method);
             alert(
-                `已生成完整备份，包含 GM 与全部冷库合并后的 ${backup.count} 条记录。\n` +
-                `备份文件兼容现有 GM 导入；源记录仍保留在原存储中。超过 ${CONFIG.EXPIRE_DAY} 天或时间不明的记录显示"可清理"。`
+                `备份已保存并登记：${prep.filename}（${ByteTool.format(prep.bytes)}，${result.marked} 条）。\n` +
+                (result.stale ? `另有 ${result.stale} 条在生成备份后被改动，未登记为已备份。\n` : '') +
+                `源记录仍保留在原存储中；超过 ${CONFIG.EXPIRE_DAY} 天或时间不明的记录显示“可清理”。`
             );
             return true;
         },
@@ -5317,7 +5642,10 @@
                                 importCnt++;
                             } catch (itemError) {
                                 skipCnt++;
-                                errors.push(`${sourceKey}: ${itemError.message}`);
+                                // 单条失败按错误码记录：详情带上是哪个键，方便逐条定位。
+                                const detail = `${sourceKey}: ${itemError.message}`;
+                                reportError('E1203', detail, { where: 'importRecords' });
+                                errors.push({ code: 'E1203', label: ERR.E1203, detail });
                                 console.warn(`导入记录 ${sourceKey} 失败：`, itemError);
                             }
                         })();
@@ -5349,21 +5677,29 @@
                                 delete exportedMap[targetKey];
                             } catch (error) {
                                 skipCnt += grouped.members.length;
-                                errors.push(`${targetKey}: ${error.message}`);
+                                // 合集相关失败分两类：身份冲突（E1201）与写入回读不一致（E1202）。
+                                const code = /身份/.test(String(error.message)) ? 'E1201' : 'E1202';
+                                const detail = `${targetKey}: ${error.message}`;
+                                reportError(code, detail, { where: 'importRecords' });
+                                errors.push({ code, label: ERR[code], detail });
                                 console.warn(`归并扁平合集 ${targetKey} 失败：`, error);
                             }
                         }
 
                         GM_setValue(EXPORTED_RECORDS_KEY, exportedMap);
-                        const errorSummary = errors.slice(0, 5).join('\n');
+                        // 失败按错误码归类显示：同类失败合并成“E1201 ×2”，不再只截取前 5 条自由文本。
+                        const errorLines = ErrorLog.summarize(errors)
+                            .map(bucket => `${bucket.code} · ${bucket.label} ×${bucket.count}${bucket.first ? `｜例：${bucket.first}` : ''}`);
                         alert(
-                            `导入完成。\n成功导入：${importCnt} 条\n跳过记录：${skipCnt} 条` +
-                            `${errorSummary ? `\n\n部分错误：\n${errorSummary}` : ''}\n\n` +
-                            `导入的记录需重新导出备份后，才会被标记为可清理。`
+                            `导入完成 · 新增 ${importCnt} 条 / 跳过 ${skipCnt} 条 / 失败 ${errors.length} 条\n` +
+                            (errorLines.length ? `\n失败明细：\n${errorLines.join('\n')}` : '') +
+                            `\n\n导入的记录需要重新导出备份并确认保存后，才会被标记为可清理。\n完整记录见设置页“运行日志”。`
                         );
                         refreshOpenHistoryLists();
                     } catch (err) {
-                        alert('导入失败：' + err.message);
+                        // 解析阶段失败与后续写入失败分开报码，便于判断是文件问题还是数据问题。
+                        const code = err?.name === 'SyntaxError' ? 'E1001' : 'E1101';
+                        alert(`导入失败：${reportError(code, err.message, { where: 'importRecords' })}`);
                     }
                 };
                 reader.readAsText(file, 'utf-8');
@@ -5386,7 +5722,7 @@
 
         // 清除全部观看记录及备份标记，并重置索引。
         deleteAllRecords() {
-            if (!confirm('确认删除全部观看历史？该操作不可恢复！建议先导出备份！')) return;
+            if (!confirm('确认删除全部观看历史？该操作不可恢复！\n建议先完成一次“已确认保存”的备份（设置页 → 数据导入导出）。')) return;
             GM_listValues().filter(k => RecordKey.isRecordKey(k)).forEach(k => RecordStore.delete(k));
             GM_setValue(EXPORTED_RECORDS_KEY, {});
             HistoryViewIndex.reset();
@@ -5695,7 +6031,7 @@
         //   - 纯单视频 BV（无分P）保持单独一条；番剧 ep/ss、直播 live 保持；
         //   - 跨BV合集（旧数据无 collectionKey）先按单视频保留，播放页扫描后并入；
         //   - 分集标题：从记录 partTitle 取，取不到留空，等播放页选集列表回填；
-        //   - 删除旧键前逐条确认；迁移前自动导出一份备份 JSON 供回退。
+        //   - 删除旧键前逐条确认；开始前必须已有一份“已确认保存”的备份，不做隐式导出。
         async migrateToContainerStructure() {
             const allKeys = GM_listValues().filter(k => RecordKey.isRecordKey(k));
             if (!allKeys.length) { alert('当前没有任何记录。'); return; }
@@ -5704,9 +6040,12 @@
                 '即将把本地历史迁移到「合集容器」结构：\n' +
                 '- 同BV多P（BV?p=N）归并成合集容器，分集进 parts[]\n' +
                 '- 删除旧的分P键（删除前会逐条确认）\n' +
-                '- 迁移前自动导出一份备份 JSON 供回退\n\n继续？'
+                '- 开始前必须已有一份“已确认保存”的备份\n\n继续？'
             )) return;
-            if (!await this.exportAllRecords()) return;
+            if (!this.hasConfirmedBackup()) {
+                alert(reportError('E2004', '迁移会删除旧的分P键，需要先完成一次已确认保存的备份；请到设置页“数据导入导出”导出并点击“确认已保存”后再执行迁移', { where: 'migrateToContainerStructure' }));
+                return;
+            }
 
             const mergeSnapshots = (listA, listB) => {
                 const snapMap = new Map();
@@ -9762,6 +10101,20 @@
             .bvh-cold-database strong { display:block; margin-bottom:3px; }
             .bvh-cold-database small { display:block; color:var(--bvh-theme-muted,#77717c); line-height:1.6; }
             .bvh-cold-database button { margin-top:7px; padding:5px 9px; font-size:12px; }
+            /* ── 设置页新增族：分组导航 / 备份闸门 / 日期范围 / 运行日志 ── */
+            /* 这些元素只为“功能可见、可解释”服务，沿用同一套主题变量，不引入独立配色。 */
+            .bvh-settings-nav { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 6px; }
+            .bvh-settings-nav button { padding:6px 12px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:999px; background:var(--bvh-theme-card,#fff); color:var(--bvh-theme-muted,#77717c); font-size:12px; cursor:pointer; transition:color .2s,border-color .2s,background .2s; }
+            .bvh-settings-nav button:hover { color:var(--bvh-theme-accent,#fb7299); border-color:var(--bvh-theme-accent,#fb7299); background:color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 10%,var(--bvh-theme-card,#fff)); }
+            .bvh-setting-group h5 { margin:14px 0 8px; color:var(--bvh-theme-settings-text,#624b54); font-size:13px; letter-spacing:.6px; }
+            .bvh-setting-date-range { display:flex; flex-wrap:wrap; gap:8px; }
+            .bvh-setting-date-range input { flex:1 1 120px; min-width:0; padding:7px 9px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:9px; background:var(--bvh-theme-card,#fff); color:var(--bvh-theme-settings-text,#624b54); font:inherit; }
+            .bvh-backup-state { margin-top:10px; padding:11px 13px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:11px; background:color-mix(in srgb,var(--bvh-theme-card,#fff) 86%,transparent); }
+            .bvh-backup-state .bvh-setting-note { margin:0 0 8px; }
+            .bvh-backup-state .bvh-setting-note:last-child { margin-bottom:0; }
+            .bvh-error-list { display:flex; flex-direction:column; gap:5px; max-height:210px; overflow-y:auto; margin-top:8px; }
+            .bvh-error-row { padding:6px 9px; border-radius:8px; background:color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 12%,var(--bvh-theme-card,#fff)); color:var(--bvh-theme-settings-text,#624b54); font-size:12px; overflow-wrap:anywhere; }
+            .bvh-error-entry { color:var(--bvh-theme-muted,#77717c); font-size:11.5px; line-height:1.6; overflow-wrap:anywhere; }
             .bvh-settings-footer [data-save] { border-color:rgba(251,114,153,.55); background:linear-gradient(110deg,#fb7299,#e98db0); color:#fff; box-shadow:0 5px 18px rgba(251,114,153,.22); }
             .bvh-settings-footer [data-save]:hover { filter:brightness(1.04); transform:translateY(-1px); box-shadow:0 8px 22px rgba(251,114,153,.28); }
             @media (max-width:560px) { .bvh-settings-dialog { border-radius:17px; } .bvh-settings-header,.bvh-settings-footer { padding-left:15px; padding-right:15px; } .bvh-settings-body { padding:9px 15px 14px; } .bvh-setting-row { grid-template-columns:1fr; gap:8px; margin:14px 0; } .bvh-setting-control { grid-template-columns:minmax(0,1fr) 72px; } .bvh-setting-number { width:72px; } }
@@ -11188,6 +11541,8 @@
     // 油猴菜单只保留重置次数、归并分集和数据结构迁移等维护操作；可调参数由 openSettingsWindow 统一保存。
     function registerMenus() {
         if (typeof GM_registerMenuCommand !== 'function') return;
+        // 设置窗口是所有参数与数据操作的统一入口；菜单里保留入口，避免在非历史页时无处可点。
+        GM_registerMenuCommand('打开设置窗口', () => openSettingsWindow());
         // 普通参数统一放在脚本自己的设置窗口；油猴菜单只保留数据维护类操作。
         GM_registerMenuCommand('重置所有观看次数为 1', () => StorageApi.resetAllWatchCounts());
         GM_registerMenuCommand('归并单集残留到整季', () => StorageApi.mergeEpIntoSeason());
@@ -11258,21 +11613,34 @@
                     <div class="bvh-settings-body">
                         <section class="bvh-settings-intro">
                             <div class="bvh-settings-intro-mark">✦</div>
-                            <div><strong>按你的观看习惯精细调整</strong><p>这里控制本地观看记录的合并、同步和保留规则。滑轨上的节点是常用值，点击即可平滑移动；也可以直接输入数值进行精确调整。</p></div>
+                            <div><strong>按你的观看习惯精细调整</strong><p>设置分七组：观看去重、记录与保留、冷库与存储、数据导入导出、维护工具、运行日志、界面配色。每组开头都写明这组管什么、改动会带来什么后果；滑轨上的节点是常用值，点击即可平滑移动，右侧数字框可直接输入精确值。</p></div>
                         </section>
-                        <div class="bvh-setting-group"><h4>观看去重</h4>
+                        <nav class="bvh-settings-nav" aria-label="设置分组导航">
+                            <button type="button" data-nav="bvh-group-dedup">观看去重</button>
+                            <button type="button" data-nav="bvh-group-retain">记录与保留</button>
+                            <button type="button" data-nav="bvh-group-cold">冷库与存储</button>
+                            <button type="button" data-nav="bvh-group-transfer">数据导入导出</button>
+                            <button type="button" data-nav="bvh-group-maint">维护工具</button>
+                            <button type="button" data-nav="bvh-group-log">运行日志</button>
+                            <button type="button" data-nav="bvh-group-theme">界面配色</button>
+                        </nav>
+                        <div class="bvh-setting-group" id="bvh-group-dedup"><h4>观看去重</h4>
                             <label class="bvh-setting-row"><span>判定方式 <small title="时间：只比较两次快照的时间间隔；进度：只比较进度百分比差值；同时满足：时间和进度差都在阈值内才合并。建议值：时间和进度都满足。">ⓘ</small></span><select id="bvh-setting-dedup-mode"><option value="both">时间和进度都满足</option><option value="time">只根据时间差</option><option value="progress">只根据进度差</option></select></label>
                             <label class="bvh-setting-row"><span>时间差上限 <b id="bvh-setting-gap-value"></b><small title="两次快照相隔不超过该分钟数时，时间条件成立。范围 1–180 分钟。建议值：30 分钟。">ⓘ</small></span><input id="bvh-setting-gap" type="range" min="1" max="180" step="1"></label>
                             <label class="bvh-setting-row"><span>进度差上限 <b id="bvh-setting-progress-value"></b><small title="比较两次快照进度的绝对差值。例如 35% 和 40% 相差 5 个百分点。建议值：10 个百分点。">ⓘ</small></span><input id="bvh-setting-progress" type="range" min="0" max="100" step="1"></label>
                             <p class="bvh-setting-note">差值按百分点计算。选择“只根据时间”时忽略进度；选择“只根据进度”时忽略时间；“时间和进度都满足”要求两项同时在阈值内。</p>
                         </div>
-                        <div class="bvh-setting-group"><h4>记录管理</h4>
+                        <div class="bvh-setting-group" id="bvh-group-retain"><h4>记录与保留</h4>
+                            <p class="bvh-setting-note">这一组决定什么算同一次观看、多久算过期、面板显示多少条、同步读多少页。改动只影响之后的行为，不会主动删除已有记录；“过期天数”只决定何时标记为可清理。</p>
                             <label class="bvh-setting-row"><span>长期记录过期天数 <b id="bvh-setting-expire-value"></b><small title="超过该天数且已备份的长期未更新记录会被标记为可清理，不会自动删除。建议值：60 天；记录约达 2,000 条时建议导出备份。观看越频繁，越应缩短导出和清理间隔。">ⓘ</small></span><input id="bvh-setting-expire" type="range" min="1" max="365" step="1"></label>
                             <label class="bvh-setting-row"><span>官方历史同步页数 <b id="bvh-setting-pages-value"></b><small title="每次同步最多加载的官方历史页数；页数越多读取越多，也越耗时。建议值：30 页。">ⓘ</small></span><input id="bvh-setting-pages" type="range" min="1" max="100" step="1"></label>
                             <label class="bvh-setting-row"><span>最近快照显示条数 <b id="bvh-setting-recent-value"></b><small title="player 与 official 各最多保留 N 条候选（合计最多 2N）；历史页读满前 N 条后固定 official 候选，player 候选继续更新。修改 N 后刷新历史页生效。不改变每条记录保存的快照上限。建议值：5 条。">ⓘ</small></span><input id="bvh-setting-recent" type="range" min="1" max="50" step="1"></label>
                             <label class="bvh-setting-row"><span>自动获取来源占比 <b id="bvh-setting-quota-value"></b><small title="player 至少占展示名额的该比例；剩余名额从 player 与 official 的未选候选中按观看时间排序补齐。0% 不会排除较新的 player 快照。建议值：0%。">ⓘ</small></span><input id="bvh-setting-quota" type="range" min="0" max="100" step="5"></label>
                             <label class="bvh-setting-row"><span>短观看阈值 <b id="bvh-setting-short-value"></b><small title="播放位置严格小于该秒数的记录会被视为短观看，按下面的保留天数清理。建议值：5 秒。">ⓘ</small></span><input id="bvh-setting-short" type="range" min="0" max="120" step="1"></label>
                             <label class="bvh-setting-row"><span>短观看保留天数 <b id="bvh-setting-retention-value"></b><small title="短观看记录保留多久；0 表示立即符合清理条件。建议值：7 天。">ⓘ</small></span><input id="bvh-setting-retention" type="range" min="0" max="365" step="1"></label>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-cold"><h4>冷库与存储</h4>
+                            <p class="bvh-setting-note">这一组管理 IndexedDB 冷库。归档会把超过“归档年龄”的记录从油猴热层搬进冷库，热层不再保留副本；归档年龄设为 0 会把全部记录迁入冷库并永久启用 DB 主存模式，无法切回。导出与导入在下一组，这里只负责归档与库本身。</p>
                             <label class="bvh-setting-row"><span>归档年龄 <b id="bvh-setting-cold-age-value"></b><small title="大于 0 天时，旧记录从 GM 迁入 IndexedDB。设为 0 会把所有记录迁入 IndexedDB 并永久启用 DB 主存模式，无法切回 GM；开始前会再次确认。建议值：30 天。">ⓘ</small></span><input id="bvh-setting-cold-age" type="range" min="0" max="180" step="1"></label>
                             <label class="bvh-setting-row"><span>自动归档周期 <b id="bvh-setting-cold-interval-value"></b><small title="history 页面按周期检查并归档达到年龄的记录；检查周期从上次成功检查后计算。建议值：7 天。年龄设为 0 后不再归档。">ⓘ</small></span><input id="bvh-setting-cold-interval" type="range" min="1" max="90" step="1"></label>
                             <label class="bvh-setting-row"><span>自动归档 <small title="开启后按上方周期在打开 history 页面时执行；年龄为 0 的 DB 主存模式不需归档。">ⓘ</small></span><input type="checkbox" class="bvh-toggle-input" data-cold-auto><span class="bvh-toggle-track" aria-hidden="true"></span></label>
@@ -11281,7 +11649,6 @@
                                 <button type="button" data-cold-delete-empty>删除空白冷库</button>
                                 <button type="button" data-cold-archive>立即归档</button>
                                 <button type="button" data-cold-import>导入 JSON 到冷库</button>
-                                <button type="button" data-cold-export-all>导出完整备份</button>
                                 <input type="file" accept=".json,application/json" data-cold-file hidden>
                                 <p class="bvh-setting-note" data-cold-status>脚本自动识别并复用冷库；新观看记录保存在油猴热层，达到年龄的记录自动归档。</p>
                                 <div class="bvh-cold-inventory">
@@ -11289,9 +11656,58 @@
                                     <div data-cold-databases aria-live="polite">正在等待数据库扫描。</div>
                                 </div>
                             </div>
-                            <label class="bvh-setting-row"><span>界面字号 <small title="调整设置窗口、历史列表、搜索规则卡和设置说明卡的主要文字字号。建议值：标准（16 px）。">ⓘ</small></span><select id="bvh-setting-font-size"><option value="14">较小（14px）</option><option value="16">标准（16px）</option><option value="18">较大（18px）</option><option value="20">特大（20px）</option></select></label>
                         </div>
-                        <div class="bvh-setting-group bvh-theme-settings"><h4>界面配色</h4>
+                        <div class="bvh-setting-group" id="bvh-group-transfer"><h4>数据导入导出</h4>
+                            <p class="bvh-setting-note">导出的 JSON 是唯一能登记为“已备份”的格式；只有确认文件确实保存之后，清理才会删除对应记录。CSV 供分析查看，不参与备份判定。两条导入路径语义不同，下面的说明写清了区别。</p>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-cold-export-all data-backup-export>导出完整备份</button>
+                                <button type="button" data-backup-csv>导出 CSV</button>
+                                <button type="button" data-backup-import>导入到当前存储</button>
+                                <button type="button" data-backup-sync>同步官方历史</button>
+                            </div>
+                            <p class="bvh-setting-note" data-backup-sync-note hidden></p>
+                            <p class="bvh-setting-note">导出完整备份：把热层与全部冷库合并成一份 JSON，可登记为“已备份”，也是唯一能让清理生效的导出。<br>导出 CSV：按快照展开成表格，仅用于查看和分析，不会登记为备份。<br>导入到当前存储：按同键取较新的规则合并进当前记录，不覆盖更新的本地记录；无法确认归属的番剧分集会被跳过。<br>导入到冷库（在“冷库与存储”组）：只写进一个冷库，不合并到当前记录，用来单独保存一份外部备份。<br>同步官方历史：按“记录与保留”里的同步页数读取官方历史页并合并到本地，不会删除本地已有记录；离开历史页时该操作无效。</p>
+                            <label class="bvh-setting-row"><span>导出范围 <small title="只导出所选类型的记录；范围外的记录不会被登记为已备份，清理时也不会被删除。">ⓘ</small></span><select data-backup-scope><option value="all">全部记录</option><option value="video">只要视频</option><option value="bangumi">只要番剧</option><option value="live">只要直播</option><option value="collection">只要合集</option></select></label>
+                            <label class="bvh-setting-row"><span>时间范围 <small title="留空表示不限。只导出在该时间段内有观看记录的条目；合集按分集的最早/最晚时间判断。">ⓘ</small></span><span class="bvh-setting-date-range"><input type="date" data-backup-since aria-label="导出起始日期"><input type="date" data-backup-until aria-label="导出结束日期"></span></label>
+                            <div class="bvh-backup-state">
+                                <p class="bvh-setting-note" data-backup-state-text>还没有已确认保存的备份。清理过期记录前需要先完成一次。</p>
+                                <div class="bvh-cold-management" data-backup-pending hidden>
+                                    <button type="button" data-backup-picker>保存到磁盘并确认</button>
+                                    <button type="button" data-backup-confirm>我已确认文件已保存</button>
+                                    <button type="button" data-backup-cancel>取消这次备份</button>
+                                </div>
+                                <p class="bvh-setting-note" data-backup-pending-hint hidden></p>
+                            </div>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-maint"><h4>维护工具</h4>
+                            <p class="bvh-setting-note">这些操作会批量改写记录，执行时间可能较长；开始前建议先完成一次已确认备份。四个结构维护操作原本只在油猴菜单里，现在也放在这里，执行结果会显示在下方并写入运行日志。</p>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-maint="reset-counts">重置所有观看次数为 1</button>
+                                <button type="button" data-maint="merge-ep">归并单集到整季</button>
+                                <button type="button" data-maint="repair-identity">修复分集身份与完整键</button>
+                                <button type="button" data-maint="migrate">迁移到合集容器</button>
+                            </div>
+                            <p class="bvh-setting-note">重置所有观看次数：把每条记录改回 1 次，快照与进度保留。<br>归并单集到整季：把散落的 ep 记录并进所属 ss 季，合并后单集键消失。<br>修复分集身份：按本地数据重新推断分集归属与完整键。<br>迁移到合集容器：把旧扁平记录迁成合集结构，未确认备份时会直接中止。</p>
+                            <h5>清理</h5>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-maint="clean-expire">清理已备份过期记录</button>
+                                <button type="button" data-maint="clean-short">清理短观看快照</button>
+                                <button type="button" data-maint="delete-all">清空全部记录</button>
+                            </div>
+                            <p class="bvh-setting-note">清理已备份过期：只删已确认备份且超过过期天数的记录，删除前两次确认，不可撤销。<br>清理短观看：删掉播放位置低于阈值且超过保留天数的快照，原来只在保存设置时自动执行，这里可以手动触发。<br>清空全部：删除所有记录，不可恢复，需要二次确认。</p>
+                            <p class="bvh-setting-note" data-maint-status aria-live="polite"></p>
+                        </div>
+                        <div class="bvh-setting-group" id="bvh-group-log"><h4>运行日志</h4>
+                            <p class="bvh-setting-note">每次失败都会带错误码记进这里，最多保留最近 50 条，不占用存储预算。出问题时点“复制全部”把内容发出来，就能定位到具体是哪一步、哪条记录失败。</p>
+                            <div class="bvh-cold-management">
+                                <button type="button" data-error-copy>复制全部</button>
+                                <button type="button" data-error-clear>清空日志</button>
+                            </div>
+                            <p class="bvh-setting-note" data-error-summary aria-live="polite">最近没有失败记录。</p>
+                            <div class="bvh-error-list" data-error-list></div>
+                        </div>
+                        <div class="bvh-setting-group bvh-theme-settings" id="bvh-group-theme"><h4>界面配色</h4>
+                            <label class="bvh-setting-row"><span>界面字号 <small title="调整设置窗口、历史列表、搜索规则卡和设置说明卡的主要文字字号。建议值：标准（16 px）。">ⓘ</small></span><select id="bvh-setting-font-size"><option value="14">较小（14px）</option><option value="16">标准（16px）</option><option value="18">较大（18px）</option><option value="20">特大（20px）</option></select></label>
                             <div class="bvh-theme-presets" role="group" aria-label="预设主题">
                                 <div class="bvh-theme-option" data-theme-option="pink">
                                     <button type="button" data-theme-preset="pink"><i style="background:linear-gradient(135deg,#f45f8b,#ffb4ca)"></i><span>B站粉</span></button>
@@ -11690,15 +12106,17 @@
                     ? `已删除 ${result.removed.length} 个空白冷库；保留 ${result.remaining.length} 个有记录的冷库。`
                     : `没有空白冷库；当前保留 ${result.remaining.length} 个冷库。`;
             } catch (error) {
-                if (status) status.textContent = `删除空白冷库失败：${error.message}`;
-                alert(`删除空白冷库失败：${error.message}`);
+                const text = `删除空白冷库失败：${error.message}`;
+                if (status) status.textContent = reportError('E4003', error.message, { where: 'deleteEmptyDatabases', silent: true }) || text;
+                alert(`${text}\n${reportError('E4003', error.message, { where: 'deleteEmptyDatabases' })}`);
             }
             await refreshColdDatabaseInfo(true);
         }));
         SettingsOperations.bind(overlay.querySelector('[data-cold-archive]'), 'click', () => SettingsOperations.run(overlay, 'archive', async () => {
             const ageDays = Number(overlay.querySelector('#bvh-setting-cold-age').value);
             if (!(ageDays > 0)) { alert('年龄为 0 时请点击“保存设置”，确认后再进入主存模式。'); return; }
-            try { await ColdArchiveApi.archiveNow(ageDays); } catch (error) { alert(`归档失败，热层记录已保留：${error.message}`); }
+            try { await ColdArchiveApi.archiveNow(ageDays); }
+            catch (error) { alert(`归档失败，热层记录已保留：${reportError('E4002', error.message, { where: 'archiveNow' })}`); }
             await refreshColdDatabaseInfo(true);
         }));
         const coldFile = overlay.querySelector('[data-cold-file]');
@@ -11712,9 +12130,215 @@
             } catch (error) { alert(`冷库导入失败：${error.message}`); }
             finally { coldFile.value = ''; await refreshColdDatabaseInfo(true); }
         }));
-        SettingsOperations.bind(overlay.querySelector('[data-cold-export-all]'), 'click', () => SettingsOperations.run(overlay, 'export', async () => {
-            await StorageApi.exportAllRecords();
+        // ── 数据导入导出：范围选择、备份确认闸门、CSV 与导入入口 ──
+        // 确认闸门的意义：只有确认文件确实保存后，才把记录登记为“已备份”，清理才敢删。
+        const backupStateText = overlay.querySelector('[data-backup-state-text]');
+        const pendingActions = overlay.querySelector('[data-backup-pending]');
+        const pendingHint = overlay.querySelector('[data-backup-pending-hint]');
+
+        const renderBackupState = () => {
+            const prep = StorageApi._pendingBackup;
+            const meta = StorageApi.readConfirmedBackup();
+            if (prep) {
+                if (pendingActions) pendingActions.hidden = false;
+                if (pendingHint) {
+                    pendingHint.hidden = false;
+                    pendingHint.textContent = `已生成 ${prep.filename}（${ByteTool.format(prep.bytes)}，${prep.count} 条），等待确认保存。确认前不会登记为已备份，清理也不会删除任何记录。`;
+                }
+                if (backupStateText) backupStateText.textContent = '待确认的备份：请在浏览器下载列表里确认文件确实已保存，然后点“我已确认文件已保存”；也可以点“保存到磁盘并确认”直接写入并校验。';
+            } else {
+                if (pendingActions) pendingActions.hidden = true;
+                if (pendingHint) { pendingHint.hidden = true; pendingHint.textContent = ''; }
+                if (backupStateText) {
+                    backupStateText.textContent = meta
+                        ? `上次确认备份：${new Date(Number(meta.ts) || Date.now()).toLocaleString()} · ${meta.name || '未记录文件名'} · ${Number(meta.count) || 0} 条 · ${meta.method === 'picker' ? '系统保存对话框（已校验写入）' : '手动确认下载'}`
+                        : '还没有已确认保存的备份。清理过期记录前需要先完成一次。';
+                }
+            }
+            SettingsOperations.sync(overlay);
+        };
+
+        const readBackupScope = () => {
+            const kind = overlay.querySelector('[data-backup-scope]')?.value || 'all';
+            const dayStart = el => {
+                const value = el?.value || '';
+                const ts = value ? new Date(`${value}T00:00:00`).getTime() : 0;
+                return Number.isFinite(ts) ? ts : 0;
+            };
+            const since = dayStart(overlay.querySelector('[data-backup-since]'));
+            const untilDay = dayStart(overlay.querySelector('[data-backup-until]'));
+            // 结束日期算到当天最后一毫秒，避免最后一天被排除。
+            return { kind, since, until: untilDay ? untilDay + 86400000 - 1 : 0 };
+        };
+
+        const finishBackupFlow = (prep, save) => {
+            if (save.ok) {
+                const result = StorageApi.confirmBackup(prep, save.method);
+                renderBackupState();
+                if (backupStateText) {
+                    backupStateText.textContent = `已保存并登记：${prep.filename}（${ByteTool.format(prep.bytes)}，${result.marked} 条）`
+                        + `${result.stale ? `；另有 ${result.stale} 条在生成备份后被改动，未登记为已备份` : ''}`;
+                }
+                return;
+            }
+            renderBackupState();
+            if (backupStateText) backupStateText.textContent = save.message;
+        };
+
+        SettingsOperations.bind(overlay.querySelector('[data-backup-export]'), 'click', () => SettingsOperations.run(overlay, 'export', async () => {
+            const scope = readBackupScope();
+            // 先取句柄：系统保存对话框必须在点击后的手势窗口内打开，而生成备份可能耗时数秒。
+            const { handle, cancelled } = await StorageApi.requestBackupHandle(StorageApi._backupFileName(scope));
+            if (cancelled) {
+                renderBackupState();
+                if (backupStateText) backupStateText.textContent = '已取消保存，未生成备份，也没有登记任何记录。';
+                return;
+            }
+            let prep;
+            try {
+                prep = await StorageApi.prepareFullBackup(scope);
+            } catch (error) {
+                if (backupStateText) backupStateText.textContent = error.message;
+                return;
+            }
+            finishBackupFlow(prep, await StorageApi.saveBackupVerified(prep, handle));
         }));
+
+        // 系统保存对话框需要新的用户手势，所以单独一个按钮触发，避免生成过程耗尽激活窗口。
+        SettingsOperations.bind(overlay.querySelector('[data-backup-picker]'), 'click', () => SettingsOperations.run(overlay, 'export-save', async () => {
+            const prep = StorageApi._pendingBackup;
+            if (!prep) { renderBackupState(); return; }
+            finishBackupFlow(prep, await StorageApi.saveBackupVerified(prep));
+        }));
+
+        SettingsOperations.bind(overlay.querySelector('[data-backup-confirm]'), 'click', () => SettingsOperations.run(overlay, 'export-confirm', async () => {
+            const result = StorageApi.confirmPendingBackup('download');
+            renderBackupState();
+            if (backupStateText) {
+                backupStateText.textContent = result.ok
+                    ? `已确认并登记 ${result.marked} 条为已备份${result.stale ? `；${result.stale} 条在生成后被改动，未登记` : ''}`
+                    : `未登记：${result.reason || '没有待确认的备份'}`;
+            }
+        }));
+
+        SettingsOperations.bind(overlay.querySelector('[data-backup-cancel]'), 'click', () => {
+            StorageApi.cancelPendingBackup();
+            renderBackupState();
+        });
+
+        SettingsOperations.bind(overlay.querySelector('[data-backup-csv]'), 'click', () => SettingsOperations.run(overlay, 'csv', async () => {
+            try { StorageApi.exportCSVRecords(); }
+            catch (error) { if (backupStateText) backupStateText.textContent = reportError('E2006', error.message, { where: 'exportCSVRecords' }); }
+        }));
+
+        SettingsOperations.bind(overlay.querySelector('[data-backup-import]'), 'click', () => { if (!overlay._bvhTask) StorageApi.importRecords(); });
+
+        // 官方历史同步原先只能从历史页面板发起；这里给出同一入口，并明确写出前提与结果。
+        const syncNote = overlay.querySelector('[data-backup-sync-note]');
+        SettingsOperations.bind(overlay.querySelector('[data-backup-sync]'), 'click', () => SettingsOperations.run(overlay, 'sync', async () => {
+            const say = text => { if (syncNote) { syncNote.hidden = false; syncNote.textContent = text; } };
+            if (!/^\/history(\/|$)/.test(location.pathname)) {
+                say('同步只能在 B 站“历史记录”页执行：请先打开 www.bilibili.com/history，再回来点这个按钮。');
+                return;
+            }
+            try {
+                const result = await OfficialHistorySync.sync(true);
+                if (result && result.error) say(reportError('E6001', String(result.error), { where: 'syncFromSettings' }));
+                else if (result && result.skipped) say('上一次同步还没结束，本次已跳过。');
+                else say('同步已结束；本页卡片已刷新，条数与详情以历史页提示为准。');
+                refreshOpenHistoryLists(true);
+            } catch (error) {
+                say(reportError('E6001', String(error && error.message || error), { where: 'syncFromSettings' }));
+            }
+        }));
+
+        // ── 维护工具：把原先只在油猴菜单里的四个操作收进设置页 ──
+        // 每个操作都走 SettingsOperations.run，复用同一把忙碌锁，避免与归档/迁移并发改写记录。
+        const maintStatus = overlay.querySelector('[data-maint-status]');
+        const setMaintStatus = text => { if (maintStatus) maintStatus.textContent = text; };
+        const MAINT_ACTIONS = {
+            'reset-counts': async () => { await StorageApi.resetAllWatchCounts(); return '已把所有观看次数重置为 1。'; },
+            'merge-ep': async () => {
+                const result = await StorageApi.mergeEpIntoSeason({ silent: true });
+                return `归并完成：处理 ${result.merged?.length || 0} 条单集，跳过 ${result.skipped?.length || 0} 条。`;
+            },
+            'repair-identity': async () => { await StorageApi.repairBangumiIdentityFromLocalData(); return '分集身份修复已执行。'; },
+            'migrate': async () => { await StorageApi.migrateToContainerStructure(); return '结构迁移已返回，是否完成见提示与运行日志。'; },
+            'clean-expire': async () => { StorageApi.cleanExpireRecords(); return '已进入过期清理确认流程。'; },
+            'clean-short': async () => {
+                const result = StorageApi.cleanShortWatchRecords();
+                return `短观看清理完成：删除 ${result.deletedRecords} 条记录、${result.deletedSnapshots} 个快照。`;
+            },
+            'delete-all': async () => { StorageApi.deleteAllRecords(); return '已进入清空全部确认流程。'; }
+        };
+        overlay.querySelectorAll('[data-maint]').forEach(button => {
+            SettingsOperations.bind(button, 'click', () => SettingsOperations.run(overlay, `maint-${button.dataset.maint}`, async () => {
+                const action = MAINT_ACTIONS[button.dataset.maint];
+                if (!action) return;
+                setMaintStatus('正在执行…');
+                try {
+                    const message = await action();
+                    setMaintStatus(message || '执行完成。');
+                } catch (error) {
+                    setMaintStatus(reportError('E5001', error?.message || String(error), { where: `maint:${button.dataset.maint}` }));
+                } finally {
+                    refreshOpenHistoryLists(true);
+                    renderErrorLog();
+                }
+            }));
+        });
+
+        // ── 运行日志：按错误码归类汇总，并提供一键复制 ──
+        const errorSummary = overlay.querySelector('[data-error-summary]');
+        const errorList = overlay.querySelector('[data-error-list]');
+        const renderErrorLog = () => {
+            const entries = ErrorLog.read();
+            if (errorSummary) {
+                errorSummary.textContent = entries.length
+                    ? `最近 ${entries.length} 条失败记录，按错误码归类如下：`
+                    : '最近没有失败记录。';
+            }
+            if (!errorList) return;
+            errorList.replaceChildren();
+            if (!entries.length) return;
+            ErrorLog.summarize(entries).forEach(bucket => {
+                const row = document.createElement('div');
+                row.className = 'bvh-error-row';
+                row.textContent = `${bucket.code} · ${bucket.label} ×${bucket.count}${bucket.first ? `｜例：${bucket.first}` : ''}`;
+                errorList.appendChild(row);
+            });
+            entries.slice(-8).reverse().forEach(entry => {
+                const row = document.createElement('div');
+                row.className = 'bvh-error-entry';
+                const when = new Date(Number(entry.ts) || Date.now()).toLocaleString();
+                row.textContent = `${when}  ${entry.code}  ${entry.detail || entry.label}${entry.where ? `（${entry.where}）` : ''}`;
+                errorList.appendChild(row);
+            });
+        };
+        SettingsOperations.bind(overlay.querySelector('[data-error-copy]'), 'click', async () => {
+            const entries = ErrorLog.read();
+            const text = entries
+                .map(entry => `${new Date(Number(entry.ts) || Date.now()).toLocaleString()} ${entry.code} ${entry.label} ${entry.detail} ${entry.where}`)
+                .join('\n') || '（没有失败记录）';
+            try {
+                await navigator.clipboard.writeText(text);
+                if (errorSummary) errorSummary.textContent = `已复制 ${entries.length} 条日志。`;
+            } catch (_) {
+                if (errorSummary) errorSummary.textContent = `复制失败，请手动选择下方内容：${text}`;
+            }
+        });
+        SettingsOperations.bind(overlay.querySelector('[data-error-clear]'), 'click', () => {
+            ErrorLog.clear();
+            renderErrorLog();
+        });
+
+        // ── 分组导航：点击直接滚到对应分组，解决设置页太长找不到入口 ──
+        overlay.querySelectorAll('[data-nav]').forEach(button => {
+            SettingsOperations.bind(button, 'click', () => {
+                const target = overlay.querySelector(`#${button.dataset.nav}`);
+                target?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+            });
+        });
         const coldAutoControl = overlay.querySelector('[data-cold-auto]');
         const fontSizeControl = overlay.querySelector('#bvh-setting-font-size');
         if (!fontSizeControl.dataset.bvhPreviewBound) {
@@ -11893,6 +12517,8 @@
         });
         overlay.style.display = 'flex';
         SettingsOperations.sync(overlay);
+        renderBackupState();
+        renderErrorLog();
         refreshColdDatabaseInfo();
     }
 
