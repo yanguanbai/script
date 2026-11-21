@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.29
+// @version      5.10.30
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,8 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.30：备份可记住一个默认保存目录——选一次后每次导出直接写进该目录、不再弹保存对话框；
+//          写入仍以 createWritable().close() 完成为唯一成功判据，写完即自动登记；目录权限被收回时退回系统对话框。
 // 5.10.29：DB 主存模式下“导出热层 CSV”与“导出全部 CSV”内容相同，热层入口置灰并指向全部 CSV。
 // 5.10.28：让忙碌遮罩真的可见——同步型任务先让出一帧再干活，遮罩加深一层暗色，按钮禁用状态不再一闪而过。
 // 5.10.27：备份“待确认”三个按钮改名并写清各自含义；环境无保存对话框时“另存”置灰且不再重复下载。
@@ -505,6 +507,9 @@
         E2007: '等待下载结果超时，无法确认是否保存',
         E2008: 'GM_download 下载失败',
         E2009: '下载请求被浏览器拦截',
+        E2010: '写入默认保存目录失败',
+        E2011: '当前浏览器不支持选择保存目录',
+        E2012: '默认保存目录没有写入权限',
         // E3xxx 存储
         E3001: '存储占用接近上限',
         E3002: '存储写入校验失败',
@@ -4537,6 +4542,65 @@
         }
     };
 
+    // ── 备份默认目录：记住用户选定的保存目录，之后每次导出直接写进去 ──
+    // 目录句柄不能序列化成字符串，只能存进 IndexedDB；这里单独开一个小库，
+    // 绝不与冷库共用库版本，避免升版时把现有冷库判成失联。
+    const BackupDirStore = {
+        DB_NAME: 'bvh-backup-dir-v1',
+        STORE: 'handles',
+        KEY: 'default',
+        _db: null,
+        _open() {
+            if (this._db) return Promise.resolve(this._db);
+            return new Promise((resolve, reject) => {
+                let request;
+                try { request = indexedDB.open(this.DB_NAME, 1); } catch (error) { reject(error); return; }
+                request.onupgradeneeded = () => {
+                    const db = request.result;
+                    if (!db.objectStoreNames.contains(this.STORE)) db.createObjectStore(this.STORE, { keyPath: 'id' });
+                };
+                request.onsuccess = () => { this._db = request.result; resolve(this._db); };
+                request.onerror = () => reject(request.error || new Error('无法打开默认目录库'));
+            });
+        },
+        // 读取已记住的目录句柄；库打不开或没设置过都返回 null，调用方照常降级。
+        async read() {
+            try {
+                const db = await this._open();
+                return await new Promise((resolve, reject) => {
+                    const tx = db.transaction(this.STORE, 'readonly');
+                    const request = tx.objectStore(this.STORE).get(this.KEY);
+                    request.onsuccess = () => resolve(request.result?.handle || null);
+                    request.onerror = () => reject(request.error || new Error('读取默认目录失败'));
+                });
+            } catch (error) {
+                console.warn(`${TAG} 读取默认保存目录失败`, error);
+                return null;
+            }
+        },
+        async write(handle) {
+            const db = await this._open();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction(this.STORE, 'readwrite');
+                // 目录名单独存一份：Firefox 等不支持句柄的浏览器也能显示“上次设的是哪个目录”。
+                tx.objectStore(this.STORE).put({ id: this.KEY, handle, name: String(handle?.name || ''), ts: Date.now() });
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error || new Error('保存默认目录失败'));
+            });
+            return true;
+        },
+        async clear() {
+            const db = await this._open();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction(this.STORE, 'readwrite');
+                tx.objectStore(this.STORE).delete(this.KEY);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error || new Error('清除默认目录失败'));
+            });
+            return true;
+        }
+    };
+
     // 根据当前过期天数设置更新清理按钮文字。
     function updateCleanupButtonLabels() {
         // 按钮文案统一由这里生成：强调“已确认备份”，因为只有登记过的备份才会被清理。
@@ -4910,18 +4974,26 @@
         // 在脚本沙箱里 window 可能是包装过的对象，直接 window.showSaveFilePicker(...) 会报
         // “Illegal invocation”（原生方法拿到的 this 不是真正的 Window）。
         // 这里按“真实窗口优先”的顺序找函数，始终用正确的接收者调用。
-        _nativeSaveFilePicker() {
+        _nativeWindowMethod(name) {
             const receivers = [];
             try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow) receivers.push(unsafeWindow); } catch (error) { /* 没有 unsafeWindow 就跳过 */ }
-            receivers.push(window);
-            try { if (globalThis !== window) receivers.push(globalThis); } catch (error) { /* 忽略 */ }
+            try { if (typeof window !== 'undefined' && window) receivers.push(window); } catch (error) { /* 没有 window 就跳过 */ }
+            try { if (typeof globalThis !== 'undefined' && globalThis && globalThis !== receivers[receivers.length - 1]) receivers.push(globalThis); } catch (error) { /* 忽略 */ }
             for (const receiver of receivers) {
                 try {
-                    const fn = receiver && receiver.showSaveFilePicker;
+                    const fn = receiver && receiver[name];
                     if (typeof fn === 'function') return { fn, receiver };
                 } catch (error) { /* 读属性本身可能抛，换下一个 */ }
             }
             return null;
+        },
+
+        _nativeSaveFilePicker() {
+            return this._nativeWindowMethod('showSaveFilePicker');
+        },
+
+        _nativeDirectoryPicker() {
+            return this._nativeWindowMethod('showDirectoryPicker');
         },
 
         // 打开系统保存对话框。环境本身不提供时抛 NotSupportedError，由调用方降级。
@@ -4943,6 +5015,83 @@
             const name = String(error && error.name || '');
             const message = String(error && error.message || '');
             return name === 'NotSupportedError' || /Illegal invocation|not a function|undefined is not/i.test(message);
+        },
+
+        // 读一次记住的目录并尝试拿到写权限。requestPermission 必须在点击手势内调用，
+        // 否则 Chrome 会静默拒绝，所以只能在 requestBackupTarget / 设置按钮里走这条路。
+        async _resolveDefaultBackupDir(requestPermission = false) {
+            const handle = await BackupDirStore.read();
+            if (!handle) return null;
+            if (await this.ensureDirPermission(handle, requestPermission)) return handle;
+            return null;
+        },
+
+        async ensureDirPermission(handle, request = false) {
+            const options = { mode: 'readwrite' };
+            try {
+                if (typeof handle.queryPermission === 'function') {
+                    const state = await handle.queryPermission(options);
+                    if (state === 'granted') return true;
+                    if (!request) return false;
+                } else if (!request) {
+                    // 没有查询接口又没授权：当作没权限，交给调用方降级。
+                    return false;
+                }
+                if (typeof handle.requestPermission === 'function') {
+                    return (await handle.requestPermission(options)) === 'granted';
+                }
+                return false;
+            } catch (error) {
+                console.debug('[BVH] 默认目录权限检查失败：', error && error.message);
+                return false;
+            }
+        },
+
+        // 设定/清除默认保存目录。目录句柄只在 IndexedDB 里留一份，不进任何存储键。
+        async pickDefaultBackupDir() {
+            const native = this._nativeDirectoryPicker();
+            if (!native) throw new Error(reportError('E2011', '当前浏览器不支持选择目录（需要 File System Access API）', { where: 'pickDefaultBackupDir' }));
+            let handle;
+            try { handle = await native.fn.call(native.receiver, { id: 'bvh-backup-dir' }); }
+            catch (error) {
+                if (error?.name === 'AbortError') return null;
+                throw new Error(reportError('E2011', error?.message || String(error), { where: 'pickDefaultBackupDir' }));
+            }
+            if (!handle) return null;
+            if (!await this.ensureDirPermission(handle, true)) throw new Error(reportError('E2012', handle.name || '', { where: 'pickDefaultBackupDir' }));
+            await BackupDirStore.write(handle);
+            return handle;
+        },
+
+        async clearDefaultBackupDir() {
+            await BackupDirStore.clear();
+            return true;
+        },
+
+        // 给界面用的一句话状态：是否设置了目录、目录名、权限是否仍然有效。
+        async readDefaultBackupDirInfo() {
+            const handle = await BackupDirStore.read();
+            if (!handle) return { configured: false, name: '', granted: false };
+            const granted = await this.ensureDirPermission(handle, false);
+            return { configured: true, name: String(handle.name || ''), granted };
+        },
+
+        // 直接写进已授权的目录：createWritable + close() 完成才算落盘，与系统保存对话框同一判定标准。
+        async _writeBackupIntoDir(dirHandle, prep) {
+            const fileHandle = await dirHandle.getFileHandle(prep.filename, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(new Blob([prep.json], { type: 'application/json;charset=utf-8' }));
+            await writable.close();
+            return { ok: true, method: 'default_dir', fileName: prep.filename, dirName: String(dirHandle.name || '') };
+        },
+
+        // 决定这次保存落到哪里：有默认目录就直接授权并静默写入，没有才弹系统保存对话框。
+        // cancelled 只代表用户在对话框里主动取消；拿不到任何目标时返回空目标，由保存档位继续降级。
+        async requestBackupTarget(filename) {
+            const dir = await this._resolveDefaultBackupDir(true);
+            if (dir) return { dir, handle: null, cancelled: false, viaDefaultDir: true };
+            const pick = await this.requestBackupHandle(filename);
+            return { dir: null, handle: pick.handle, cancelled: pick.cancelled, viaDefaultDir: false };
         },
 
         // 在用户手势内立即请求系统保存句柄。拿不到就返回 null，由调用方降级为普通下载。
@@ -4969,6 +5118,14 @@
         // options.pickerTried=true 表示调用方刚试过保存对话框，这里不再重复弹第二个。
         async saveBackupVerified(prep, preHandle = null, options = {}) {
             if (!prep) return { ok: false, method: 'none', pending: false, code: 'E2006', message: '没有待保存的备份内容' };
+            // 已记住的默认目录：一次授权后静默写入，既不弹对话框也不产生下载条目，
+            // 但仍然以 createWritable().close() 完成为唯一成功判据。
+            if (options.dir) {
+                try { return await this._writeBackupIntoDir(options.dir, prep); }
+                catch (error) {
+                    reportError('E2010', error?.message || String(error), { where: 'writeBackupIntoDir', silent: true });
+                }
+            }
             const writeWithHandle = async handle => {
                 const writable = await handle.createWritable();
                 await writable.write(new Blob([prep.json], { type: 'application/json;charset=utf-8' }));
@@ -5131,9 +5288,9 @@
         },
 
         async _exportAllRecordsOnce(scope = null) {
-            // 系统保存对话框必须在点击手势里同步打开；等到构建完再弹，浏览器会判为无手势而拒绝。
-            const ask = await this.requestBackupHandle(this._backupFileName(scope));
-            if (ask.cancelled) {
+            // 目标必须在点击手势里确定：有默认目录就直接拿授权，否则同步弹出系统保存对话框。
+            const target = await this.requestBackupTarget(this._backupFileName(scope));
+            if (target.cancelled) {
                 alert('已取消保存：本次没有生成备份，也没有登记为已备份，不会删除任何记录。');
                 return false;
             }
@@ -5144,7 +5301,7 @@
                 alert(`完整备份失败，未生成文件，也未删除任何记录。\n${error.message}`);
                 return false;
             }
-            const save = await this.saveBackupVerified(prep, ask.handle, { pickerTried: true });
+            const save = await this.saveBackupVerified(prep, target.handle, { dir: target.dir, pickerTried: true });
             if (!save.ok) {
                 alert(
                     `${save.message}。\n共 ${prep.count} 条记录，文件 ${prep.filename}（${ByteTool.format(prep.bytes)}）。\n\n` +
@@ -10266,6 +10423,10 @@
             .bvh-setting-group h5 { margin:14px 0 8px; color:var(--bvh-theme-settings-text,#624b54); font-size:13px; letter-spacing:.6px; }
             .bvh-setting-date-range { display:flex; flex-wrap:wrap; gap:8px; }
             .bvh-setting-date-range input { flex:1 1 120px; min-width:0; padding:7px 9px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:9px; background:var(--bvh-theme-card,#fff); color:var(--bvh-theme-settings-text,#624b54); font:inherit; }
+            /* 默认保存目录：目录名 + 两个小按钮，放在与日期范围相同的控件列里。 */
+            .bvh-backup-dir { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; }
+            .bvh-backup-dir b { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; padding:5px 9px; border-radius:8px; background:color-mix(in srgb,var(--bvh-theme-border,#eadfe5) 30%,var(--bvh-theme-card,#fff)); color:var(--bvh-theme-muted,#77717c); font-size:12px; font-weight:600; }
+            .bvh-backup-dir button { padding:6px 11px; font-size:12px; }
             .bvh-backup-state { margin-top:10px; padding:11px 13px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:11px; background:color-mix(in srgb,var(--bvh-theme-card,#fff) 86%,transparent); }
             .bvh-backup-state .bvh-setting-note { margin:0 0 8px; }
             .bvh-backup-state .bvh-setting-note:last-child { margin-bottom:0; }
@@ -11715,6 +11876,8 @@
         export: '正在生成备份文件…',
         'export-save': '正在写入备份文件…',
         'export-confirm': '正在核对并登记备份…',
+        'dir-pick': '正在设置默认保存目录…',
+        'dir-clear': '正在清除默认保存目录…',
         csv: '正在导出热层 CSV…',
         'csv-all': '正在读取全部冷库并导出 CSV，记录较多时需要等待…',
         sync: '正在同步官方历史…',
@@ -11782,6 +11945,9 @@
             }
             const auto = overlay.querySelector('[data-cold-auto]');
             if (auto) auto.disabled = primary || busy;
+            // 默认保存目录：不支持 File System Access API 的环境里，“选择目录”始终禁用。
+            const dirPick = overlay.querySelector('[data-backup-dir-pick]');
+            if (dirPick) dirPick.disabled = busy || !StorageApi._nativeDirectoryPicker();
             // ── DB 主存模式下的联动置灰 ──
             // 主存模式的语义是“不再有热层、冷库就是当前库”，与归档/查冷库相关的控件因此无效：
             // 置灰 + 写明原因，而不是让用户点下去才发现不生效。
@@ -11969,6 +12135,8 @@
                             <p class="bvh-setting-note">导出完整备份：把热层与全部冷库合并成一份 JSON，可登记为“已备份”，也是唯一能让清理生效的导出。范围选“只导出油猴存储”时只包含热层记录，冷库里的记录不会被导出、也不会被放行为可清理。<br>导出热层 CSV：只展开油猴热层里的记录。DB 主存模式下热层就是当前库，内容与“导出全部 CSV”完全相同，因此该按钮会置灰，请直接用“导出全部 CSV”。<br>导出全部 CSV：把热层与所有冷库合并后展开，已归档的记录也会出现在表里，用于整体核对。<br>两者都只读不写，不会登记为备份，也不会放行清理。</p>导入到当前存储：按同键取较新的规则合并进当前记录，不覆盖更新的本地记录；无法确认归属的番剧分集会被跳过。<br>导入到冷库（在“冷库与存储”组）：只写进一个冷库，不合并到当前记录，用来单独保存一份外部备份。<br>同步官方历史：按“记录与保留”里的同步页数读取官方历史页并合并到本地，不会删除本地已有记录；离开历史页时该操作无效。</p>
                             <label class="bvh-setting-row"><span>导出范围 <small title="只导出所选类型的记录。只导出油猴存储：跳过已归档进冷库的记录，适合只想备份热层的情况。范围外的记录不会被登记为已备份，清理时也不会被删除。">ⓘ</small></span><select data-backup-scope><option value="all">全部记录</option><option value="video">只要视频</option><option value="bangumi">只要番剧</option><option value="live">只要直播</option><option value="collection">只要合集</option><option value="gm">只导出油猴存储</option></select></label>
                             <label class="bvh-setting-row"><span>时间范围 <small title="留空表示不限。只导出在该时间段内有观看记录的条目；合集按分集的最早/最晚时间判断。">ⓘ</small></span><span class="bvh-setting-date-range"><input type="date" data-backup-since aria-label="导出起始日期"><input type="date" data-backup-until aria-label="导出结束日期"></span></label>
+                            <div class="bvh-setting-row"><span>默认保存目录 <small title="选定一个目录后，之后每次导出都直接写进这里，不再弹保存对话框；目录授权只保存在本机浏览器，不会上传。">ⓘ</small></span><span class="bvh-backup-dir"><b data-backup-dir-name>未设置</b><button type="button" data-backup-dir-pick>选择目录</button><button type="button" data-backup-dir-clear>清除</button></span></div>
+                            <p class="bvh-setting-note" data-backup-dir-note>设置默认目录后，导出会自动写进该目录，写入完成（close() 返回）才算成功并自动登记，不再需要你点确认；目录被系统收回权限时会自动退回系统保存对话框。清除后恢复成“每次选择保存位置”。</p>
                             <div class="bvh-backup-state">
                                 <p class="bvh-setting-note">保存方式按浏览器能力自动选择：①系统保存对话框（写入完成才返回成功）；②GM_download（下载完成回调才算成功，首次会问是否允许下载）；③普通下载（脚本拿不到结果，只能由你点“我已确认文件已保存”）。前两种成功即自动登记。</p>
                                 <p class="bvh-setting-note" data-backup-state-text>还没有已确认保存的备份。清理过期记录前需要先完成一次。</p>
@@ -12400,6 +12568,7 @@
 
         // 三种保存方式对用户的含义不同，统一在这里翻译成人话，避免只显示内部标识。
         const backupMethodLabel = method => ({
+            default_dir: '默认保存目录（已校验写入）',
             picker: '系统保存对话框（已校验写入）',
             gm_download: 'GM_download（下载完成已确认）',
             download: '手动确认下载'
@@ -12436,6 +12605,28 @@
             SettingsOperations.sync(overlay);
         };
 
+        // 默认保存目录的状态行：目录名 + 权限是否还有效；不支持目录选择的浏览器直接把“选择目录”置灰。
+        const dirNameText = overlay.querySelector('[data-backup-dir-name]');
+        const dirPickButton = overlay.querySelector('[data-backup-dir-pick]');
+        const dirClearButton = overlay.querySelector('[data-backup-dir-clear]');
+        const renderDirState = async () => {
+            const support = !!StorageApi._nativeDirectoryPicker();
+            let info = { configured: false, name: '', granted: false };
+            try { info = await StorageApi.readDefaultBackupDirInfo(); } catch (error) { console.debug('[BVH] 读取默认目录状态失败', error); }
+            if (dirNameText) {
+                dirNameText.textContent = info.configured
+                    ? `📁 ${info.name || '已授权目录'}${info.granted ? '' : '（权限失效，下次导出需重新确认）'}`
+                    : '未设置：每次导出都会弹出保存位置';
+            }
+            if (dirPickButton) {
+                dirPickButton.disabled = !support;
+                dirPickButton.title = support
+                    ? '选择一个固定目录，之后导出直接写进去，不再弹保存对话框。'
+                    : '当前浏览器不支持目录选择（需要 File System Access API），只能每次选择保存位置。';
+            }
+            if (dirClearButton) dirClearButton.disabled = !info.configured;
+        };
+
         const readBackupScope = () => {
             const rawKind = overlay.querySelector('[data-backup-scope]')?.value || 'all';
             // 主存模式下“只导出油猴存储”已无意义（记录都在库里），按全量处理。
@@ -12465,11 +12656,35 @@
             if (backupStateText) backupStateText.textContent = save.message;
         };
 
+        // 选目录必须在点击手势内完成，所以整个动作放在 SettingsOperations.run 里立即发起。
+        SettingsOperations.bind(dirPickButton, 'click', () => SettingsOperations.run(overlay, 'dir-pick', async () => {
+            try {
+                const handle = await StorageApi.pickDefaultBackupDir();
+                if (!handle) return;
+                await renderDirState();
+                renderBackupState();
+                if (backupStateText) backupStateText.textContent = `默认保存目录已设为「${handle.name}」：之后导出直接写进该目录，写入完成即自动登记，不再弹保存对话框。`;
+            } catch (error) {
+                if (backupStateText) backupStateText.textContent = `设置默认保存目录失败：${error?.message || error}`;
+            }
+        }));
+
+        SettingsOperations.bind(dirClearButton, 'click', () => SettingsOperations.run(overlay, 'dir-clear', async () => {
+            try {
+                await StorageApi.clearDefaultBackupDir();
+                await renderDirState();
+                renderBackupState();
+                if (backupStateText) backupStateText.textContent = '已清除默认保存目录：之后导出恢复为每次选择保存位置。';
+            } catch (error) {
+                if (backupStateText) backupStateText.textContent = `清除默认保存目录失败：${error?.message || error}`;
+            }
+        }));
+
         SettingsOperations.bind(overlay.querySelector('[data-backup-export]'), 'click', () => SettingsOperations.run(overlay, 'export', async () => {
             const scope = readBackupScope();
-            // 先取句柄：系统保存对话框必须在点击后的手势窗口内打开，而生成备份可能耗时数秒。
-            const { handle, cancelled } = await StorageApi.requestBackupHandle(StorageApi._backupFileName(scope));
-            if (cancelled) {
+            // 先定目标：已记住的目录一次授权后静默写入；没有才在手势内弹系统保存对话框。
+            const target = await StorageApi.requestBackupTarget(StorageApi._backupFileName(scope));
+            if (target.cancelled) {
                 renderBackupState();
                 if (backupStateText) backupStateText.textContent = '已取消保存，未生成备份，也没有登记任何记录。';
                 return;
@@ -12481,7 +12696,7 @@
                 if (backupStateText) backupStateText.textContent = error.message;
                 return;
             }
-            finishBackupFlow(prep, await StorageApi.saveBackupVerified(prep, handle, { pickerTried: true }));
+            finishBackupFlow(prep, await StorageApi.saveBackupVerified(prep, target.handle, { dir: target.dir, pickerTried: true }));
         }));
 
         // 系统保存对话框需要新的用户手势，所以单独一个按钮触发，避免生成过程耗尽激活窗口。
@@ -12818,6 +13033,7 @@
         overlay.style.display = 'flex';
         SettingsOperations.sync(overlay);
         renderBackupState();
+        renderDirState();
         renderErrorLog();
         refreshColdDatabaseInfo();
     }

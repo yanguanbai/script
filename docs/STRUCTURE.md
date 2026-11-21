@@ -84,9 +84,12 @@
 
 | 档 | 判定依据 | 结果 | 备注 |
 |---|---|---|---|
+| `default_dir` | `getFileHandle` → `createWritable` → `write` → `close()` 完整返回 | `ok`，自动登记 | 需先在设置页记住目录（`BackupDirStore`）；一次授权后不再弹任何对话框；失败记 E2010 并继续降级 |
 | `picker` | `createWritable` + `close()` 完整返回 | `ok`，自动登记 | 需要点击手势；调用方应先 `requestBackupHandle`；沙箱里必须用真实窗口调用（`_nativeSaveFilePicker` / `_openSavePicker`），否则报 Illegal invocation |
 | `gm_download` | `GM_download` 的 `onload` 回调 | `ok`，自动登记 | 需要 `@grant GM_download`；首次使用浏览器会问"允许下载" |
 | `download` | 只有 `a.click()`，拿不到任何结果 | `pending` + E2004 | 必须由用户点"我已确认文件已保存" |
+
+**默认保存目录（5.10.30 起）**：`requestBackupTarget(filename)` 是导出入口统一的第一步——有已记住的目录就授权后直接写入，没有才在点击手势内弹系统保存对话框。目录句柄存在独立小库 `bvh-backup-dir-v1`（store `handles`，key `default`），**绝不与冷库共库**，避免升版本把现有冷库判成失联。句柄本身不可序列化，清除即 `BackupDirStore.clear()`；权限被收回（`queryPermission` 非 granted）时自动退回系统对话框，界面在目录名后标"权限失效"。
 
 `opts.pickerTried=true` 表示调用方已弹过保存对话框，避免重复弹第二个。
 `GM_download` 走 `data:` URL（不用 `blob:`，内置下载器解析 blob 不稳定）；90 秒内既无 `onload` 也无 `onerror` 则以 E2007 收口，避免设置页永久卡在忙碌状态。
@@ -136,7 +139,7 @@ DB 主存模式下热层就是当前库，两条出口内容一致，`data-backu
 | 段 | 范围 | 典型码 |
 |---|---|---|
 | E1xxx | 导入 | E1001 非 JSON、E1002 顶层非对象、E1101 字段无法识别、E1201 合集身份冲突、E1202 回读不一致 |
-| E2xxx | 备份导出 | E2001 非历史页、E2002 主存库不可用、E2003 用户取消、E2004 保存未确认、E2006 生成失败 |
+| E2xxx | 备份导出 | E2001 非历史页、E2002 主存库不可用、E2003 用户取消、E2004 保存未确认、E2005 浏览器拒绝写入、E2006 生成失败、E2007 等待下载结果超时、E2008 GM_download 失败、E2009 下载被拦截、E2010 写入默认目录失败、E2011 不支持选择目录、E2012 默认目录无写权限 |
 | E3xxx | 存储 | E3002 写入校验失败、E3003 冷库失联、E3004 版本不兼容 |
 | E4xxx | 冷库归档 | E4001 冷库导入失败、E4002 归档中断、E4003 移除旧库登记失败 |
 | E5xxx | 维护工具 | E5001 迁移未完成、E5002 归并失败、E5003 身份修复失败 |
@@ -156,7 +159,7 @@ DB 主存模式下热层就是当前库，两条出口内容一致，`data-backu
 | 观看去重 | `bvh-group-dedup` | 判定方式、时间差上限、进度差上限 |
 | 记录与保留 | `bvh-group-retain` | 过期天数、同步页数、快照条数、来源配额、短观看阈值 / 保留天数 |
 | 冷库与存储 | `bvh-group-cold` | 归档年龄 / 周期 / 开关、无结果查冷库、删空白库、立即归档、冷库清单、导入到冷库 |
-| 数据导入导出 | `bvh-group-transfer` | 导出完整备份（含范围与时间筛选）、导出热层 CSV、导出全部 CSV、导入到当前存储、同步官方历史、备份确认闸门 |
+| 数据导入导出 | `bvh-group-transfer` | 导出完整备份（含范围、时间筛选与默认保存目录）、导出热层 CSV、导出全部 CSV、导入到当前存储、同步官方历史、备份确认闸门 |
 | 维护工具 | `bvh-group-maint` | 重置次数、归并单集、修复身份、迁移到合集容器、清理过期、清理短观看、清空全部 |
 | 运行日志 | `bvh-group-log` | 错误码归类、复制全部、清空日志 |
 
@@ -238,3 +241,4 @@ git diff --ignore-all-space -U0 | Select-String '^-[^-]'     # 结构类改动�
 - 普通下载档（`<a download>`）无法确认保存，只能靠用户在设置页点"我已确认文件已保存"。
   已提供 `GM_download` 档做真检测；若管理器不支持，仍会落到这一档。
 - 启动自动修复 `repairAndCleanLocalRecords` 仍然在写回前不做备份，只在 GM 模式生效。
+- 默认保存目录只做过静态校验与单元测试：`showDirectoryPicker({ id })` 是否被各浏览器接受、以及 `requestPermission` 在 `await` 之后是否仍处于点击手势窗口内，需要在真实浏览器里手测确认。

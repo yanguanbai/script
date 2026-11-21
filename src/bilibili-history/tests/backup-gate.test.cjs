@@ -226,5 +226,58 @@ const record = (title, watchCount = 2, when = Date.now() - 100 * dayMs) => ({
   assert.equal(records.has(EXPORTED_KEY), false, 'CSV export never registers a backup');
   console.log('hot CSV export stays read-only');
 
+  // 13) 默认保存目录：直接写进已授权目录，close() 完成才算成功，方法记为 default_dir。
+  const writableDir = (state = { closed: false }) => ({
+    name: '备份目录',
+    async getFileHandle(fileName) {
+      state.fileName = fileName;
+      return {
+        name: fileName,
+        async createWritable() {
+          return {
+            async write(blob) { state.bytes = blob.size ?? String(blob).length; },
+            async close() { state.closed = true; }
+          };
+        }
+      };
+    }
+  });
+  records.clear();
+  records.set('BVGATE00009', record('默认目录保存', 1));
+  let dirState = { closed: false };
+  StorageApi._resolveDefaultBackupDir = async () => writableDir(dirState);
+  const dirTarget = await StorageApi.requestBackupTarget('默认目录.json');
+  assert.equal(dirTarget.viaDefaultDir, true, 'a saved directory is preferred over the save dialog');
+  assert.equal(dirTarget.handle, null, 'no save dialog is opened when the directory is already remembered');
+  const dirPrep = await StorageApi.prepareFullBackup();
+  const dirSave = await StorageApi.saveBackupVerified(dirPrep, dirTarget.handle, { dir: dirTarget.dir, pickerTried: true });
+  assert.equal(dirSave.ok, true, 'writing into the remembered directory counts as saved');
+  assert.equal(dirSave.method, 'default_dir');
+  assert.equal(dirState.closed, true, 'success is only reported after close() resolved');
+  assert.ok(dirState.fileName.endsWith('.json'), 'the backup goes into the remembered directory under the prepared name');
+  console.log('the remembered directory saves without any dialog');
+
+  // 14) 目录写入失败：记 E2010，不登记备份，并继续走后面的降级档。
+  records.clear();
+  records.set('BVGATE00010', record('目录写入失败', 1));
+  StorageApi._resolveDefaultBackupDir = async () => ({ name: '只读目录', async getFileHandle() { throw new Error('NotAllowedError'); } });
+  const failPrep = await StorageApi.prepareFullBackup();
+  const failTarget = await StorageApi.requestBackupTarget('失败.json');
+  const failSave = await StorageApi.saveBackupVerified(failPrep, failTarget.handle, { dir: failTarget.dir, pickerTried: true });
+  assert.equal(failSave.ok, false, 'a failed directory write is not a confirmed save');
+  assert.equal(failSave.pending, true, 'the flow degrades to the next save channel');
+  assert.equal(records.has(EXPORTED_KEY), false, 'nothing is registered when the directory write failed');
+  assert.equal(ErrorLog.read().some(entry => entry.code === 'E2010'), true, 'directory write failures are logged as E2010');
+  console.log('a failed directory write falls back without registering');
+
+  // 15) 完整链路：默认目录写成功后自动登记，确认信息里记录 default_dir。
+  records.clear();
+  records.set('BVGATE00011', record('默认目录自动登记', 1));
+  StorageApi._resolveDefaultBackupDir = async () => writableDir({ closed: false });
+  assert.equal(await StorageApi.exportAllRecords(), true, 'exportAllRecords succeeds through the remembered directory');
+  assert.equal(records.get(CONFIRM_KEY)?.method, 'default_dir', 'confirm metadata records the directory channel');
+  assert.ok(records.get(EXPORTED_KEY)?.BVGATE00011, 'records are marked as backed up');
+  console.log('exportAllRecords auto-registers after a directory write');
+
   console.log('backup confirmation gate checks passed');
 })().catch(error => { console.error(error); process.exit(1); });
