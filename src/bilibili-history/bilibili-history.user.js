@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频观看历史记录 可回溯具体时间
 // @namespace    Bilibili-video-History-Pro
-// @version      5.10.30
+// @version      5.10.31
 // @description  本地记录 B 站观看历史；完善番剧分季导入合并与分集过期清理。
 // @author       Bart
 // @match        https://www.bilibili.com/
@@ -27,6 +27,8 @@
 // @downloadURL  https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // @updateURL    https://raw.githubusercontent.com/yanguanbai/script/main/src/bilibili-history/bilibili-history.user.js
 // ==/UserScript==
+// 5.10.31：新增“退出主存模式”——当前主库整份转为归档库、油猴热层从零开始记录，不复制也不合并任何记录；
+//          进入与退出 DB 主存模式都改为设置页内三步确认，逐步写清会发生什么、之后怎么用、哪些入口会失效。
 // 5.10.30：备份可记住一个默认保存目录——选一次后每次导出直接写进该目录、不再弹保存对话框；
 //          写入仍以 createWritable().close() 完成为唯一成功判据，写完即自动登记；目录权限被收回时退回系统对话框。
 // 5.10.29：DB 主存模式下“导出热层 CSV”与“导出全部 CSV”内容相同，热层入口置灰并指向全部 CSV。
@@ -193,6 +195,8 @@
     const COLD_ARCHIVE_RUN_KEY = 'bvh_cold_archive_last_run_v1';
     const COLD_PRIMARY_MODE_KEY = 'bvh_cold_primary_mode_v1';
     const COLD_PRIMARY_DB_KEY = 'bvh_cold_primary_database_v1';
+    // 启用主存前记下原来的归档年龄 / 归档目标，供“退出主存模式”原样恢复。
+    const COLD_PRIMARY_PREV_KEY = 'bvh_cold_primary_prev_v1';
     const COLD_WRITE_QUEUE_KEY = 'bvh_cold_cross_origin_write_queue_v1';
     // 最近一次"已确认保存"的备份信息（时间/文件名/条数/保存方式）；只用于界面呈现，不参与记录判定。
     const BACKUP_CONFIRM_KEY = 'bvh_backup_confirm_v1';
@@ -4331,6 +4335,12 @@
                 }
                 GMNative.setValue(COLD_PRIMARY_DB_KEY, targetId);
                 const settings = GMNative.getValue(COLD_ARCHIVE_SETTINGS_KEY, {}) || {};
+                // 先留一份“迁移前的归档设置”，否则退出主存模式时无从知道该恢复成多少天。
+                GMNative.setValue(COLD_PRIMARY_PREV_KEY, {
+                    ageDays: Math.max(1, Number(settings.ageDays) || 30),
+                    targetId: settings.targetId || '',
+                    savedAt: Date.now()
+                });
                 GMNative.setValue(COLD_ARCHIVE_SETTINGS_KEY, { ...settings, ageDays: 0, targetId, updatedAt: Date.now() });
                 GMNative.setValue(COLD_PRIMARY_MODE_KEY, true);
                 CONFIG.COLD_PRIMARY_MODE = true;
@@ -4361,6 +4371,107 @@
             // 保留旧库恢复副本；主存完整备份仅使用指定权威主库。
             return { count: merged.size, targetId };
         },
+        // 退出前的只读盘点：只看不写，任何一条读不全就返回 ok=false。
+        // identical = GM 残留但内容与冷库逐字节相同的键（可以安全清掉）；
+        // keepOnly   = 只存在于 GM 的键（切回后就是热层记录，原样保留）；
+        // conflict   = 同键但内容不同（此时切回会在热层/冷库各留一份不一致的副本，必须拒绝）。
+        async preparePrimaryExit() {
+            if (!this._isDatabaseOrigin()) return { ok: false, reason: '请到 B 站历史页面执行这个操作' };
+            if (!this.isPrimaryMode()) return { ok: false, reason: '当前不在 DB 主存模式，不需要退出' };
+            await ColdArchiveStore.reconcileDirectory();
+            await Promise.all([...this._pendingWrites.values()]);
+            const queued = Object.keys(this._queue()).filter(key => RecordKey.isRecordKey(key));
+            if (queued.length) {
+                return { ok: false, reason: `还有 ${queued.length} 条写入没完成落盘（${queued.slice(0, 3).join('、')}${queued.length > 3 ? '…' : ''}），请稍后重试` };
+            }
+            const primaryId = GMNative.getValue(COLD_PRIMARY_DB_KEY, '');
+            const meta = primaryId && ColdArchiveStore.getMeta(primaryId);
+            if (!meta) return { ok: false, reason: '找不到当前主库，无法把它登记为归档库' };
+            const rows = await ColdArchiveStore.readRecords(primaryId);
+            const cold = new Map(rows.map(row => [row.key, row.data]));
+            const identical = [];
+            const keepOnly = [];
+            const conflict = [];
+            for (const key of GMNative.listValues().filter(RecordKey.isRecordKey)) {
+                const raw = GMNative.getValue(key, null);
+                if (raw === null) continue;
+                if (!cold.has(key)) { keepOnly.push(key); continue; }
+                if (JSON.stringify(cold.get(key)) === JSON.stringify(raw)) identical.push(key);
+                else conflict.push(key);
+            }
+            return { ok: true, primaryId, dbName: meta.name, count: cold.size, identical, keepOnly, conflict };
+        },
+
+        // 启用主存前的预估：只读汇总，用来在确认框里写清“要搬多少条”。
+        async previewPrimaryEnable() {
+            if (!this._isDatabaseOrigin()) return { ok: false, reason: '请到 B 站历史页面执行这个操作' };
+            await ColdArchiveStore.reconcileDirectory();
+            const { merged, rawGM } = await this._readMergedRecords();
+            const queued = Object.keys(this._queue()).filter(key => RecordKey.isRecordKey(key));
+            const databases = ColdArchiveStore.list().filter(meta => !meta.unavailable).length;
+            return { ok: true, total: merged.size, gmCount: rawGM.size, coldCount: databases, queued: queued.length };
+        },
+
+        // 退出 DB 主存模式：不搬运任何记录，把当前主库直接当成一份普通冷库，
+        // 热层清空后由 GM 重新开始记录。全程只改开关，不动记录内容。
+        async disablePrimaryMode() {
+            const prep = await this.preparePrimaryExit();
+            if (!prep.ok) throw new Error(prep.reason);
+            if (prep.conflict.length) {
+                throw new Error(`GM 里有 ${prep.conflict.length} 条记录与冷库同名但内容不同（${prep.conflict.slice(0, 3).join('、')}${prep.conflict.length > 3 ? '…' : ''}），` +
+                    '为免产生两份不一致的副本，本次不执行。请先导出完整备份，再手动处理这些记录');
+            }
+            // 盘点与真正落盘之间可能被其他标签页改动，写入前再核一次。
+            const again = await this.preparePrimaryExit();
+            if (!again.ok) throw new Error(again.reason);
+            if (again.conflict.length) throw new Error(`复核时发现 ${again.conflict.length} 条同键不同内容，本次不执行`);
+            const settings = GMNative.getValue(COLD_ARCHIVE_SETTINGS_KEY, {}) || {};
+            const prev = GMNative.getValue(COLD_PRIMARY_PREV_KEY, null) || {};
+            const restoreAge = Math.max(1, Number(prev.ageDays) || 30);
+            const targetId = again.primaryId;
+            // 先写设置、最后才关主存标志：中途失败仍然是主存模式，不会留下“模式已关但库没登记”的半态。
+            GMNative.setValue(COLD_ARCHIVE_SETTINGS_KEY, {
+                ...settings,
+                ageDays: restoreAge,
+                targetId,
+                enabled: settings.enabled === true,
+                updatedAt: Date.now()
+            });
+            GMNative.setValue(COLD_PRIMARY_MODE_KEY, false);
+            GMNative.deleteValue(COLD_PRIMARY_DB_KEY);
+            GMNative.deleteValue(COLD_PRIMARY_PREV_KEY);
+            // 只清掉“与冷库逐字节相同”的残留副本：宁可多留一份热层记录，也不按猜测删。
+            let cleared = 0;
+            for (const key of again.identical) {
+                try {
+                    GMNative.deleteValue(key);
+                    if (GMNative.getValue(key, null) === null) cleared++;
+                } catch (error) { console.warn(`${TAG} GM 残留副本待下次启动清理：${key}`, error); }
+            }
+            CONFIG.COLD_PRIMARY_MODE = false;
+            CONFIG.COLD_ARCHIVE_AGE_DAY = restoreAge;
+            CONFIG.COLD_ARCHIVE_TARGET_ID = targetId;
+            this._activeId = '';
+            this._ready = false;
+            this._degraded = false;
+            this._cache = new Map();
+            // 索引必须丢掉重算：主存模式的索引来自数据库，切回后热层是空的，
+            // 沿用旧索引会让历史面板继续显示已经不在热层里的记录。
+            HistoryViewIndex._index = null;
+            HistoryViewIndex._ready = false;
+            RecordStore._keyIndex = null;
+            refreshOpenHistoryLists();
+            HistoryListRenderer._scheduleStorageLabelUpdate();
+            return {
+                ok: true,
+                count: again.count,
+                cleared,
+                kept: again.keepOnly.length,
+                ageDays: restoreAge,
+                dbName: again.dbName
+            };
+        },
+
         _migrationState: 'idle',
         _migrationPromise: null,
         async enablePrimaryMode() {
@@ -10427,6 +10538,17 @@
             .bvh-backup-dir { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; }
             .bvh-backup-dir b { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; padding:5px 9px; border-radius:8px; background:color-mix(in srgb,var(--bvh-theme-border,#eadfe5) 30%,var(--bvh-theme-card,#fff)); color:var(--bvh-theme-muted,#77717c); font-size:12px; font-weight:600; }
             .bvh-backup-dir button { padding:6px 11px; font-size:12px; }
+            /* 三重确认面板：设置窗口内的独立遮罩，连续三步点击；任何一步取消都不改动任何设置。 */
+            .bvh-triple-mask { position:fixed; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; padding:20px; background:rgba(18,14,22,.55); }
+            .bvh-triple-panel { width:min(560px,100%); max-height:84vh; overflow:auto; padding:20px 22px; border-radius:16px; background:var(--bvh-theme-panel,#fffafd); color:var(--bvh-theme-settings-text,#624b54); box-shadow:0 24px 60px rgba(0,0,0,.28); font-size:13px; }
+            .bvh-triple-panel h5 { margin:0 0 6px; font-size:15px; color:var(--bvh-theme-accent,#fb7299); }
+            .bvh-triple-progress { margin:0 0 12px; font-size:12px; color:var(--bvh-theme-muted,#77717c); }
+            .bvh-triple-body p { margin:0 0 9px; line-height:1.65; }
+            .bvh-triple-body p.bvh-triple-lead { font-weight:700; color:var(--bvh-theme-record-text,#39343a); }
+            .bvh-triple-body p.bvh-triple-warn { padding:8px 10px; border-left:3px solid var(--bvh-theme-accent,#fb7299); border-radius:0 8px 8px 0; background:color-mix(in srgb,var(--bvh-theme-accent,#fb7299) 10%,transparent); }
+            .bvh-triple-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:16px; }
+            .bvh-triple-panel button { padding:8px 14px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:9px; background:var(--bvh-theme-card,#fff); color:inherit; font:inherit; cursor:pointer; }
+            .bvh-triple-panel button.bvh-triple-next { background:var(--bvh-theme-accent,#fb7299); border-color:transparent; color:#fff; font-weight:600; }
             .bvh-backup-state { margin-top:10px; padding:11px 13px; border:1px solid var(--bvh-theme-border,#eadfe5); border-radius:11px; background:color-mix(in srgb,var(--bvh-theme-card,#fff) 86%,transparent); }
             .bvh-backup-state .bvh-setting-note { margin:0 0 8px; }
             .bvh-backup-state .bvh-setting-note:last-child { margin-bottom:0; }
@@ -11878,6 +12000,7 @@
         'export-confirm': '正在核对并登记备份…',
         'dir-pick': '正在设置默认保存目录…',
         'dir-clear': '正在清除默认保存目录…',
+        'exit-primary': '正在把当前库转为归档并退出主存模式…',
         csv: '正在导出热层 CSV…',
         'csv-all': '正在读取全部冷库并导出 CSV，记录较多时需要等待…',
         sync: '正在同步官方历史…',
@@ -11933,7 +12056,15 @@
                 overlay._bvhBusyLocked = false;
             }
             overlay.querySelectorAll('[data-save], .bvh-cold-management button, [data-cold-file]').forEach(el => {
-                el.disabled = busy || (primary && el.hasAttribute('data-cold-archive'));
+                // “立即归档”只在 GM 模式有意义；“退出主存模式”只在主存模式有意义，反向置灰。
+                const archiveOnly = el.hasAttribute('data-cold-archive');
+                const primaryOnly = el.hasAttribute('data-cold-exit-primary');
+                el.disabled = busy || (primary ? archiveOnly : primaryOnly);
+                if (primaryOnly) {
+                    el.title = primary
+                        ? '把当前主库整份转为归档、油猴热层从零开始；执行前连续确认三步。'
+                        : '当前不在 DB 主存模式，无需退出。';
+                }
             });
             for (const id of ['bvh-setting-cold-age', 'bvh-setting-cold-interval']) {
                 const input = overlay.querySelector(`#${id}`);
@@ -11955,7 +12086,7 @@
             if (primaryNote) {
                 primaryNote.hidden = !primary;
                 primaryNote.textContent = primary
-                    ? '当前为 DB 主存模式（归档年龄 = 0）：记录直接写入当前冷库，因此归档年龄、归档周期、自动归档、立即归档、无结果自动查冷库 都已停用；“只导出油猴存储”不可选，“导出热层 CSV”与“导出全部 CSV”内容相同故置灰。冷库清单、导入 JSON 到冷库、导出与清理仍可正常使用。'
+                    ? '当前为 DB 主存模式（归档年龄 = 0）：记录直接写入当前冷库，因此归档年龄、归档周期、自动归档、立即归档、无结果自动查冷库 都已停用；“只导出油猴存储”不可选，“导出热层 CSV”与“导出全部 CSV”内容相同故置灰。冷库清单、导入 JSON 到冷库、导出与清理仍可正常使用。想回到油猴存储，可用下方“退出主存模式”：当前库整份转为归档、热层从零开始。'
                     : '';
             }
             overlay.querySelectorAll('.bvh-setting-row:has(input:disabled)').forEach(row => row.setAttribute('aria-disabled', 'true'));
@@ -12014,6 +12145,71 @@
             await new Promise(resolve => setTimeout(resolve, ms));
         }
     };
+
+    // ── 三重确认面板：设置窗口内的三步确认（进入/退出 DB 主存模式这类高风险操作共用）──
+    // 为什么不用连续三个 window.confirm：浏览器在连续弹窗后会给出“阻止此页面创建更多对话框”，
+    // 第二步会被静默吞掉，三重确认就形同虚设。这里改成设置窗口内的三步面板：
+    // 每步都要用户主动点“继续”，任何一步点“取消”都整体放弃、不改动任何设置或数据。
+    // steps: [{ heading?, lines: string[], confirm? }]；以 ! / ！开头的行按“风险提示”样式渲染。
+    function openTripleConfirm(overlay, { title, steps }) {
+        return new Promise(resolve => {
+            const mask = document.createElement('div');
+            mask.className = 'bvh-triple-mask';
+            const panel = document.createElement('section');
+            panel.className = 'bvh-triple-panel';
+            panel.setAttribute('role', 'dialog');
+            panel.setAttribute('aria-modal', 'true');
+            panel.setAttribute('aria-label', title);
+            const heading = document.createElement('h5');
+            heading.textContent = title;
+            const progress = document.createElement('p');
+            progress.className = 'bvh-triple-progress';
+            const body = document.createElement('div');
+            body.className = 'bvh-triple-body';
+            const actions = document.createElement('div');
+            actions.className = 'bvh-triple-actions';
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = 'bvh-triple-cancel';
+            cancel.textContent = '取消，什么都不做';
+            const next = document.createElement('button');
+            next.type = 'button';
+            next.className = 'bvh-triple-next';
+            actions.append(cancel, next);
+            panel.append(heading, progress, body, actions);
+            mask.appendChild(panel);
+            // 面板挂在设置窗口内部：遮罩跟随窗口层级，关闭窗口时一起消失，不会留在页面上。
+            overlay.appendChild(mask);
+            let index = 0;
+            const paint = () => {
+                const step = steps[index] || {};
+                progress.textContent = `第 ${index + 1} 步 / 共 ${steps.length} 步`;
+                body.textContent = '';
+                if (step.heading) {
+                    const lead = document.createElement('p');
+                    lead.className = 'bvh-triple-lead';
+                    lead.textContent = step.heading;
+                    body.appendChild(lead);
+                }
+                (step.lines || []).forEach(line => {
+                    const warn = /^[!！]/.test(line);
+                    const p = document.createElement('p');
+                    if (warn) p.className = 'bvh-triple-warn';
+                    p.textContent = warn ? line.replace(/^[!！]\s*/, '') : line;
+                    body.appendChild(p);
+                });
+                next.textContent = step.confirm || '继续';
+            };
+            const finish = value => { mask.remove(); resolve(value); };
+            cancel.addEventListener('click', () => finish(false));
+            next.addEventListener('click', () => {
+                if (index < steps.length - 1) { index += 1; paint(); next.focus(); return; }
+                finish(true);
+            });
+            paint();
+            next.focus();
+        });
+    }
 
     // ── 界面构造与表单同步：菜单只负责数据维护，窗口参数统一在这里生成 ──
     // 【模块 M34 · 界面层：脚本内设置窗口 UI】
@@ -12105,8 +12301,8 @@
                         </div>
                         <div class="bvh-setting-group" id="bvh-group-cold"><h4>冷库与存储</h4>
                             <p class="bvh-setting-note bvh-primary-note" data-primary-note hidden></p>
-                            <p class="bvh-setting-note">这一组管理 IndexedDB 冷库。归档会把超过“归档年龄”的记录从油猴热层搬进冷库，热层不再保留副本；归档年龄设为 0 会把全部记录迁入冷库并永久启用 DB 主存模式，无法切回。导出与导入在下一组，这里只负责归档与库本身。</p>
-                            <label class="bvh-setting-row"><span>归档年龄 <b id="bvh-setting-cold-age-value"></b><small title="大于 0 天时，旧记录从 GM 迁入 IndexedDB。设为 0 会把所有记录迁入 IndexedDB 并永久启用 DB 主存模式，无法切回 GM；开始前会再次确认。建议值：30 天。">ⓘ</small></span><input id="bvh-setting-cold-age" type="range" min="0" max="180" step="1"></label>
+                            <p class="bvh-setting-note">这一组管理 IndexedDB 冷库。归档会把超过“归档年龄”的记录从油猴热层搬进冷库，热层不再保留副本；归档年龄设为 0 会启用 DB 主存模式（全部记录只写数据库、更快也更省油猴存储）。该模式可以用下面的“退出主存模式”回到油猴存储：当前库整份转为归档，热层从零开始记录。导出与导入在下一组，这里只负责归档与库本身。</p>
+                            <label class="bvh-setting-row"><span>归档年龄 <b id="bvh-setting-cold-age-value"></b><small title="大于 0 天时，旧记录从 GM 迁入 IndexedDB。设为 0 会启用 DB 主存模式（全部记录只写数据库），开始前会连续确认三步；之后可用“退出主存模式”回到油猴存储。建议值：30 天。">ⓘ</small></span><input id="bvh-setting-cold-age" type="range" min="0" max="180" step="1"></label>
                             <label class="bvh-setting-row"><span>自动归档周期 <b id="bvh-setting-cold-interval-value"></b><small title="history 页面按周期检查并归档达到年龄的记录；检查周期从上次成功检查后计算。建议值：7 天。年龄设为 0 后不再归档。">ⓘ</small></span><input id="bvh-setting-cold-interval" type="range" min="1" max="90" step="1"></label>
                             <label class="bvh-setting-row"><span>自动归档 <small title="开启后按上方周期在打开 history 页面时执行；年龄为 0 的 DB 主存模式不需归档。">ⓘ</small></span><input type="checkbox" class="bvh-toggle-input" data-cold-auto><span class="bvh-toggle-track" aria-hidden="true"></span></label>
                             <label class="bvh-setting-row"><span>无结果自动查冷库 <small title="开启后，只有搜索词未命中油猴热层记录时才扫描 IndexedDB。会增加这类搜索的等待时间；本地记录较少时建议开启。">ⓘ</small></span><input type="checkbox" class="bvh-toggle-input" data-cold-search-auto><span class="bvh-toggle-track" aria-hidden="true"></span></label>
@@ -12114,8 +12310,10 @@
                                 <button type="button" data-cold-delete-empty>删除空白冷库</button>
                                 <button type="button" data-cold-archive>立即归档</button>
                                 <button type="button" data-cold-import>导入 JSON 到冷库</button>
+                                <button type="button" data-cold-exit-primary>退出主存模式（当前库转为归档）</button>
                                 <input type="file" accept=".json,application/json" data-cold-file hidden>
                                 <p class="bvh-setting-note" data-cold-status>脚本自动识别并复用冷库；新观看记录保存在油猴热层，达到年龄的记录自动归档。</p>
+                                <p class="bvh-setting-note" data-cold-exit-note>“退出主存模式”只在 DB 主存模式下可用：它不复制、不合并任何记录，直接把当前主库当作一份普通冷库登记为归档目标，油猴热层清空后重新开始记录。退出后历史面板暂时看不到旧记录，需要到冷库里查；冷库里的记录也不再按“长期记录过期天数”自动清理。执行前会连续确认三步。</p>
                                 <div class="bvh-cold-inventory">
                                     <div class="bvh-cold-inventory-header"><strong>已识别的冷库</strong><button type="button" data-cold-refresh>刷新数据库信息</button></div>
                                     <div data-cold-databases aria-live="polite">正在等待数据库扫描。</div>
@@ -12193,82 +12391,147 @@
                 if (tooltip) tooltip.hidden = true;
             }
         });
-        overlay.querySelector('[data-save]').addEventListener('click', () => SettingsOperations.run(overlay, 'save', async function saveSettings() {
-            const get = id => Number(overlay.querySelector(`#${id}`).value);
-            const requestedColdAge = StorageRouter.isPrimaryMode() ? 0 : get('bvh-setting-cold-age');
+        // 保存按钮：如果用户把归档年龄拖到 0，先在设置窗口内走完三步确认，再进入真正的保存流程。
+        // 确认放在 run 之前，是因为 run 会挂上全屏忙碌遮罩并锁住所有控件，面板就没法点了。
+        overlay.querySelector('[data-save]').addEventListener('click', async () => {
+            const ageInput = overlay.querySelector('#bvh-setting-cold-age');
+            const requestedColdAge = StorageRouter.isPrimaryMode() ? 0 : Number(ageInput?.value);
             if (requestedColdAge === 0 && !CONFIG.COLD_PRIMARY_MODE) {
-                if (!confirm('不可逆操作：这会把现有记录迁入 IndexedDB，并在核验成功后删除 GM 中的记录副本。完成后不能切回 GM 存储。迁移失败时原数据会保留。确定开始吗？')) return;
-                const saveButton = overlay.querySelector('[data-save]');
                 const status = overlay.querySelector('[data-cold-status]');
-                saveButton.disabled = true;
-                if (status) status.textContent = '正在迁移并核验记录；完成前请勿关闭此页面。';
-                try {
-                    const result = await StorageRouter.enablePrimaryMode();
-                    if (status) status.textContent = `DB 主存模式已永久启用：${result.count} 条记录已迁移并核验。`;
-                    const ageControl = overlay.querySelector('#bvh-setting-cold-age');
-                    if (ageControl) ageControl.disabled = true;
-                    const intervalControl = overlay.querySelector('#bvh-setting-cold-interval');
-                    if (intervalControl) intervalControl.disabled = true;
-                    const autoArchiveControl = overlay.querySelector('[data-cold-auto]');
-                    if (autoArchiveControl) autoArchiveControl.disabled = true;
-                    // 迁移成功后，界面立刻按主存模式重新置灰，不必等再次打开设置窗口。
-                    SettingsOperations.sync(overlay);
-                    if (status) status.textContent = `DB 主存模式已永久启用：${result.count} 条记录已迁移并核验；归档相关设置已置灰。`;
-                } catch (error) {
-                    if (status) status.textContent = `迁移未完成，原存储模式与源记录保留：${error.message}`;
-                    alert(`DB 主存迁移失败，GM 中的原记录已保留：${error.message}`);
+                let preview;
+                try { preview = await StorageRouter.previewPrimaryEnable(); }
+                catch (error) {
+                    if (status) status.textContent = `无法开始迁移，未做任何改动：${error.message}`;
+                    return;
+                }
+                if (!preview.ok) {
+                    if (status) status.textContent = preview.reason;
+                    return;
+                }
+                const ok = await openTripleConfirm(overlay, {
+                    title: '启用 DB 主存模式（全部记录只写数据库）',
+                    steps: [
+                        {
+                            heading: '第 1 步：这次要做什么',
+                            lines: [
+                                `会把当前 ${preview.total} 条记录汇总成一个 IndexedDB 主库（油猴存储里 ${preview.gmCount} 条、已有 ${preview.coldCount} 个冷库里 ${Math.max(0, preview.total - preview.gmCount)} 条量级）。`,
+                                '每一条都会写进数据库后再读回来逐字比对；只要有一条对不上，迁移就中止，油猴存储里的原记录一条都不会删。',
+                                preview.queued
+                                    ? `!还有 ${preview.queued} 条写入正在等待落盘，它们会先并入再迁移；迁移期间请勿关闭页面。`
+                                    : '迁移期间请勿关闭页面；整个过程不联网、不上传。',
+                                '核验全部通过后，脚本才会启用主存模式，并把油猴存储里的记录副本删掉。'
+                            ],
+                            confirm: '我看明白了，继续'
+                        },
+                        {
+                            heading: '第 2 步：启用之后会变成什么样',
+                            lines: [
+                                '历史面板改为从数据库读取，看到的内容不变（同样的记录、同样的次数和快照）。',
+                                '!归档年龄、自动归档周期、自动归档、立即归档会置灰：主存模式下记录本来就直接写在数据库里，没有“热层要搬进冷库”这回事。',
+                                '!“只导出油猴存储”这个范围会不可选（热层已没有记录）；“导出热层 CSV”与“导出全部 CSV”内容相同，前者置灰。',
+                                '!完整备份只读取这个主存库；其它旧的冷库副本不再参与完整备份，需要时请单独导出或先清理。',
+                                '!以后想回到油猴存储：用下面的“退出主存模式”。退出后旧记录整份留在冷库、热层从零开始，历史面板要“查冷库”才看得到它们——这和迁移前的热层/冷库分布并不相同。',
+                                '长期记录过期清理仍然可用，只是删的是数据库里的记录；删除前依旧要求已确认备份。'
+                            ],
+                            confirm: '这些后果我接受，继续'
+                        },
+                        {
+                            heading: '第 3 步：最后确认',
+                            lines: [
+                                `即将执行：写入主库并逐条核验 ${preview.total} 条记录 → 启用 DB 主存模式 → 删除油猴存储里的旧副本。`,
+                                '!迁移失败时脚本会保留原存储模式与全部原记录，并在设置页写明失败原因。',
+                                '确认后开始执行，期间不要刷新或关闭这个页面。'
+                            ],
+                            confirm: '确认迁移并启用 DB 主存模式'
+                        }
+                    ]
+                });
+                if (!ok) {
+                    // 取消时把滑块退回到原来的有效值，避免界面继续显示 0 造成误解。
+                    if (ageInput) {
+                        ageInput.value = String(Math.max(1, Number(CONFIG.COLD_ARCHIVE_AGE_DAY) || 30));
+                        ageInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                    if (status) status.textContent = '已取消启用 DB 主存模式，存储模式与全部记录保持原样。';
                     return;
                 }
             }
-            CONFIG.CONTINUOUS_DEDUP_MODE = overlay.querySelector('#bvh-setting-dedup-mode').value;
-            CONFIG.CONTINUOUS_GAP_MIN = Math.max(1, Math.min(180, Math.round(get('bvh-setting-gap'))));
-            CONFIG.CONTINUOUS_PROGRESS_DELTA = get('bvh-setting-progress');
-            CONFIG.EXPIRE_DAY = get('bvh-setting-expire');
-            CONFIG.EXPIRE_MS = CONFIG.EXPIRE_DAY * 86400000;
-            CONFIG.HISTORY_SYNC_PAGES = get('bvh-setting-pages');
-            CONFIG.RECENT_SNAPSHOT_COUNT = get('bvh-setting-recent');
-            CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA = get('bvh-setting-quota') / 100;
-            CONFIG.SHORT_WATCH_MAX_POS_SEC = get('bvh-setting-short');
-            CONFIG.SHORT_WATCH_EXPIRE_DAY = get('bvh-setting-retention');
-            CONFIG.COLD_ARCHIVE_AGE_DAY = StorageRouter.isPrimaryMode() ? 0 : Math.max(1, requestedColdAge);
-            CONFIG.COLD_ARCHIVE_INTERVAL_DAY = Math.max(1, Math.min(90, get('bvh-setting-cold-interval')));
-            CONFIG.COLD_ARCHIVE_ENABLED = overlay.querySelector('[data-cold-auto]')?.checked === true;
-            CONFIG.COLD_SEARCH_AUTO = overlay.querySelector('[data-cold-search-auto]')?.checked === true;
-            CONFIG.UI_FONT_SIZE = Number(overlay.querySelector('#bvh-setting-font-size').value);
-            const themeState = readColorThemeState();
-            const drafts = overlay._bvhThemeDrafts || themeState.themes;
-            const activePreset = THEME_PRESETS.includes(overlay._bvhThemeActivePreset) ? overlay._bvhThemeActivePreset : themeState.activePreset;
-            const savedThemes = Object.fromEntries(THEME_PRESETS.map(preset => [preset, cloneColorTheme(drafts[preset] || themeState.themes[preset])]));
-            GM_setValue(COLOR_THEME_SETTINGS_KEY, { version: 3, activePreset, themes: savedThemes });
-            const chosenTheme = { ...COLOR_THEMES[activePreset], ...savedThemes[activePreset], preset: activePreset, basePreset: activePreset, mode: activePreset === 'dark' ? 'dark' : 'light' };
-            applyColorTheme(chosenTheme);
-            document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
-            overlay.querySelector('.bvh-settings-dialog').style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
-            const now = Date.now();
-            RecordStore.set(CONTINUOUS_GAP_SETTINGS_KEY, { minutes: CONFIG.CONTINUOUS_GAP_MIN, updatedAt: now });
-            RecordStore.set(CONTINUOUS_PROGRESS_SETTINGS_KEY, { delta: CONFIG.CONTINUOUS_PROGRESS_DELTA, updatedAt: now });
-            RecordStore.set(CONTINUOUS_MODE_SETTINGS_KEY, { mode: CONFIG.CONTINUOUS_DEDUP_MODE, updatedAt: now });
-            RecordStore.set(EXPIRE_SETTINGS_KEY, { days: CONFIG.EXPIRE_DAY, updatedAt: now });
-            RecordStore.set(HISTORY_SYNC_SETTINGS_KEY, { pages: CONFIG.HISTORY_SYNC_PAGES, updatedAt: now });
-            RecordStore.set(RECENT_SNAPSHOT_SETTINGS_KEY, { count: CONFIG.RECENT_SNAPSHOT_COUNT, updatedAt: now });
-            RecordStore.set(RECENT_SNAPSHOT_QUOTA_SETTINGS_KEY, { quota: CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA, updatedAt: now });
-            RecordStore.set(SHORT_WATCH_SETTINGS_KEY, { seconds: CONFIG.SHORT_WATCH_MAX_POS_SEC, days: CONFIG.SHORT_WATCH_EXPIRE_DAY, updatedAt: now });
-            GM_setValue(COLD_ARCHIVE_SETTINGS_KEY, {
-                ...(GM_getValue(COLD_ARCHIVE_SETTINGS_KEY, {}) || {}),
-                ageDays: CONFIG.COLD_ARCHIVE_AGE_DAY,
-                intervalDays: CONFIG.COLD_ARCHIVE_INTERVAL_DAY,
-                enabled: CONFIG.COLD_ARCHIVE_ENABLED,
-                searchAuto: CONFIG.COLD_SEARCH_AUTO,
-                updatedAt: now
-            });
-            if (HistoryViewIndex._index) HistoryViewIndex._rebuild(HistoryViewIndex._index.itemsByKey, true);
-            updateCleanupButtonLabels();
-            refreshOpenHistoryLists();
-            StorageApi.cleanShortWatchRecords();
-            overlay.style.display = 'none';
-            const tooltip = document.getElementById('bvh-setting-tooltip');
-            if (tooltip) tooltip.hidden = true;
-        }).catch(error => alert(`保存设置失败：${error.message}`)));
+            SettingsOperations.run(overlay, 'save', async function saveSettings() {
+                const get = id => Number(overlay.querySelector(`#${id}`).value);
+                const requestedColdAge = StorageRouter.isPrimaryMode() ? 0 : get('bvh-setting-cold-age');
+                if (requestedColdAge === 0 && !CONFIG.COLD_PRIMARY_MODE) {
+                    const saveButton = overlay.querySelector('[data-save]');
+                    const status = overlay.querySelector('[data-cold-status]');
+                    saveButton.disabled = true;
+                    if (status) status.textContent = '正在迁移并核验记录；完成前请勿关闭此页面。';
+                    try {
+                        const result = await StorageRouter.enablePrimaryMode();
+                        if (status) status.textContent = `DB 主存模式已启用：${result.count} 条记录已迁移并核验。`;
+                        const ageControl = overlay.querySelector('#bvh-setting-cold-age');
+                        if (ageControl) ageControl.disabled = true;
+                        const intervalControl = overlay.querySelector('#bvh-setting-cold-interval');
+                        if (intervalControl) intervalControl.disabled = true;
+                        const autoArchiveControl = overlay.querySelector('[data-cold-auto]');
+                        if (autoArchiveControl) autoArchiveControl.disabled = true;
+                        // 迁移成功后，界面立刻按主存模式重新置灰，不必等再次打开设置窗口。
+                        SettingsOperations.sync(overlay);
+                        if (status) status.textContent = `DB 主存模式已启用：${result.count} 条记录已迁移并核验；归档相关设置已置灰，需要回到油猴存储请点“退出主存模式”。`;
+                    } catch (error) {
+                        if (status) status.textContent = `迁移未完成，原存储模式与源记录保留：${error.message}`;
+                        alert(`DB 主存迁移失败，GM 中的原记录已保留：${error.message}`);
+                        return;
+                    }
+                }
+                CONFIG.CONTINUOUS_DEDUP_MODE = overlay.querySelector('#bvh-setting-dedup-mode').value;
+                CONFIG.CONTINUOUS_GAP_MIN = Math.max(1, Math.min(180, Math.round(get('bvh-setting-gap'))));
+                CONFIG.CONTINUOUS_PROGRESS_DELTA = get('bvh-setting-progress');
+                CONFIG.EXPIRE_DAY = get('bvh-setting-expire');
+                CONFIG.EXPIRE_MS = CONFIG.EXPIRE_DAY * 86400000;
+                CONFIG.HISTORY_SYNC_PAGES = get('bvh-setting-pages');
+                CONFIG.RECENT_SNAPSHOT_COUNT = get('bvh-setting-recent');
+                CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA = get('bvh-setting-quota') / 100;
+                CONFIG.SHORT_WATCH_MAX_POS_SEC = get('bvh-setting-short');
+                CONFIG.SHORT_WATCH_EXPIRE_DAY = get('bvh-setting-retention');
+                CONFIG.COLD_ARCHIVE_AGE_DAY = StorageRouter.isPrimaryMode() ? 0 : Math.max(1, requestedColdAge);
+                CONFIG.COLD_ARCHIVE_INTERVAL_DAY = Math.max(1, Math.min(90, get('bvh-setting-cold-interval')));
+                CONFIG.COLD_ARCHIVE_ENABLED = overlay.querySelector('[data-cold-auto]')?.checked === true;
+                CONFIG.COLD_SEARCH_AUTO = overlay.querySelector('[data-cold-search-auto]')?.checked === true;
+                CONFIG.UI_FONT_SIZE = Number(overlay.querySelector('#bvh-setting-font-size').value);
+                const themeState = readColorThemeState();
+                const drafts = overlay._bvhThemeDrafts || themeState.themes;
+                const activePreset = THEME_PRESETS.includes(overlay._bvhThemeActivePreset) ? overlay._bvhThemeActivePreset : themeState.activePreset;
+                const savedThemes = Object.fromEntries(THEME_PRESETS.map(preset => [preset, cloneColorTheme(drafts[preset] || themeState.themes[preset])]));
+                GM_setValue(COLOR_THEME_SETTINGS_KEY, { version: 3, activePreset, themes: savedThemes });
+                const chosenTheme = { ...COLOR_THEMES[activePreset], ...savedThemes[activePreset], preset: activePreset, basePreset: activePreset, mode: activePreset === 'dark' ? 'dark' : 'light' };
+                applyColorTheme(chosenTheme);
+                document.documentElement.style.setProperty('--bvh-ui-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+                overlay.querySelector('.bvh-settings-dialog').style.setProperty('--bvh-setting-font-size', `${CONFIG.UI_FONT_SIZE}px`);
+                const now = Date.now();
+                RecordStore.set(CONTINUOUS_GAP_SETTINGS_KEY, { minutes: CONFIG.CONTINUOUS_GAP_MIN, updatedAt: now });
+                RecordStore.set(CONTINUOUS_PROGRESS_SETTINGS_KEY, { delta: CONFIG.CONTINUOUS_PROGRESS_DELTA, updatedAt: now });
+                RecordStore.set(CONTINUOUS_MODE_SETTINGS_KEY, { mode: CONFIG.CONTINUOUS_DEDUP_MODE, updatedAt: now });
+                RecordStore.set(EXPIRE_SETTINGS_KEY, { days: CONFIG.EXPIRE_DAY, updatedAt: now });
+                RecordStore.set(HISTORY_SYNC_SETTINGS_KEY, { pages: CONFIG.HISTORY_SYNC_PAGES, updatedAt: now });
+                RecordStore.set(RECENT_SNAPSHOT_SETTINGS_KEY, { count: CONFIG.RECENT_SNAPSHOT_COUNT, updatedAt: now });
+                RecordStore.set(RECENT_SNAPSHOT_QUOTA_SETTINGS_KEY, { quota: CONFIG.RECENT_SNAPSHOT_PLAYER_QUOTA, updatedAt: now });
+                RecordStore.set(SHORT_WATCH_SETTINGS_KEY, { seconds: CONFIG.SHORT_WATCH_MAX_POS_SEC, days: CONFIG.SHORT_WATCH_EXPIRE_DAY, updatedAt: now });
+                GM_setValue(COLD_ARCHIVE_SETTINGS_KEY, {
+                    ...(GM_getValue(COLD_ARCHIVE_SETTINGS_KEY, {}) || {}),
+                    ageDays: CONFIG.COLD_ARCHIVE_AGE_DAY,
+                    intervalDays: CONFIG.COLD_ARCHIVE_INTERVAL_DAY,
+                    enabled: CONFIG.COLD_ARCHIVE_ENABLED,
+                    searchAuto: CONFIG.COLD_SEARCH_AUTO,
+                    updatedAt: now
+                });
+                if (HistoryViewIndex._index) HistoryViewIndex._rebuild(HistoryViewIndex._index.itemsByKey, true);
+                updateCleanupButtonLabels();
+                refreshOpenHistoryLists();
+                StorageApi.cleanShortWatchRecords();
+                overlay.style.display = 'none';
+                const tooltip = document.getElementById('bvh-setting-tooltip');
+                if (tooltip) tooltip.hidden = true;
+            }).catch(error => alert(`保存设置失败：${error.message}`));
+        });
         return overlay;
     }
 
@@ -12519,12 +12782,12 @@
         const coldAgeControl = overlay.querySelector('#bvh-setting-cold-age');
         if (coldAgeControl && CONFIG.COLD_PRIMARY_MODE) {
             coldAgeControl.disabled = true;
-            coldAgeControl.title = 'DB 主存模式已永久启用，不能切回 GM 存储。';
+            coldAgeControl.title = 'DB 主存模式已启用：需要回到油猴存储时，请点下面的“退出主存模式”。';
             if (coldEnabledControl) coldEnabledControl.disabled = true;
             const coldIntervalControl = overlay.querySelector('#bvh-setting-cold-interval');
             if (coldIntervalControl) coldIntervalControl.disabled = true;
             const status = overlay.querySelector('[data-cold-status]');
-            if (status) status.textContent = 'DB 主存模式已永久启用；新记录直接写入 IndexedDB。';
+            if (status) status.textContent = 'DB 主存模式已启用；新记录直接写入 IndexedDB，需要回到油猴存储请点“退出主存模式”。';
         }
         SettingsOperations.bind(overlay.querySelector('[data-cold-delete-empty]'), 'click', () => SettingsOperations.run(overlay, 'delete-empty', async () => {
             const status = overlay.querySelector('[data-cold-status]');
@@ -12548,6 +12811,93 @@
             await refreshColdDatabaseInfo(true);
         }));
         const coldFile = overlay.querySelector('[data-cold-file]');
+        // 退出主存模式：先把真实数字盘点出来，再连续确认三步，最后才动开关。
+        SettingsOperations.bind(overlay.querySelector('[data-cold-exit-primary]'), 'click', async () => {
+            const status = overlay.querySelector('[data-cold-status]');
+            if (!StorageRouter.isPrimaryMode()) {
+                if (status) status.textContent = '当前不在 DB 主存模式，不需要退出。';
+                return;
+            }
+            let prep;
+            try { prep = await StorageRouter.preparePrimaryExit(); }
+            catch (error) {
+                if (status) status.textContent = `退出前检查失败，未做任何改动：${error.message}`;
+                return;
+            }
+            if (!prep.ok) {
+                if (status) status.textContent = `本次不能退出，未做任何改动：${prep.reason}`;
+                return;
+            }
+            if (prep.conflict.length) {
+                if (status) {
+                    status.textContent = `本次不能退出：GM 里有 ${prep.conflict.length} 条记录与冷库同名但内容不同` +
+                        `（${prep.conflict.slice(0, 3).join('、')}${prep.conflict.length > 3 ? '…' : ''}）。` +
+                        '为避免产生两份不一致的副本，请先导出完整备份并手动处理这些记录。';
+                }
+                return;
+            }
+            const ok = await openTripleConfirm(overlay, {
+                title: '退出 DB 主存模式（当前库整体转为归档）',
+                steps: [
+                    {
+                        heading: '第 1 步：这次要做什么',
+                        lines: [
+                            `当前主库「${prep.dbName}」里共有 ${prep.count} 条记录，会原样登记为一份普通冷库（归档库）。`,
+                            '整个操作不复制、不合并、不改写任何一条记录，只改“存储模式”和“归档设置”这两处开关。',
+                            prep.identical.length
+                                ? `油猴存储里还留着 ${prep.identical.length} 条与冷库完全相同的旧副本，会在最后一步清掉，让热层真正从零开始。`
+                                : '油猴存储里没有与冷库重复的副本，热层本身就是空的。',
+                            prep.keepOnly.length
+                                ? `另有 ${prep.keepOnly.length} 条记录只存在于油猴存储（冷库里没有），会原样保留在热层，不会丢。`
+                                : '没有“只在油猴存储里”的记录。'
+                        ],
+                        confirm: '我看明白了，继续'
+                    },
+                    {
+                        heading: '第 2 步：退出之后会变成什么样',
+                        lines: [
+                            '!历史面板会看起来“一条记录都没有”：旧记录全部在冷库里，要走搜索框的“查冷库”才看得到，这是正常现象，不是数据丢失。',
+                            '!冷库里的记录不再按“长期记录过期天数”自动清理；清理只作用于油猴热层。想清理冷库要自己用“导入/导出”和备份确认流程处理。',
+                            `!归档年龄会恢复成退出前的设置（${prep.ageDays} 天）；以后新观看先进热层，超过 ${prep.ageDays} 天再归档进这份库。`,
+                            '!如果之后又想回到 DB 主存模式，把归档年龄设成 0 再走一遍三步确认即可；但那时热层里已经有新记录，会一起并入。',
+                            '这项操作只影响存储位置，不影响记录内容；想留一份外部底稿，建议先导出完整备份。'
+                        ],
+                        confirm: '这些后果我接受，继续'
+                    },
+                    {
+                        heading: '第 3 步：最后确认',
+                        lines: [
+                            `即将执行：把「${prep.dbName}」登记为归档库 → 关闭 DB 主存模式 → 清空油猴热层里 ${prep.identical.length} 条重复副本。`,
+                            '!执行中途如果写入失败，脚本会停在主存模式并提示原因；已经改过的开关会回显在设置页，不会静默继续。',
+                            '确认后马上生效，撤销的方式是把归档年龄重新设为 0 再迁移一次。'
+                        ],
+                        confirm: '确认退出主存模式'
+                    }
+                ]
+            });
+            if (!ok) {
+                if (status) status.textContent = '已取消退出，存储模式与所有记录保持原样。';
+                return;
+            }
+            try {
+                const result = await SettingsOperations.run(overlay, 'exit-primary', async () => StorageRouter.disablePrimaryMode());
+                // 归档年龄滑块同步到恢复值，避免界面上仍显示 0。
+                const ageInput = overlay.querySelector('#bvh-setting-cold-age');
+                if (ageInput) {
+                    ageInput.value = String(result.ageDays);
+                    ageInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                if (status) {
+                    status.textContent = `已退出 DB 主存模式：${result.count} 条记录随「${result.dbName}」转为归档库，` +
+                        `油猴热层清空 ${result.cleared} 条重复副本${result.kept ? `、保留 ${result.kept} 条只在热层的记录` : ''}；` +
+                        `归档年龄恢复为 ${result.ageDays} 天。旧记录现在需要“查冷库”才能看到。`;
+                }
+                SettingsOperations.sync(overlay);
+                await refreshColdDatabaseInfo(true);
+            } catch (error) {
+                if (status) status.textContent = `退出未完成，仍处于 DB 主存模式：${error.message}`;
+            }
+        });
         SettingsOperations.bind(overlay.querySelector('[data-cold-import]'), 'click', () => { if (!overlay._bvhTask) coldFile?.click(); });
         SettingsOperations.bind(coldFile, 'change', () => SettingsOperations.run(overlay, 'import', async () => {
             const file = coldFile.files?.[0];

@@ -8,7 +8,7 @@ const { webcrypto } = require('node:crypto');
 const source = fs.readFileSync(path.join(__dirname, '..', 'bilibili-history.user.js'), 'utf8');
 const script = source.replace(
   /\bmainInit\(\)\.catch\(error => console\.error\([^\n]+\)\);\s*\}\)\(GM_getValue,\s*GM_setValue,\s*GM_deleteValue,\s*GM_listValues\);\s*$/,
-  'globalThis.bvhTest = { StorageApi, RecordStore, RecordNormalizer, RecordKey, ErrorLog };\n})(GM_getValue, GM_setValue, GM_deleteValue, GM_listValues);'
+  'globalThis.bvhTest = { StorageApi, StorageRouter, RecordStore, RecordNormalizer, RecordKey, ErrorLog };\n})(GM_getValue, GM_setValue, GM_deleteValue, GM_listValues);'
 );
 assert.match(source, /bvhTest|mainInit\(\)/, 'userscript tail is still the IIFE entry');
 
@@ -76,7 +76,7 @@ const ctx = {
 };
 vm.createContext(ctx);
 vm.runInContext(script, ctx, { filename: 'Bilibili-history.user.js' });
-const { StorageApi, RecordStore, RecordNormalizer, ErrorLog } = ctx.bvhTest;
+const { StorageApi, StorageRouter, RecordStore, RecordNormalizer, ErrorLog } = ctx.bvhTest;
 
 const EXPORTED_KEY = 'bvh_exported_record_keys_v1';
 const CONFIRM_KEY = 'bvh_backup_confirm_v1';
@@ -278,6 +278,21 @@ const record = (title, watchCount = 2, when = Date.now() - 100 * dayMs) => ({
   assert.equal(records.get(CONFIRM_KEY)?.method, 'default_dir', 'confirm metadata records the directory channel');
   assert.ok(records.get(EXPORTED_KEY)?.BVGATE00011, 'records are marked as backed up');
   console.log('exportAllRecords auto-registers after a directory write');
+
+  // 16) 退出主存模式的前置检查：不在主存模式、找不到主库时都直接拒绝，且不改任何存储键。
+  records.clear();
+  const beforeExit = JSON.stringify([...records.entries()]);
+  const notPrimary = await StorageRouter.preparePrimaryExit();
+  assert.equal(notPrimary.ok, false, 'GM mode has nothing to exit');
+  await assert.rejects(() => StorageRouter.disablePrimaryMode(), /不在 DB 主存模式/, 'exit refuses outside primary mode');
+  assert.equal(JSON.stringify([...records.entries()]), beforeExit, 'a refused exit writes nothing');
+  // 主存标志为真但目录里没有对应主库：同样拒绝，绝不把“找不到库”当成“没有记录”继续执行。
+  records.set('bvh_cold_primary_mode_v1', true);
+  const missing = await StorageRouter.preparePrimaryExit();
+  assert.equal(missing.ok, false, 'a missing primary database blocks the exit');
+  assert.match(missing.reason, /找不到当前主库/);
+  records.delete('bvh_cold_primary_mode_v1');
+  console.log('exit pre-checks refuse unsafe states and write nothing');
 
   console.log('backup confirmation gate checks passed');
 })().catch(error => { console.error(error); process.exit(1); });

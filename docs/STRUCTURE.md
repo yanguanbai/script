@@ -180,6 +180,20 @@ DB 主存模式下热层就是当前库，两条出口内容一致，`data-backu
 
 冷库清单、导入 JSON 到冷库、删除空白冷库、导出、CSV、导入、清理、重置、归并、修复、迁移、清空**仍然可用**——`GM_*` 在文件顶部统一改写成 `StorageRouter` 调用，主存模式下走 DB。
 
+### 主存模式的进入与退出（5.10.31 起）
+
+两个方向都要在设置页内走完三步确认（`openTripleConfirm`），不用 `window.confirm`：浏览器连续弹窗会给出“阻止此页面创建更多对话框”，第二步会被静默吞掉，三重确认就失效了。
+
+| 方向 | 入口 | 前置检查 | 实际动作 |
+|---|---|---|---|
+| 进入（`enablePrimaryMode`） | 归档年龄拖到 0 → 点“保存设置” | `previewPrimaryEnable()`（记录数、油猴条数、冷库个数、待落盘条数） | `_migrateToPrimary(true)`：写入 → 逐键回读比对 → 才置标志并删 GM 副本 |
+| 退出（`disablePrimaryMode`） | 冷库组“退出主存模式（当前库转为归档）” | `preparePrimaryExit()`：须在主存模式、写队列为空、主库可读；GM 残留键分三类（`identical` 可清 / `keepOnly` 保留 / `conflict` 拒绝） | 不复制不合并：写回收设置 → 关主存标志 → 删主库指针 → 清 `identical` 副本 → 重建索引 |
+
+退出时先写 `COLD_ARCHIVE_SETTINGS_KEY`（`ageDays` 取 `COLD_PRIMARY_PREV_KEY` 里迁移前记下的值，缺省 30；`targetId` 指向当前主库），最后才关标志，避免出现“模式已关但库未登记”的半态。进入时会在覆盖设置前先写 `COLD_PRIMARY_PREV_KEY`——没有它就无法知道该恢复成多少天。
+
+退出后的语义：主库变成一份普通归档库，热层为空，历史面板需要“查冷库”；冷库记录不再按 `CONFIG.EXPIRE_DAY` 自动清理（`cleanExpireRecords` 只遍历 `GM_listValues()`），这些后果都写在第二步确认里。
+
+
 置灰同时给 `title` 写明原因，并在冷库组顶部显示一条 `bvh-primary-note` 说明，避免“看着能点其实不生效”。
 
 ### 长任务的忙碌状态
@@ -242,3 +256,4 @@ git diff --ignore-all-space -U0 | Select-String '^-[^-]'     # 结构类改动�
   已提供 `GM_download` 档做真检测；若管理器不支持，仍会落到这一档。
 - 启动自动修复 `repairAndCleanLocalRecords` 仍然在写回前不做备份，只在 GM 模式生效。
 - 默认保存目录只做过静态校验与单元测试：`showDirectoryPicker({ id })` 是否被各浏览器接受、以及 `requestPermission` 在 `await` 之后是否仍处于点击手势窗口内，需要在真实浏览器里手测确认。
+- 三步确认面板（`openTripleConfirm`，模块级函数）只做过静态校验：三步文案长度、遮罩层级（`z-index:60`）与第 3 步按钮的实际点击效果需要在真实浏览器中走一遍。
